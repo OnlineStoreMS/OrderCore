@@ -1,0 +1,150 @@
+name: Docker Build & Push (Aliyun ACR)
+
+on:
+  push:
+    branches: [main, dev_yeyazhou]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: '镜像标签（留空则用 sha-xxx）'
+        required: false
+        default: ''
+      targets:
+        description: 'api / web / api,web'
+        required: false
+        default: 'api,web'
+
+concurrency:
+  group: docker-acr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+      full_sha: ${{ steps.meta.outputs.full_sha }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - id: meta
+        run: |
+          SHORT="${GITHUB_SHA::7}"
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            TAG="${{ inputs.image_tag }}"
+          else
+            TAG="sha-${SHORT}"
+          fi
+          {
+            echo "tag=$TAG"
+            echo "short_sha=$SHORT"
+            echo "full_sha=$GITHUB_SHA"
+          } >> "$GITHUB_OUTPUT"
+
+      - id: matrix
+        run: |
+          python3 <<'PY'
+          import json, os
+          all_items = [
+            {"id": "ordercore-api", "type": "api"},
+            {"id": "ordercore-web", "type": "web"},
+          ]
+          filt = os.environ.get("FILTER", "").strip().replace(" ", "")
+          if filt:
+            wanted = {x for x in filt.split(",") if x}
+            out = [i for i in all_items if i["type"] in wanted or i["id"] in wanted]
+            if not out:
+              raise SystemExit(f"no targets matched: {wanted}")
+          else:
+            out = all_items
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write("matrix=" + json.dumps(out) + "\n")
+          PY
+        env:
+          FILTER: ${{ inputs.targets }}
+
+  build-push:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        item: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ALIYUN_ACR_REGISTRY }}
+          username: ${{ secrets.ALIYUN_ACR_USER }}
+          password: ${{ secrets.ALIYUN_ACR_PASSWORD }}
+
+      - name: Build & push API
+        if: matrix.item.type == 'api'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.api
+          push: true
+          tags: |
+            ${{ secrets.ALIYUN_ACR_REGISTRY }}/${{ secrets.ALIYUN_ACR_NAMESPACE }}/${{ matrix.item.id }}:${{ needs.prepare.outputs.tag }}
+            ${{ secrets.ALIYUN_ACR_REGISTRY }}/${{ secrets.ALIYUN_ACR_NAMESPACE }}/${{ matrix.item.id }}:sha-${{ needs.prepare.outputs.short_sha }}
+            ${{ secrets.ALIYUN_ACR_REGISTRY }}/${{ secrets.ALIYUN_ACR_NAMESPACE }}/${{ matrix.item.id }}:latest
+          labels: |
+            org.opencontainers.image.title=${{ matrix.item.id }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            com.osms.git.sha=${{ github.sha }}
+            com.osms.git.short_sha=${{ needs.prepare.outputs.short_sha }}
+            com.osms.image.tag=${{ needs.prepare.outputs.tag }}
+          cache-from: type=gha,scope=${{ matrix.item.id }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.item.id }}
+
+      - name: Build & push Web
+        if: matrix.item.type == 'web'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.web
+          push: true
+          tags: |
+            ${{ secrets.ALIYUN_ACR_REGISTRY }}/${{ secrets.ALIYUN_ACR_NAMESPACE }}/${{ matrix.item.id }}:${{ needs.prepare.outputs.tag }}
+            ${{ secrets.ALIYUN_ACR_REGISTRY }}/${{ secrets.ALIYUN_ACR_NAMESPACE }}/${{ matrix.item.id }}:sha-${{ needs.prepare.outputs.short_sha }}
+            ${{ secrets.ALIYUN_ACR_REGISTRY }}/${{ secrets.ALIYUN_ACR_NAMESPACE }}/${{ matrix.item.id }}:latest
+          labels: |
+            org.opencontainers.image.title=${{ matrix.item.id }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}
+            com.osms.git.sha=${{ github.sha }}
+            com.osms.git.short_sha=${{ needs.prepare.outputs.short_sha }}
+            com.osms.image.tag=${{ needs.prepare.outputs.tag }}
+          cache-from: type=gha,scope=${{ matrix.item.id }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.item.id }}
+
+  summary:
+    needs: [prepare, build-push]
+    runs-on: ubuntu-latest
+    if: success()
+    steps:
+      - run: |
+          REG="${{ secrets.ALIYUN_ACR_REGISTRY }}/${{ secrets.ALIYUN_ACR_NAMESPACE }}"
+          TAG="${{ needs.prepare.outputs.tag }}"
+          SHORT="${{ needs.prepare.outputs.short_sha }}"
+          FULL="${{ needs.prepare.outputs.full_sha }}"
+          {
+            echo "## OrderCore 镜像已推送"
+            echo ""
+            echo "- 标签: \`$TAG\` / \`sha-$SHORT\` / \`latest\`"
+            echo "- Git SHA: \`$FULL\`"
+            echo "- 前缀: \`$REG/\`"
+            echo ""
+            echo "查询运行中镜像提交:"
+            echo "\`\`\`bash"
+            echo "docker inspect --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}' <image>"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"

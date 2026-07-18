@@ -1,0 +1,24 @@
+server:
+  port: 8098
+  mode: debug
+
+database:
+  driver: postgres
+  postgres_dsn: "host=127.0.0.1 user=ordercore password=CHANGE_ME dbname=ordercore port=5432 sslmode=disable TimeZone=Asia/Shanghai"
+
+auth:
+  enabled: true
+  jwt_secret: "change-me-in-production-use-long-random-string"
+
+integrations:
+  productcore_api_url: "http://127.0.0.1:8090"
+  supplycore_api_url: "http://127.0.0.1:8092"
+  storesyncagent_api_url: "http://127.0.0.1:8097"
+  storecore_api_url: "http://127.0.0.1:8094"
+
+cors:
+  allow_origins:
+    - "http://localhost:5182"
+    - "http://127.0.0.1:5182"
+    - "http://localhost:5174"
+    - "http://127.0.0.1:5174"

@@ -1,0 +1,12 @@
+node_modules
+web/dist
+web/node_modules
+bin
+.git
+.tmp
+data
+*.db
+.cursor
+.idea
+.vscode
+*.md
