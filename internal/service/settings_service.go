@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -183,8 +184,10 @@ func (s *SettingsService) executeSyncJob(ctx context.Context, job *model.SyncJob
 				stats = map[string]int{}
 			}
 			stats["refreshed"] = refreshed
-			if rerr != nil && err == nil {
-				return stats, rerr
+			// 列表同步已成功时，刷新限流/部分失败不整单失败（避免误报且状态已写入）
+			if rerr != nil {
+				log.Printf("[sync-job] refresh open orders partial error (list sync ok): %v", rerr)
+				stats["refreshErrors"] = 1
 			}
 		}
 		return stats, nil

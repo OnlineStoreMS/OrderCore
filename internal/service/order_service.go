@@ -736,7 +736,15 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 
 	created, updated, fetched, total := 0, 0, 0, 0
 	seen := map[string]struct{}{}
-	for _, status := range statuses {
+	for i, status := range statuses {
+		if i > 0 {
+			// 快递助手限流：连续查询需间隔数秒
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(3500 * time.Millisecond):
+			}
+		}
 		result, err := s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
 			Platform:      req.Platform,
 			ShopID:        req.ShopID,
@@ -747,7 +755,7 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 			EndDateTime:   req.EndTime,
 		})
 		if err != nil {
-			return nil, err
+			return map[string]int{"created": created, "updated": updated, "fetched": fetched, "total": total}, err
 		}
 		fetched += len(result.Items)
 		total += result.Total
@@ -791,7 +799,14 @@ func (s *OrderService) RefreshOpenKDZSOrders(ctx context.Context, tenantID, oper
 	}
 	refreshed := 0
 	var lastErr error
-	for _, o := range orders {
+	for i, o := range orders {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return refreshed, ctx.Err()
+			case <-time.After(3500 * time.Millisecond):
+			}
+		}
 		tid := o.PlatformOrderID
 		if tid == "" {
 			tid = o.PlatformSysTid
@@ -811,6 +826,14 @@ func (s *OrderService) RefreshOpenKDZSOrders(ctx context.Context, tenantID, oper
 		})
 		if err != nil {
 			lastErr = err
+			// 限流时再等一轮后继续，避免整批刷挂
+			if strings.Contains(err.Error(), "过于频繁") || strings.Contains(err.Error(), "811") {
+				select {
+				case <-ctx.Done():
+					return refreshed, ctx.Err()
+				case <-time.After(3500 * time.Millisecond):
+				}
+			}
 			continue
 		}
 		if result == nil || len(result.Items) == 0 {
