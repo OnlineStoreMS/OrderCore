@@ -197,13 +197,28 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 				// 快递助手已代发：强制同步为已分配（覆盖此前误标的自营，终端态除外）
 				fields["alloc_type"] = hint.AllocType
 				fields["dropship_mode"] = hint.DropshipMode
-				fields["factory_id"] = coalesceStr(req.FactoryID, existing.FactoryID)
-				fields["factory_name"] = coalesceStr(req.FactoryName, existing.FactoryName)
+				fields["factory_id"] = req.FactoryID
+				fields["factory_name"] = req.FactoryName
 				fields["status"] = status
 				statusChanged = fromStatus != status
 				if existing.AllocatedAt == nil {
 					now := time.Now()
 					fields["allocated_at"] = &now
+				}
+			} else if !terminal && channel == model.SourceKDZS && hint.AgentType == model.AgentTypeSelf &&
+				existing.DropshipMode == model.DropshipKDZSFactory {
+				// 纠偏：此前误把自营单当成厂家代发时，回退为待分配
+				fields["alloc_type"] = ""
+				fields["dropship_mode"] = ""
+				fields["factory_id"] = req.FactoryID
+				fields["factory_name"] = req.FactoryName
+				fields["supplier_id"] = 0
+				fields["supplier_name"] = ""
+				fields["allocated_at"] = nil
+				fields["status"] = status
+				statusChanged = fromStatus != status
+				if hint.LogRemark == "" || strings.HasPrefix(hint.LogRemark, "同步") {
+					hint.LogRemark = "纠偏：快递助手实为自营，撤销厂家代发分配"
 				}
 			} else if existing.AllocType == "" && !terminal {
 				fields["factory_id"] = req.FactoryID
@@ -211,8 +226,8 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 				fields["status"] = status
 				statusChanged = fromStatus != status
 			} else if !terminal {
-				fields["factory_id"] = coalesceStr(req.FactoryID, existing.FactoryID)
-				fields["factory_name"] = coalesceStr(req.FactoryName, existing.FactoryName)
+				fields["factory_id"] = req.FactoryID
+				fields["factory_name"] = req.FactoryName
 			}
 
 			if err := tx.UpdateOrderFields(tenantID, existing.ID, fields); err != nil {
@@ -968,10 +983,11 @@ func resolveKDZSAgentType(agentType int, factoryID, factoryName string) int {
 	if agentType == model.AgentTypeSelf {
 		return model.AgentTypeSelf
 	}
-	// agentType 未返回时：有厂家即视为代发（快递助手真实信息）
-	if strings.TrimSpace(factoryID) != "" || strings.TrimSpace(factoryName) != "" {
+	// 仅厂家名称可作兜底；裸 factoryId 可能是商家自身 factoryUserId，不可当作代发
+	if strings.TrimSpace(factoryName) != "" {
 		return model.AgentTypeFactory
 	}
+	_ = factoryID
 	return model.AgentTypeSelf
 }
 
