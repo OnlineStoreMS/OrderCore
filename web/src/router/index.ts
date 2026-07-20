@@ -27,6 +27,7 @@ const router = createRouter({
         { path: 'orders/:id', name: 'OrderDetail', component: () => import('../views/order/OrderDetail.vue'), meta: { title: '订单详情', section: '订单' } },
         { path: 'allocate', name: 'Allocate', component: () => import('../views/order/AllocateList.vue'), meta: { title: '分配管理' } },
         { path: 'bindings', name: 'Bindings', component: () => import('../views/binding/BindingList.vue'), meta: { title: '厂家绑定' } },
+        { path: 'settings', name: 'Settings', component: () => import('../views/settings/Settings.vue'), meta: { title: '同步与推送' } },
       ],
     },
   ],

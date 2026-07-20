@@ -17,12 +17,17 @@ import (
 )
 
 type Handlers struct {
-	orders *service.OrderService
-	supply *supplycore.Client
+	orders      *service.OrderService
+	supply      *supplycore.Client
+	onAllocated func(tenantID, orderID uint64)
 }
 
 func NewHandlers(orders *service.OrderService, supply *supplycore.Client) *Handlers {
 	return &Handlers{orders: orders, supply: supply}
+}
+
+func (h *Handlers) SetOnAllocated(fn func(tenantID, orderID uint64)) {
+	h.onAllocated = fn
 }
 
 func (h *Handlers) Dashboard(c *gin.Context) {
@@ -114,6 +119,9 @@ func (h *Handlers) Allocate(c *gin.Context) {
 	if err != nil {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return
+	}
+	if h.onAllocated != nil && o != nil && o.SupplierID > 0 {
+		h.onAllocated(authcontext.TenantID(c), o.ID)
 	}
 	response.OK(c, o)
 }

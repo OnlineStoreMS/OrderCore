@@ -8,6 +8,7 @@ import {
   labelAgentType,
   labelAlloc,
   labelDropship,
+  labelEcommerceStatus,
   labelKDZSStatus,
   labelSource,
   labelStatus,
@@ -18,6 +19,7 @@ import {
   type SupplierBinding,
   type SupplierItem,
 } from '../../api/orders'
+import { pushOrder } from '../../api/settings'
 
 const route = useRoute()
 const router = useRouter()
@@ -45,11 +47,18 @@ const shipForm = reactive({
   callback: true,
 })
 
+function hasBlockingEcommerce(o: Order) {
+  const text = `${o.ecommerceStatusText || ''} ${o.afterSaleStatusText || ''} ${o.ecommerceStatus || ''} ${o.afterSaleStatus || ''}`
+  return /退款|售后|关闭|WAIT_SELLER_AGREE|REFUNDING|REFUND_SUCCESS|TRADE_CLOSED/i.test(text)
+}
+
 const canAllocate = computed(() => {
   const o = order.value
   if (!o) return false
+  if (o.status === 'closed') return false
   // 快递助手已推厂家代发：只跟踪，不再二次分配
   if (o.sourceChannel === 'kdzs' && o.agentType === 2) return false
+  if (o.sourceChannel === 'kdzs' && hasBlockingEcommerce(o)) return false
   const s = o.status
   return s === 'pending_ship' || s === 'allocated' || s === 'purchasing'
 })
@@ -60,6 +69,7 @@ const canShip = computed(() => {
   if (o.shipEntryLocked) return false
   if (o.status === 'shipped' || o.status === 'completed' || o.status === 'closed') return false
   if (o.allocType === 'dropship' && o.dropshipMode === 'kdzs_factory') return false
+  if (o.sourceChannel === 'kdzs' && hasBlockingEcommerce(o)) return false
   return !!o.allocType
 })
 
@@ -134,6 +144,15 @@ async function submitShip() {
   }
 }
 
+async function onPushSupplier() {
+  try {
+    await pushOrder(id)
+    ElMessage.success('已推送给供应商渠道')
+  } catch (e: any) {
+    ElMessage.error(e.message || '推送失败')
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -150,6 +169,7 @@ onMounted(load)
           <el-button type="success" disabled>填写物流</el-button>
         </el-tooltip>
         <el-button v-else-if="canShip" type="success" @click="shipVisible = true">填写物流</el-button>
+        <el-button v-if="order" @click="onPushSupplier">推送供应商</el-button>
       </div>
     </div>
 
@@ -162,6 +182,10 @@ onMounted(load)
         <el-descriptions-item label="快递助手状态">
           {{ labelKDZSStatus(order) }}
           <span v-if="order.sourceChannel === 'kdzs'" class="muted"> · {{ labelAgentType(order.agentType) }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="电商订单状态">
+          {{ labelEcommerceStatus(order) }}
+          <div v-if="order.afterSaleStatusText" class="muted">售后：{{ order.afterSaleStatusText }}</div>
         </el-descriptions-item>
         <el-descriptions-item label="发货入口">
           <el-tag v-if="order.shipEntryLocked" type="warning" size="small">已锁定</el-tag>

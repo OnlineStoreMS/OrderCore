@@ -87,6 +87,10 @@ type Order struct {
 	OrderedAt        *time.Time `json:"orderedAt,omitempty"`
 	PlatformStatus     string     `gorm:"size:64" json:"platformStatus"`         // 快递助手状态码 wait_audit/wait_send
 	PlatformStatusText string     `gorm:"size:64" json:"platformStatusText"`     // 快递助手状态文案
+	EcommerceStatus     string    `gorm:"size:64;index" json:"ecommerceStatus"`     // 电商平台订单状态码
+	EcommerceStatusText string    `gorm:"size:64" json:"ecommerceStatusText"`       // 电商平台订单状态文案
+	AfterSaleStatus     string    `gorm:"size:64" json:"afterSaleStatus"`           // 售后状态码
+	AfterSaleStatusText string    `gorm:"size:64" json:"afterSaleStatusText"`       // 售后状态文案
 	AgentType          int        `gorm:"default:0" json:"agentType"`            // 1自营 2厂家代发
 	ShipEntryLocked    bool       `gorm:"default:false" json:"shipEntryLocked"`  // 锁定填单号发货入口
 	ShipLockReason     string     `gorm:"size:256" json:"shipLockReason"`        // 锁定原因说明

@@ -45,6 +45,10 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.OrderStatusLog{},
 		&model.OrderShipment{},
 		&model.SupplierSourceBinding{},
+		&model.SyncJob{},
+		&model.NotificationChannel{},
+		&model.PushRule{},
+		&model.PushLog{},
 	); err != nil {
 		return err
 	}

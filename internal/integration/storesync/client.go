@@ -41,6 +41,7 @@ type OrderQuery struct {
 	PageSize      int
 	StartDateTime string
 	EndDateTime   string
+	Tid           string
 }
 
 type TradeGoods struct {
@@ -62,19 +63,23 @@ type TradeOrder struct {
 	ReceiverMobile    string       `json:"receiverMobile"`
 	ReceiverAddress   string       `json:"receiverAddress"`
 	Payment           float64      `json:"payment"`
-	TradeStatus       string       `json:"tradeStatus"`
-	StatusText        string       `json:"statusText"`
-	CreateTime        string       `json:"createTime"`
-	PayTime           string       `json:"payTime"`
-	ShopName          string       `json:"shopName"`
-	ShopID            string       `json:"shopId"`
-	Goods             []TradeGoods `json:"goods"`
-	BuyerMemo         string       `json:"buyerMemo"`
-	SellerMemo        string       `json:"sellerMemo"`
-	AgentType         int          `json:"agentType"`
-	FactoryID         string       `json:"factoryId"`
-	FactoryName       string       `json:"factoryName"`
-	FormattedReceiver string       `json:"formattedReceiver"`
+	TradeStatus             string       `json:"tradeStatus"`
+	StatusText              string       `json:"statusText"`
+	PlatformOrderStatus     string       `json:"platformOrderStatus"`
+	PlatformOrderStatusText string       `json:"platformOrderStatusText"`
+	AfterSaleStatus         string       `json:"afterSaleStatus"`
+	AfterSaleStatusText     string       `json:"afterSaleStatusText"`
+	CreateTime              string       `json:"createTime"`
+	PayTime                 string       `json:"payTime"`
+	ShopName                string       `json:"shopName"`
+	ShopID                  string       `json:"shopId"`
+	Goods                   []TradeGoods `json:"goods"`
+	BuyerMemo               string       `json:"buyerMemo"`
+	SellerMemo              string       `json:"sellerMemo"`
+	AgentType               int          `json:"agentType"`
+	FactoryID               string       `json:"factoryId"`
+	FactoryName             string       `json:"factoryName"`
+	FormattedReceiver       string       `json:"formattedReceiver"`
 }
 
 type OrderListResult struct {
@@ -116,6 +121,9 @@ func (c *Client) ListOrders(ctx context.Context, token string, q OrderQuery) (*O
 	}
 	if q.EndDateTime != "" {
 		qs.Set("endDateTime", q.EndDateTime)
+	}
+	if q.Tid != "" {
+		qs.Set("tid", q.Tid)
 	}
 	u.RawQuery = qs.Encode()
 

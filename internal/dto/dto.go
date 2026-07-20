@@ -55,6 +55,10 @@ type IngestOrderRequest struct {
 	PayTime              string           `json:"payTime"`
 	OrderTime            string           `json:"orderTime"`
 	PlatformStatusText   string           `json:"platformStatusText"`
+	EcommerceStatus      string           `json:"ecommerceStatus"`
+	EcommerceStatusText  string           `json:"ecommerceStatusText"`
+	AfterSaleStatus      string           `json:"afterSaleStatus"`
+	AfterSaleStatusText  string           `json:"afterSaleStatusText"`
 	AgentType            int              `json:"agentType"`
 	Remark               string           `json:"remark"`
 	SellerRemark         string           `json:"sellerRemark"`

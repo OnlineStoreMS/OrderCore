@@ -165,14 +165,18 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 				"pay_amount":           req.PayAmount,
 				"freight_amount":       req.FreightAmount,
 				"pay_status":           req.PayStatus,
-				"platform_status":      req.PlatformStatus,
-				"platform_status_text": req.PlatformStatusText,
-				"agent_type":           hint.AgentType,
-				"ship_entry_locked":    hint.ShipEntryLocked,
-				"ship_lock_reason":     hint.ShipLockReason,
-				"remark":               req.Remark,
-				"seller_remark":        req.SellerRemark,
-				"raw_payload":          req.RawPayload,
+				"platform_status":       req.PlatformStatus,
+				"platform_status_text":  req.PlatformStatusText,
+				"ecommerce_status":      req.EcommerceStatus,
+				"ecommerce_status_text": req.EcommerceStatusText,
+				"after_sale_status":     req.AfterSaleStatus,
+				"after_sale_status_text": req.AfterSaleStatusText,
+				"agent_type":            hint.AgentType,
+				"ship_entry_locked":     hint.ShipEntryLocked,
+				"ship_lock_reason":      hint.ShipLockReason,
+				"remark":                req.Remark,
+				"seller_remark":         req.SellerRemark,
+				"raw_payload":           req.RawPayload,
 			}
 			if t := parseTime(req.PayTime); t != nil {
 				fields["pay_time"] = t
@@ -183,8 +187,12 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 
 			statusChanged := false
 			terminal := existing.Status == model.StatusShipped || existing.Status == model.StatusCompleted || existing.Status == model.StatusClosed
-			// 快递助手已代发：同步为已分配（不覆盖已发货/完成）
-			if !terminal && hint.ApplyDropshipAlloc {
+			// 退款成功/交易关闭：同步关闭（不覆盖已发货/已完成）
+			if !terminal && status == model.StatusClosed {
+				fields["status"] = status
+				statusChanged = fromStatus != status
+			} else if !terminal && hint.ApplyDropshipAlloc {
+				// 快递助手已代发：同步为已分配（不覆盖已发货/完成）
 				if existing.AllocType == "" || existing.Status == model.StatusPendingShip {
 					fields["alloc_type"] = hint.AllocType
 					fields["dropship_mode"] = hint.DropshipMode
@@ -202,7 +210,6 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 				fields["status"] = status
 				statusChanged = fromStatus != status
 			} else if !terminal {
-				// 已分配的自营单：同步后若进入待发货且非厂家代发，则解锁填单号
 				fields["factory_id"] = coalesceStr(req.FactoryID, existing.FactoryID)
 				fields["factory_name"] = coalesceStr(req.FactoryName, existing.FactoryName)
 			}
@@ -264,12 +271,16 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 		PayAmount:          req.PayAmount,
 		FreightAmount:      req.FreightAmount,
 		PayStatus:          req.PayStatus,
-		PlatformStatus:     req.PlatformStatus,
-		PlatformStatusText: req.PlatformStatusText,
-		AgentType:          hint.AgentType,
-		ShipEntryLocked:    hint.ShipEntryLocked,
-		ShipLockReason:     hint.ShipLockReason,
-		Remark:             req.Remark,
+		PlatformStatus:      req.PlatformStatus,
+		PlatformStatusText:  req.PlatformStatusText,
+		EcommerceStatus:     req.EcommerceStatus,
+		EcommerceStatusText: req.EcommerceStatusText,
+		AfterSaleStatus:     req.AfterSaleStatus,
+		AfterSaleStatusText: req.AfterSaleStatusText,
+		AgentType:           hint.AgentType,
+		ShipEntryLocked:     hint.ShipEntryLocked,
+		ShipLockReason:      hint.ShipLockReason,
+		Remark:              req.Remark,
 		SellerRemark:       req.SellerRemark,
 		FactoryID:          req.FactoryID,
 		FactoryName:        req.FactoryName,
@@ -319,6 +330,9 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	}
 	if o.SourceChannel == model.SourceKDZS && o.AgentType == model.AgentTypeFactory {
 		return nil, fmt.Errorf("快递助手已推厂家代发，无需在订单中心再分配")
+	}
+	if blocked, reason := ecommerceBlocksFulfillment(o.EcommerceStatus, o.EcommerceStatusText, o.AfterSaleStatus, o.AfterSaleStatusText); blocked {
+		return nil, fmt.Errorf("%s", reason)
 	}
 
 	allocType := strings.TrimSpace(req.AllocType)
@@ -461,6 +475,9 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		if reason == "" {
 			reason = "当前订单已锁定填单号发货"
 		}
+		return nil, fmt.Errorf("%s", reason)
+	}
+	if blocked, reason := ecommerceBlocksFulfillment(o.EcommerceStatus, o.EcommerceStatusText, o.AfterSaleStatus, o.AfterSaleStatusText); blocked {
 		return nil, fmt.Errorf("%s", reason)
 	}
 	if o.AllocType == model.AllocDropship && o.DropshipMode == model.DropshipKDZSFactory {
@@ -610,12 +627,9 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 		total += result.Total
 		for _, t := range result.Items {
 			ingest := mapTradeToIngest(t)
-			if ingest.PlatformStatus == "" {
-				ingest.PlatformStatus = status
-			}
-			if ingest.PlatformStatusText == "" {
-				ingest.PlatformStatusText = kdzsPlatformStatusText(ingest.PlatformStatus)
-			}
+			// 快递助手列表态以本次同步筛选项为准；电商平台状态保留在 ecommerceStatus
+			ingest.PlatformStatus = status
+			ingest.PlatformStatusText = kdzsPlatformStatusText(status)
 			key := ingest.PlatformOrderID
 			if key == "" {
 				key = ingest.PlatformSysTid
@@ -638,6 +652,57 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 		}
 	}
 	return map[string]int{"created": created, "updated": updated, "fetched": fetched, "total": total}, nil
+}
+
+// RefreshOpenKDZSOrders 按平台单号回查快递助手，刷新未完结订单的状态/售后等信息。
+func (s *OrderService) RefreshOpenKDZSOrders(ctx context.Context, tenantID, operatorID uint64, token string, limit int) (int, error) {
+	if s.storeSync == nil {
+		return 0, fmt.Errorf("StoreSyncAgent 未配置")
+	}
+	orders, err := s.repos.ListOpenKDZSOrders(tenantID, limit)
+	if err != nil {
+		return 0, err
+	}
+	refreshed := 0
+	var lastErr error
+	for _, o := range orders {
+		tid := o.PlatformOrderID
+		if tid == "" {
+			tid = o.PlatformSysTid
+		}
+		if tid == "" {
+			continue
+		}
+		platform := o.Platform
+		if platform == "" {
+			platform = "FXG"
+		}
+		result, err := s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
+			Platform:  platform,
+			Tid:       tid,
+			PageNo:    1,
+			PageSize:  5,
+		})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if result == nil || len(result.Items) == 0 {
+			continue
+		}
+		ingest := mapTradeToIngest(result.Items[0])
+		// 回查时保留原快递助手列表态（若不在待推/待发列表仍用原值）
+		if ingest.PlatformStatus == "" {
+			ingest.PlatformStatus = o.PlatformStatus
+			ingest.PlatformStatusText = o.PlatformStatusText
+		}
+		if _, _, err := s.Ingest(tenantID, operatorID, ingest); err != nil {
+			lastErr = err
+			continue
+		}
+		refreshed++
+	}
+	return refreshed, lastErr
 }
 
 func (s *OrderService) SyncFromStore(ctx context.Context, tenantID, operatorID uint64, req dto.SyncStoreRequest, token string) (map[string]int, error) {
@@ -820,34 +885,43 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 	if addrFull == "" {
 		addrFull = t.ReceiverAddress
 	}
-	statusText := t.StatusText
-	if statusText == "" {
-		statusText = kdzsPlatformStatusText(t.TradeStatus)
+	kdzsText := t.StatusText
+	if kdzsText == "" {
+		kdzsText = kdzsPlatformStatusText(t.TradeStatus)
+	}
+	ecomStatus := t.PlatformOrderStatus
+	ecomText := t.PlatformOrderStatusText
+	if ecomText == "" && ecomStatus != "" {
+		ecomText = ecommerceStatusText(ecomStatus)
 	}
 	return dto.IngestOrderRequest{
-		SourceChannel:      model.SourceKDZS,
-		Platform:           t.Platform,
-		PlatformOrderID:    platformOrderID,
-		PlatformSysTid:     sysTid,
-		ShopID:             t.ShopID,
-		ShopName:           t.ShopName,
-		Status:             model.StatusPendingShip,
-		PlatformStatus:     t.TradeStatus,
-		PlatformStatusText: statusText,
-		AgentType:          t.AgentType,
-		BuyerNick:          t.BuyerNick,
-		BuyerName:          t.ReceiverName,
-		BuyerPhone:         t.ReceiverMobile,
-		TotalAmount:        t.Payment,
-		PayAmount:          t.Payment,
-		PayStatus:          "paid",
-		PayTime:            t.PayTime,
-		OrderTime:          t.CreateTime,
-		Remark:             t.BuyerMemo,
-		SellerRemark:       t.SellerMemo,
-		FactoryID:          t.FactoryID,
-		FactoryName:        t.FactoryName,
-		RawPayload:         string(raw),
+		SourceChannel:       model.SourceKDZS,
+		Platform:            t.Platform,
+		PlatformOrderID:     platformOrderID,
+		PlatformSysTid:      sysTid,
+		ShopID:              t.ShopID,
+		ShopName:            t.ShopName,
+		Status:              model.StatusPendingShip,
+		PlatformStatus:      t.TradeStatus,
+		PlatformStatusText:  kdzsText,
+		EcommerceStatus:     ecomStatus,
+		EcommerceStatusText: ecomText,
+		AfterSaleStatus:     t.AfterSaleStatus,
+		AfterSaleStatusText: t.AfterSaleStatusText,
+		AgentType:           t.AgentType,
+		BuyerNick:           t.BuyerNick,
+		BuyerName:           t.ReceiverName,
+		BuyerPhone:          t.ReceiverMobile,
+		TotalAmount:         t.Payment,
+		PayAmount:           t.Payment,
+		PayStatus:           "paid",
+		PayTime:             t.PayTime,
+		OrderTime:           t.CreateTime,
+		Remark:              t.BuyerMemo,
+		SellerRemark:        t.SellerMemo,
+		FactoryID:           t.FactoryID,
+		FactoryName:         t.FactoryName,
+		RawPayload:          string(raw),
 		Address: &dto.AddressInput{
 			Name:     t.ReceiverName,
 			Phone:    t.ReceiverMobile,
@@ -915,6 +989,25 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 	default:
 		h.ShipEntryLocked, h.ShipLockReason = computeShipLock(channel, req.PlatformStatus, agentType, "")
 	}
+
+	// 电商订单/售后状态影响履约：关闭或锁定
+	if closed, reason := ecommerceShouldClose(req.EcommerceStatus, req.EcommerceStatusText, req.AfterSaleStatus); closed {
+		h.Status = model.StatusClosed
+		h.AllocType = ""
+		h.DropshipMode = ""
+		h.ApplyDropshipAlloc = false
+		h.ShipEntryLocked = true
+		h.ShipLockReason = reason
+		h.LogRemark = reason
+		return h
+	}
+	if blocked, reason := ecommerceBlocksFulfillment(req.EcommerceStatus, req.EcommerceStatusText, req.AfterSaleStatus, req.AfterSaleStatusText); blocked {
+		h.ShipEntryLocked = true
+		h.ShipLockReason = reason
+		if h.LogRemark == "" || strings.HasPrefix(h.LogRemark, "同步") {
+			h.LogRemark = h.LogRemark + "；" + reason
+		}
+	}
 	return h
 }
 
@@ -929,6 +1022,80 @@ func computeShipLock(channel, platformStatus string, agentType int, dropshipMode
 		return true, "仅快递助手「待发货」自营单可填单号发货"
 	}
 	return false, ""
+}
+
+func ecommerceShouldClose(ecomStatus, ecomText, afterSale string) (bool, string) {
+	code := strings.ToUpper(strings.TrimSpace(ecomStatus))
+	as := strings.ToUpper(strings.TrimSpace(afterSale))
+	text := ecomText
+	switch code {
+	case "TRADE_CLOSED", "ORDER_CANCEL", "CANCEL", "CLOSED", "REFUND_SUCCESS", "REFUNDED", "SUCCESS_REFUND":
+		return true, "电商订单已关闭/退款成功"
+	}
+	if as == "REFUND_SUCCESS" {
+		return true, "售后退款成功，订单关闭"
+	}
+	if strings.Contains(text, "退款成功") || strings.Contains(text, "交易关闭") {
+		return true, "电商订单状态：" + text
+	}
+	return false, ""
+}
+
+func ecommerceBlocksFulfillment(ecomStatus, ecomText, afterSale, afterSaleText string) (bool, string) {
+	if closed, reason := ecommerceShouldClose(ecomStatus, ecomText, afterSale); closed {
+		return true, reason
+	}
+	as := strings.ToUpper(strings.TrimSpace(afterSale))
+	switch as {
+	case "WAIT_SELLER_AGREE", "WAIT_BUYER_RETURN_ITEM", "WAIT_SELLER_CONFIRM_RECEIVE",
+		"WAIT_BUYER_MODIFY", "WAIT_SEND_EXCHANGE_ITEM", "WAIT_RECEIVE_EXCHANGE_ITEM":
+		label := afterSaleText
+		if label == "" {
+			label = as
+		}
+		return true, "存在进行中售后（" + label + "），暂停分配/发货"
+	}
+	code := strings.ToUpper(strings.TrimSpace(ecomStatus))
+	switch code {
+	case "REFUNDING", "REFUND", "IN_REFUND", "PARTIAL_REFUNDING", "WAIT_BUYER_PAY", "UNPAID":
+		label := ecomText
+		if label == "" {
+			label = ecommerceStatusText(code)
+		}
+		return true, "电商订单状态不允许履约（" + label + "）"
+	}
+	if strings.Contains(ecomText, "退款中") || strings.Contains(ecomText, "申请退款") {
+		return true, "电商订单状态不允许履约（" + ecomText + "）"
+	}
+	if strings.Contains(afterSaleText, "等待卖家同意") || strings.Contains(afterSaleText, "申请退款") {
+		return true, "存在进行中售后（" + afterSaleText + "），暂停分配/发货"
+	}
+	return false, ""
+}
+
+func ecommerceStatusText(code string) string {
+	switch strings.ToUpper(strings.TrimSpace(code)) {
+	case "WAIT_BUYER_PAY", "UNPAID":
+		return "待付款"
+	case "ORDER_PAID", "WAIT_SELLER_SEND_GOODS", "WAIT_SELLER_STOCK_OUT", "PAID":
+		return "待发货"
+	case "SELLER_CONSIGNED", "ORDER_SHIPPED", "WAIT_BUYER_CONFIRM_GOODS", "SHIPPED":
+		return "已发货"
+	case "ORDER_COMPLETED", "TRADE_FINISHED", "COMPLETED", "FINISHED", "SUCCESS":
+		return "交易完成"
+	case "TRADE_CLOSED", "ORDER_CANCEL", "CANCEL", "CLOSED":
+		return "交易关闭"
+	case "REFUNDING", "REFUND", "IN_REFUND":
+		return "退款中"
+	case "REFUND_SUCCESS", "REFUNDED", "SUCCESS_REFUND":
+		return "退款成功"
+	case "WAIT_SELLER_AGREE":
+		return "申请退款"
+	case "PARTIAL_REFUNDING":
+		return "部分退款中"
+	default:
+		return code
+	}
 }
 
 func kdzsPlatformStatusText(status string) string {

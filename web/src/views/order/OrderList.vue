@@ -8,6 +8,7 @@ import {
   formatDateTime,
   formatRemark,
   labelAgentType,
+  labelEcommerceStatus,
   labelKDZSStatus,
   labelPlatform,
   labelStatus,
@@ -254,6 +255,17 @@ onMounted(load)
           <template v-if="row.sourceChannel === 'kdzs'">
             <el-tag size="small">{{ labelKDZSStatus(row) }}</el-tag>
             <div class="kdzs-meta">{{ labelAgentType(row.agentType) }}</div>
+          </template>
+          <span v-else>-</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="电商订单状态" min-width="140" show-overflow-tooltip>
+        <template #default="{ row }">
+          <template v-if="row.sourceChannel === 'kdzs'">
+            <el-tag
+              size="small"
+              :type="(row.ecommerceStatusText || row.afterSaleStatusText || '').includes('退') ? 'danger' : 'warning'"
+            >{{ labelEcommerceStatus(row) }}</el-tag>
           </template>
           <span v-else>-</span>
         </template>

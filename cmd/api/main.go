@@ -33,7 +33,11 @@ func main() {
 	}
 	log.Printf("database connected: driver=%s", cfg.Database.Driver)
 
-	engine := router.Setup(db, cfg)
+	engine, syncSched := router.Setup(db, cfg)
+	syncSched.Start()
+	defer syncSched.Stop()
+	log.Printf("sync scheduler started")
+
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	log.Printf("OrderCore API listening on http://localhost%s", addr)
 	if err := engine.Run(addr); err != nil {

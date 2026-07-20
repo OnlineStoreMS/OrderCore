@@ -59,6 +59,10 @@ export interface Order {
   orderedAt?: string
   platformStatus?: string
   platformStatusText?: string
+  ecommerceStatus?: string
+  ecommerceStatusText?: string
+  afterSaleStatus?: string
+  afterSaleStatusText?: string
   agentType?: number
   shipEntryLocked?: boolean
   shipLockReason?: string
@@ -179,6 +183,14 @@ export function labelKDZSStatus(order: Pick<Order, 'platformStatus' | 'platformS
     return platformStatusLabels[order.platformStatus]
   }
   return order.platformStatus || '-'
+}
+
+export function labelEcommerceStatus(order: Pick<Order, 'ecommerceStatus' | 'ecommerceStatusText' | 'afterSaleStatus' | 'afterSaleStatusText' | 'sourceChannel'>) {
+  if (order.sourceChannel !== 'kdzs') return '-'
+  const main = order.ecommerceStatusText || order.ecommerceStatus || ''
+  const after = order.afterSaleStatusText || order.afterSaleStatus || ''
+  if (main && after && after !== '—' && after !== '-') return `${main} / ${after}`
+  return main || after || '-'
 }
 
 export function labelAgentType(v?: number) {
