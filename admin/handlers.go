@@ -17,17 +17,12 @@ import (
 )
 
 type Handlers struct {
-	orders      *service.OrderService
-	supply      *supplycore.Client
-	onAllocated func(tenantID, orderID uint64)
+	orders *service.OrderService
+	supply *supplycore.Client
 }
 
 func NewHandlers(orders *service.OrderService, supply *supplycore.Client) *Handlers {
 	return &Handlers{orders: orders, supply: supply}
-}
-
-func (h *Handlers) SetOnAllocated(fn func(tenantID, orderID uint64)) {
-	h.onAllocated = fn
 }
 
 func (h *Handlers) Dashboard(c *gin.Context) {
@@ -96,7 +91,7 @@ func (h *Handlers) Ingest(c *gin.Context) {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	o, created, err := h.orders.Ingest(authcontext.TenantID(c), authcontext.UserID(c), req)
+	o, created, err := h.orders.Ingest(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), req, authcontext.BearerToken(c))
 	if err != nil {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return
@@ -119,9 +114,6 @@ func (h *Handlers) Allocate(c *gin.Context) {
 	if err != nil {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return
-	}
-	if h.onAllocated != nil && o != nil && o.SupplierID > 0 {
-		h.onAllocated(authcontext.TenantID(c), o.ID)
 	}
 	response.OK(c, o)
 }
@@ -256,6 +248,84 @@ func (h *Handlers) DeleteBinding(c *gin.Context) {
 		return
 	}
 	if err := h.orders.DeleteBinding(authcontext.TenantID(c), id); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"ok": true})
+}
+
+func (h *Handlers) GetAllocSettings(c *gin.Context) {
+	cfg, err := h.orders.GetAllocSettings(authcontext.TenantID(c))
+	if err != nil {
+		response.Fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	response.OK(c, cfg)
+}
+
+func (h *Handlers) UpdateAllocSettings(c *gin.Context) {
+	var req dto.AllocSettingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	cfg, err := h.orders.UpdateAllocSettings(authcontext.TenantID(c), req)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, cfg)
+}
+
+func (h *Handlers) ListSkuSupplierRules(c *gin.Context) {
+	list, err := h.orders.ListSkuSupplierRules(authcontext.TenantID(c), c.Query("keyword"))
+	if err != nil {
+		response.Fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	response.OK(c, list)
+}
+
+func (h *Handlers) CreateSkuSupplierRule(c *gin.Context) {
+	var req dto.SkuSupplierRuleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	rule, err := h.orders.CreateSkuSupplierRule(authcontext.TenantID(c), req)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.Created(c, rule)
+}
+
+func (h *Handlers) UpdateSkuSupplierRule(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, "无效 ID")
+		return
+	}
+	var req dto.SkuSupplierRuleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	rule, err := h.orders.UpdateSkuSupplierRule(authcontext.TenantID(c), id, req)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, rule)
+}
+
+func (h *Handlers) DeleteSkuSupplierRule(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, "无效 ID")
+		return
+	}
+	if err := h.orders.DeleteSkuSupplierRule(authcontext.TenantID(c), id); err != nil {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return
 	}

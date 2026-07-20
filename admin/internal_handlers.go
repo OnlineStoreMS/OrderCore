@@ -38,7 +38,7 @@ func (h *Handlers) InternalIngest(c *gin.Context) {
 	if tenantID == 0 {
 		tenantID = internalTenantID(c)
 	}
-	o, created, err := h.orders.Ingest(tenantID, 0, req.IngestOrderRequest)
+	o, created, err := h.orders.Ingest(c.Request.Context(), tenantID, 0, req.IngestOrderRequest, "")
 	if err != nil {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return

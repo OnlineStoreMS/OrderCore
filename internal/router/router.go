@@ -48,8 +48,8 @@ func Setup(db *gorm.DB, cfg *config.Config) (*gin.Engine, *scheduler.SyncSchedul
 
 	sched := scheduler.NewSyncScheduler(settingsSvc)
 
-	// 分配成功后异步推送给供应商
-	h.SetOnAllocated(func(tenantID, orderID uint64) {
+	// 分配成功后异步推送给供应商（含 SKU 自动分配）
+	orderSvc.SetOnAllocated(func(tenantID, orderID uint64) {
 		settingsSvc.PushAllocatedAsync(tenantID, orderID)
 	})
 

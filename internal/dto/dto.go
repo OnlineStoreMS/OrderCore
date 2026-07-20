@@ -99,6 +99,21 @@ type BindingRequest struct {
 	Remark              string `json:"remark"`
 }
 
+type AllocSettingsRequest struct {
+	Enabled  bool   `json:"enabled"`
+	Strategy string `json:"strategy"`
+}
+
+type SkuSupplierRuleRequest struct {
+	SkuCode      string `json:"skuCode" binding:"required"`
+	SupplierID   uint64 `json:"supplierId" binding:"required"`
+	SupplierCode string `json:"supplierCode"`
+	SupplierName string `json:"supplierName" binding:"required"`
+	Priority     int    `json:"priority"`
+	Status       *int8  `json:"status"`
+	Remark       string `json:"remark"`
+}
+
 type SyncKDZSRequest struct {
 	Platform     string   `json:"platform"`
 	ShopID       string   `json:"shopId"`

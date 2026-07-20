@@ -24,7 +24,7 @@ function navigate(path: string) {
     <el-menu
       :default-active="activeMenu"
       :collapse="collapsed"
-      :default-openeds="['orders']"
+      :default-openeds="['orders', 'allocate']"
       background-color="#001529"
       text-color="#ffffffa6"
       active-text-color="#fff"
@@ -38,9 +38,11 @@ function navigate(path: string) {
         <el-menu-item index="/orders" @click="navigate('/orders')">订单列表</el-menu-item>
       </el-sub-menu>
 
-      <el-menu-item index="/allocate" @click="navigate('/allocate')">
-        <el-icon><Share /></el-icon><span>分配管理</span>
-      </el-menu-item>
+      <el-sub-menu index="allocate">
+        <template #title><el-icon><Share /></el-icon><span>分配管理</span></template>
+        <el-menu-item index="/allocate" @click="navigate('/allocate')">分配列表</el-menu-item>
+        <el-menu-item index="/allocate/settings" @click="navigate('/allocate/settings')">分配设置</el-menu-item>
+      </el-sub-menu>
 
       <el-menu-item index="/bindings" @click="navigate('/bindings')">
         <el-icon><Link /></el-icon><span>厂家绑定</span>

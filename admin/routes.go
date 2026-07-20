@@ -25,6 +25,13 @@ func RegisterRoutes(g *gin.RouterGroup, h *Handlers, sh *SettingsHandlers) {
 	g.PUT("/supplier-bindings/:id", h.UpdateBinding)
 	g.DELETE("/supplier-bindings/:id", h.DeleteBinding)
 
+	g.GET("/alloc-settings", h.GetAllocSettings)
+	g.PUT("/alloc-settings", h.UpdateAllocSettings)
+	g.GET("/sku-supplier-rules", h.ListSkuSupplierRules)
+	g.POST("/sku-supplier-rules", h.CreateSkuSupplierRule)
+	g.PUT("/sku-supplier-rules/:id", h.UpdateSkuSupplierRule)
+	g.DELETE("/sku-supplier-rules/:id", h.DeleteSkuSupplierRule)
+
 	g.GET("/sync-jobs", sh.ListSyncJobs)
 	g.PUT("/sync-jobs/:id", sh.UpdateSyncJob)
 	g.POST("/sync-jobs/:id/run", sh.RunSyncJob)

@@ -11,7 +11,39 @@ const (
 
 	PushEventAllocated = "order_allocated"
 	PushEventManual    = "manual_push"
+
+	// AllocStrategyBindDropshipOnly 有 SKU→供应商绑定才自动代发，无绑定保持待分配
+	AllocStrategyBindDropshipOnly = "bind_dropship_only"
 )
+
+// AllocSettings 租户级自动分配配置（每租户一行）
+type AllocSettings struct {
+	ID        uint64    `gorm:"primaryKey" json:"id"`
+	TenantID  uint64    `gorm:"uniqueIndex;not null" json:"tenantId"`
+	Enabled   bool      `gorm:"default:false" json:"enabled"`
+	Strategy  string    `gorm:"size:64;default:bind_dropship_only" json:"strategy"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+func (AllocSettings) TableName() string { return "alloc_settings" }
+
+// SkuSupplierRule 订单 SKU 编码 → OSMS 供应商（自动代发匹配）
+type SkuSupplierRule struct {
+	ID           uint64    `gorm:"primaryKey" json:"id"`
+	TenantID     uint64    `gorm:"index;not null" json:"tenantId"`
+	SkuCode      string    `gorm:"size:128;not null;index" json:"skuCode"`
+	SupplierID   uint64    `gorm:"index;not null" json:"supplierId"`
+	SupplierCode string    `gorm:"size:64" json:"supplierCode"`
+	SupplierName string    `gorm:"size:256;not null" json:"supplierName"`
+	Priority     int       `gorm:"default:100" json:"priority"`
+	Status       int8      `gorm:"default:1" json:"status"`
+	Remark       string    `gorm:"size:512" json:"remark"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+func (SkuSupplierRule) TableName() string { return "sku_supplier_rules" }
 
 // SyncJob 定时同步任务配置
 type SyncJob struct {

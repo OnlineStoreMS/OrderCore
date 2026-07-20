@@ -18,13 +18,18 @@ import (
 )
 
 type OrderService struct {
-	repos     *repo.Repos
-	storeSync *storesync.Client
-	storeCore *storecore.Client
+	repos       *repo.Repos
+	storeSync   *storesync.Client
+	storeCore   *storecore.Client
+	onAllocated func(tenantID, orderID uint64)
 }
 
 func NewOrderService(repos *repo.Repos, storeSync *storesync.Client, storeCore *storecore.Client) *OrderService {
 	return &OrderService{repos: repos, storeSync: storeSync, storeCore: storeCore}
+}
+
+func (s *OrderService) SetOnAllocated(fn func(tenantID, orderID uint64)) {
+	s.onAllocated = fn
 }
 
 func (s *OrderService) Dashboard(tenantID uint64) (map[string]any, error) {
@@ -122,7 +127,7 @@ func (s *OrderService) CreateManual(tenantID, operatorID uint64, req dto.ManualC
 	return s.repos.GetOrder(tenantID, o.ID)
 }
 
-func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRequest) (*model.Order, bool, error) {
+func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, req dto.IngestOrderRequest, bearerToken string) (*model.Order, bool, error) {
 	channel := strings.TrimSpace(req.SourceChannel)
 	if channel == "" {
 		return nil, false, fmt.Errorf("sourceChannel 必填")
@@ -270,7 +275,12 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 			return nil, false, err
 		}
 		o, err := s.repos.GetOrder(tenantID, existing.ID)
-		return o, false, err
+		if err != nil {
+			return nil, false, err
+		}
+		s.TryAutoAllocateBySKU(ctx, tenantID, operatorID, o, bearerToken)
+		o, _ = s.repos.GetOrder(tenantID, existing.ID)
+		return o, false, nil
 	}
 
 	orderNo, err := s.repos.NextOrderNo(tenantID)
@@ -343,7 +353,12 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 		return nil, false, err
 	}
 	out, err := s.repos.GetOrder(tenantID, o.ID)
-	return out, true, err
+	if err != nil {
+		return nil, false, err
+	}
+	s.TryAutoAllocateBySKU(ctx, tenantID, operatorID, out, bearerToken)
+	out, _ = s.repos.GetOrder(tenantID, o.ID)
+	return out, true, nil
 }
 
 func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64, orderID uint64, req dto.AllocateRequest, bearerToken string) (*model.Order, error) {
@@ -476,7 +491,18 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	if err != nil {
 		return nil, err
 	}
-	return s.repos.GetOrder(tenantID, orderID)
+	out, err := s.repos.GetOrder(tenantID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	// 记忆模式：人工代发成功后记住订单 SKU→供应商（自动分配不写入）
+	if allocType == model.AllocDropship && supplierID > 0 && strings.TrimSpace(req.Remark) != autoAllocRemark {
+		s.rememberSkuSupplierBindings(tenantID, out.Items, supplierID, "", supplierName)
+	}
+	if s.onAllocated != nil && out != nil && out.SupplierID > 0 {
+		s.onAllocated(tenantID, out.ID)
+	}
+	return out, nil
 }
 
 // RevokeAllocate 撤回分配：清空履约分配，回到待分配（已发货/完成/关闭不可撤）。
@@ -740,7 +766,7 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 				}
 				seen[key] = struct{}{}
 			}
-			_, isNew, err := s.Ingest(tenantID, operatorID, ingest)
+			_, isNew, err := s.Ingest(ctx, tenantID, operatorID, ingest, token)
 			if err != nil {
 				return nil, err
 			}
@@ -807,7 +833,7 @@ func (s *OrderService) RefreshOpenKDZSOrders(ctx context.Context, tenantID, oper
 			ingest.PlatformStatus = normStatus
 			ingest.PlatformStatusText = normText
 		}
-		if _, _, err := s.Ingest(tenantID, operatorID, ingest); err != nil {
+		if _, _, err := s.Ingest(ctx, tenantID, operatorID, ingest, token); err != nil {
 			lastErr = err
 			continue
 		}
@@ -835,7 +861,7 @@ func (s *OrderService) SyncFromStore(ctx context.Context, tenantID, operatorID u
 	created, updated := 0, 0
 	for _, so := range result.List {
 		ingest := mapStoreSalesToIngest(so)
-		_, isNew, err := s.Ingest(tenantID, operatorID, ingest)
+		_, isNew, err := s.Ingest(ctx, tenantID, operatorID, ingest, token)
 		if err != nil {
 			return nil, err
 		}
