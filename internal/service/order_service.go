@@ -193,12 +193,16 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 			if !terminal && status == model.StatusClosed {
 				fields["status"] = status
 				statusChanged = fromStatus != status
-			} else if !terminal && hint.ApplyDropshipAlloc {
-				// 快递助手已代发：强制同步为已分配（覆盖此前误标的自营，终端态除外）
+			} else if !terminal && hint.ApplySyncAlloc {
+				// 按快递助手实态自动分配（厂家代发 / 自营待发货）
 				fields["alloc_type"] = hint.AllocType
 				fields["dropship_mode"] = hint.DropshipMode
 				fields["factory_id"] = req.FactoryID
 				fields["factory_name"] = req.FactoryName
+				if hint.AllocType == model.AllocSelfShip {
+					fields["supplier_id"] = 0
+					fields["supplier_name"] = ""
+				}
 				fields["status"] = status
 				statusChanged = fromStatus != status
 				if existing.AllocatedAt == nil {
@@ -207,7 +211,7 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 				}
 			} else if !terminal && channel == model.SourceKDZS && hint.AgentType == model.AgentTypeSelf &&
 				existing.DropshipMode == model.DropshipKDZSFactory {
-				// 纠偏：此前误把自营单当成厂家代发时，回退为待分配
+				// 纠偏：待推单等场景下，误标厂家代发回退为待分配
 				fields["alloc_type"] = ""
 				fields["dropship_mode"] = ""
 				fields["factory_id"] = req.FactoryID
@@ -302,7 +306,7 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 		FactoryName:        req.FactoryName,
 		RawPayload:         req.RawPayload,
 	}
-	if hint.ApplyDropshipAlloc {
+	if hint.ApplySyncAlloc {
 		now := time.Now()
 		o.AllocatedAt = &now
 	}
@@ -972,7 +976,7 @@ type kdzsIngestHint struct {
 	AgentType          int
 	ShipEntryLocked    bool
 	ShipLockReason     string
-	ApplyDropshipAlloc bool
+	ApplySyncAlloc     bool // 按快递助手实态自动写入履约分配
 	LogRemark          string
 }
 
@@ -1043,15 +1047,19 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 			h.Status = model.StatusAllocated
 			h.AllocType = model.AllocDropship
 			h.DropshipMode = model.DropshipKDZSFactory
-			h.ApplyDropshipAlloc = true
+			h.ApplySyncAlloc = true
 			h.ShipEntryLocked = true
 			h.ShipLockReason = "快递助手已分配厂家代发，由厂家发货，无需干预"
 			h.LogRemark = "同步待发货代发单→已分配并锁定填单号"
 		} else {
-			h.Status = model.StatusPendingShip
+			// 快递助手已是自营待发货：同步为自营已分配，可直接填单号
+			h.Status = model.StatusAllocated
+			h.AllocType = model.AllocSelfShip
+			h.DropshipMode = ""
+			h.ApplySyncAlloc = true
 			h.ShipEntryLocked = false
 			h.ShipLockReason = ""
-			h.LogRemark = "同步待发货自营单"
+			h.LogRemark = "同步待发货自营单→已分配"
 		}
 	case model.KDZSWaitAudit:
 		if isFactory {
@@ -1059,7 +1067,7 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 			h.Status = model.StatusAllocated
 			h.AllocType = model.AllocDropship
 			h.DropshipMode = model.DropshipKDZSFactory
-			h.ApplyDropshipAlloc = true
+			h.ApplySyncAlloc = true
 			h.ShipEntryLocked = true
 			h.ShipLockReason = "快递助手已推厂家代发，无需干预"
 			h.LogRemark = "同步待推单代发单→已分配"
@@ -1074,7 +1082,7 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 			h.Status = model.StatusAllocated
 			h.AllocType = model.AllocDropship
 			h.DropshipMode = model.DropshipKDZSFactory
-			h.ApplyDropshipAlloc = true
+			h.ApplySyncAlloc = true
 			h.ShipEntryLocked = true
 			h.ShipLockReason = "快递助手厂家代发，无需干预"
 			h.LogRemark = "同步代发单→已分配"
@@ -1088,7 +1096,7 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 		h.Status = model.StatusClosed
 		h.AllocType = ""
 		h.DropshipMode = ""
-		h.ApplyDropshipAlloc = false
+		h.ApplySyncAlloc = false
 		h.ShipEntryLocked = true
 		h.ShipLockReason = reason
 		h.LogRemark = reason
