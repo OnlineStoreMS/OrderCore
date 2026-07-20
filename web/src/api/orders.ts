@@ -258,11 +258,11 @@ export async function shipOrder(id: number, body: Record<string, unknown>) {
 }
 
 export async function syncKDZS(body: Record<string, unknown> = {}) {
-  return unwrap(await client.post('/sync/kdzs', body))
+  return unwrap(await client.post('/sync/kdzs', body, { timeout: 180000 }))
 }
 
 export async function syncStore(body: Record<string, unknown> = {}) {
-  return unwrap(await client.post('/sync/store', body))
+  return unwrap(await client.post('/sync/store', body, { timeout: 180000 }))
 }
 
 export async function listFactories(params: Record<string, unknown> = {}) {

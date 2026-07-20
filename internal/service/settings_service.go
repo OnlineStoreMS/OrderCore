@@ -179,16 +179,21 @@ func (s *SettingsService) executeSyncJob(ctx context.Context, job *model.SyncJob
 			return stats, err
 		}
 		if params.RefreshOpenOrders {
-			refreshed, rerr := s.orders.RefreshOpenKDZSOrders(ctx, job.TenantID, 0, token, 80)
+			// 列表同步已成功：回查未完结单放到后台，避免「立即同步」HTTP 超时（限流间隔下可达数分钟）
+			tenantID := job.TenantID
+			go func() {
+				bg := context.Background()
+				refreshed, rerr := s.orders.RefreshOpenKDZSOrders(bg, tenantID, 0, token, 40)
+				if rerr != nil {
+					log.Printf("[sync-job] async refresh open orders tenant=%d refreshed=%d err=%v", tenantID, refreshed, rerr)
+					return
+				}
+				log.Printf("[sync-job] async refresh open orders tenant=%d refreshed=%d ok", tenantID, refreshed)
+			}()
 			if stats == nil {
 				stats = map[string]int{}
 			}
-			stats["refreshed"] = refreshed
-			// 列表同步已成功时，刷新限流/部分失败不整单失败（避免误报且状态已写入）
-			if rerr != nil {
-				log.Printf("[sync-job] refresh open orders partial error (list sync ok): %v", rerr)
-				stats["refreshErrors"] = 1
-			}
+			stats["refreshQueued"] = 1
 		}
 		return stats, nil
 	case model.SyncJobStore:

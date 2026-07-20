@@ -53,8 +53,9 @@ async function saveInterval(job: SyncJob, minutes: number | undefined) {
 async function onRunJob(job: SyncJob) {
   try {
     const stats = await runSyncJob(job.id)
+    const extra = stats.refreshQueued ? '（未完结单回查已后台继续）' : ''
     ElMessage.success(
-      `同步完成：新增 ${stats.created || 0}，更新 ${stats.updated || 0}，刷新 ${stats.refreshed || 0}`,
+      `同步完成：新增 ${stats.created || 0}，更新 ${stats.updated || 0}${extra}`,
     )
     await load()
   } catch (e: any) {

@@ -53,7 +53,9 @@ export async function updateSyncJob(id: number, body: Record<string, unknown>) {
 }
 
 export async function runSyncJob(id: number) {
-  return unwrap<Record<string, number>>(await client.post(`/sync-jobs/${id}/run`))
+  return unwrap<Record<string, number>>(
+    await client.post(`/sync-jobs/${id}/run`, null, { timeout: 180000 }),
+  )
 }
 
 export async function listChannels() {
