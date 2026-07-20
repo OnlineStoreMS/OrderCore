@@ -55,7 +55,10 @@ export interface Order {
   buyerPhone?: string
   totalAmount?: number
   payAmount?: number
+  payTime?: string
+  orderedAt?: string
   platformStatus?: string
+  platformStatusText?: string
   remark?: string
   sellerRemark?: string
   allocRemark?: string
@@ -124,6 +127,24 @@ const dropshipLabels: Record<string, string> = {
   osms_supplier: 'OSMS供应商代发',
 }
 
+const platformLabels: Record<string, string> = {
+  FXG: '抖店',
+  TB: '淘宝',
+  XHS: '小红书',
+  PDD: '拼多多',
+  KSXD: '快手',
+  MANUAL: '手工单',
+}
+
+const platformStatusLabels: Record<string, string> = {
+  wait_audit: '待推单',
+  wait_send: '待发货',
+  shipped: '已发货',
+  seller_consigned: '已发货',
+  completed: '交易完成',
+  trade_finished: '交易完成',
+}
+
 export function labelSource(v?: string) {
   return (v && sourceLabels[v]) || v || '-'
 }
@@ -135,6 +156,45 @@ export function labelAlloc(v?: string) {
 }
 export function labelDropship(v?: string) {
   return (v && dropshipLabels[v]) || v || '-'
+}
+export function labelPlatform(v?: string) {
+  return (v && platformLabels[v]) || v || '-'
+}
+export function labelPlatformStatus(order: Pick<Order, 'platformStatus' | 'platformStatusText' | 'status' | 'sourceChannel'>) {
+  if (order.platformStatusText) return order.platformStatusText
+  if (order.platformStatus && platformStatusLabels[order.platformStatus]) {
+    return platformStatusLabels[order.platformStatus]
+  }
+  return labelStatus(order.status)
+}
+
+export function formatDateTime(v?: string | null) {
+  if (!v) return '-'
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return v
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+export function formatGoods(items?: OrderItem[]) {
+  if (!items?.length) return '-'
+  return items.map((it) => {
+    const name = it.productName || it.skuCode || '商品'
+    const specs = it.skuSpecs ? `（${it.skuSpecs}）` : ''
+    return `${name}${specs} ×${it.quantity || 1}`
+  }).join('；')
+}
+
+export function formatAddress(addr?: OrderAddress | null) {
+  if (!addr) return '-'
+  if (addr.fullText) return addr.fullText
+  const parts = [addr.name, addr.phone, addr.province, addr.city, addr.district, addr.address].filter(Boolean)
+  return parts.join(' ') || '-'
+}
+
+export function formatRemark(order: Pick<Order, 'remark' | 'sellerRemark'>) {
+  const parts = [order.remark, order.sellerRemark].map((s) => (s || '').trim()).filter(Boolean)
+  return parts.length ? parts.join(' / ') : '-'
 }
 
 export async function fetchDashboard() {

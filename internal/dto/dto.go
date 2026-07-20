@@ -53,6 +53,8 @@ type IngestOrderRequest struct {
 	FreightAmount   float64          `json:"freightAmount"`
 	PayStatus       string           `json:"payStatus"`
 	PayTime         string           `json:"payTime"`
+	OrderTime       string           `json:"orderTime"`
+	PlatformStatusText string         `json:"platformStatusText"`
 	Remark          string           `json:"remark"`
 	SellerRemark    string           `json:"sellerRemark"`
 	FactoryID       string           `json:"factoryId"`
@@ -95,13 +97,14 @@ type BindingRequest struct {
 }
 
 type SyncKDZSRequest struct {
-	Platform    string `json:"platform"`
-	ShopID      string `json:"shopId"`
-	TradeStatus string `json:"tradeStatus"`
-	PageNo      int    `json:"pageNo"`
-	PageSize    int    `json:"pageSize"`
-	StartTime   string `json:"startTime"`
-	EndTime     string `json:"endTime"`
+	Platform     string   `json:"platform"`
+	ShopID       string   `json:"shopId"`
+	TradeStatus  string   `json:"tradeStatus"`
+	TradeStatuses []string `json:"tradeStatuses"`
+	PageNo       int      `json:"pageNo"`
+	PageSize     int      `json:"pageSize"`
+	StartTime    string   `json:"startTime"`
+	EndTime      string   `json:"endTime"`
 }
 
 type SyncStoreRequest struct {

@@ -27,7 +27,7 @@ async function doSyncKDZS() {
   syncing.value = 'kdzs'
   try {
     const stats = await syncKDZS({ pageSize: 50 }) as Record<string, number>
-    ElMessage.success(`电商同步完成：新增 ${stats.created || 0}，更新 ${stats.updated || 0}`)
+    ElMessage.success(`电商同步完成（待推单+待发货）：新增 ${stats.created || 0}，更新 ${stats.updated || 0}`)
     await load()
   } catch (e: any) {
     ElMessage.error(e.message || '同步失败')

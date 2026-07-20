@@ -157,21 +157,28 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 		err = s.repos.Transaction(func(tx *repo.Repos) error {
 			// 已分配/已发货的订单不覆盖分配字段，只刷新基础信息
 			fields := map[string]any{
-				"platform":         req.Platform,
-				"platform_sys_tid": req.PlatformSysTid,
-				"shop_id":          req.ShopID,
-				"shop_name":        req.ShopName,
-				"buyer_nick":       req.BuyerNick,
-				"buyer_name":       req.BuyerName,
-				"buyer_phone":      req.BuyerPhone,
-				"total_amount":     req.TotalAmount,
-				"pay_amount":       req.PayAmount,
-				"freight_amount":   req.FreightAmount,
-				"pay_status":       req.PayStatus,
-				"platform_status":  req.PlatformStatus,
-				"remark":           req.Remark,
-				"seller_remark":    req.SellerRemark,
-				"raw_payload":      req.RawPayload,
+				"platform":              req.Platform,
+				"platform_sys_tid":      req.PlatformSysTid,
+				"shop_id":               req.ShopID,
+				"shop_name":             req.ShopName,
+				"buyer_nick":            req.BuyerNick,
+				"buyer_name":            req.BuyerName,
+				"buyer_phone":           req.BuyerPhone,
+				"total_amount":          req.TotalAmount,
+				"pay_amount":            req.PayAmount,
+				"freight_amount":        req.FreightAmount,
+				"pay_status":            req.PayStatus,
+				"platform_status":       req.PlatformStatus,
+				"platform_status_text":  req.PlatformStatusText,
+				"remark":                req.Remark,
+				"seller_remark":         req.SellerRemark,
+				"raw_payload":           req.RawPayload,
+			}
+			if t := parseTime(req.PayTime); t != nil {
+				fields["pay_time"] = t
+			}
+			if t := parseTime(req.OrderTime); t != nil {
+				fields["ordered_at"] = t
 			}
 			statusChanged := false
 			if existing.AllocType == "" {
@@ -234,16 +241,20 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 		TotalAmount:     req.TotalAmount,
 		PayAmount:       req.PayAmount,
 		FreightAmount:   req.FreightAmount,
-		PayStatus:       req.PayStatus,
-		PlatformStatus:  req.PlatformStatus,
-		Remark:          req.Remark,
-		SellerRemark:    req.SellerRemark,
-		FactoryID:       req.FactoryID,
-		FactoryName:     req.FactoryName,
-		RawPayload:      req.RawPayload,
+		PayStatus:          req.PayStatus,
+		PlatformStatus:     req.PlatformStatus,
+		PlatformStatusText: req.PlatformStatusText,
+		Remark:             req.Remark,
+		SellerRemark:       req.SellerRemark,
+		FactoryID:          req.FactoryID,
+		FactoryName:        req.FactoryName,
+		RawPayload:         req.RawPayload,
 	}
 	if t := parseTime(req.PayTime); t != nil {
 		o.PayTime = t
+	}
+	if t := parseTime(req.OrderTime); t != nil {
+		o.OrderedAt = t
 	}
 	o.Items = mapItems(tenantID, 0, req.Items)
 	if req.Address != nil {
@@ -541,32 +552,63 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 	if pageSize <= 0 {
 		pageSize = 50
 	}
-	result, err := s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
-		Platform:      req.Platform,
-		ShopID:        req.ShopID,
-		TradeStatus:   req.TradeStatus,
-		PageNo:        pageNo,
-		PageSize:      pageSize,
-		StartDateTime: req.StartTime,
-		EndDateTime:   req.EndTime,
-	})
-	if err != nil {
-		return nil, err
+	statuses := make([]string, 0, 2)
+	if len(req.TradeStatuses) > 0 {
+		statuses = append(statuses, req.TradeStatuses...)
+	} else if strings.TrimSpace(req.TradeStatus) != "" {
+		statuses = append(statuses, strings.TrimSpace(req.TradeStatus))
+	} else {
+		// 默认同步待推单 + 待发货
+		statuses = []string{"wait_audit", "wait_send"}
 	}
-	created, updated := 0, 0
-	for _, t := range result.Items {
-		ingest := mapTradeToIngest(t)
-		_, isNew, err := s.Ingest(tenantID, operatorID, ingest)
+
+	created, updated, fetched, total := 0, 0, 0, 0
+	seen := map[string]struct{}{}
+	for _, status := range statuses {
+		result, err := s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
+			Platform:      req.Platform,
+			ShopID:        req.ShopID,
+			TradeStatus:   status,
+			PageNo:        pageNo,
+			PageSize:      pageSize,
+			StartDateTime: req.StartTime,
+			EndDateTime:   req.EndTime,
+		})
 		if err != nil {
 			return nil, err
 		}
-		if isNew {
-			created++
-		} else {
-			updated++
+		fetched += len(result.Items)
+		total += result.Total
+		for _, t := range result.Items {
+			ingest := mapTradeToIngest(t)
+			if ingest.PlatformStatus == "" {
+				ingest.PlatformStatus = status
+			}
+			if ingest.PlatformStatusText == "" {
+				ingest.PlatformStatusText = kdzsPlatformStatusText(ingest.PlatformStatus)
+			}
+			key := ingest.PlatformOrderID
+			if key == "" {
+				key = ingest.PlatformSysTid
+			}
+			if key != "" {
+				if _, ok := seen[key]; ok {
+					continue
+				}
+				seen[key] = struct{}{}
+			}
+			_, isNew, err := s.Ingest(tenantID, operatorID, ingest)
+			if err != nil {
+				return nil, err
+			}
+			if isNew {
+				created++
+			} else {
+				updated++
+			}
 		}
 	}
-	return map[string]int{"created": created, "updated": updated, "fetched": len(result.Items), "total": result.Total}, nil
+	return map[string]int{"created": created, "updated": updated, "fetched": fetched, "total": total}, nil
 }
 
 func (s *OrderService) SyncFromStore(ctx context.Context, tenantID, operatorID uint64, req dto.SyncStoreRequest, token string) (map[string]int, error) {
@@ -749,27 +791,33 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 	if addrFull == "" {
 		addrFull = t.ReceiverAddress
 	}
+	statusText := t.StatusText
+	if statusText == "" {
+		statusText = kdzsPlatformStatusText(t.TradeStatus)
+	}
 	return dto.IngestOrderRequest{
-		SourceChannel:   model.SourceKDZS,
-		Platform:        t.Platform,
-		PlatformOrderID: platformOrderID,
-		PlatformSysTid:  sysTid,
-		ShopID:          t.ShopID,
-		ShopName:        t.ShopName,
-		Status:          model.StatusPendingShip,
-		PlatformStatus:  t.TradeStatus,
-		BuyerNick:       t.BuyerNick,
-		BuyerName:       t.ReceiverName,
-		BuyerPhone:      t.ReceiverMobile,
-		TotalAmount:     t.Payment,
-		PayAmount:       t.Payment,
-		PayStatus:       "paid",
-		PayTime:         t.PayTime,
-		Remark:          t.BuyerMemo,
-		SellerRemark:    t.SellerMemo,
-		FactoryID:       t.FactoryID,
-		FactoryName:     t.FactoryName,
-		RawPayload:      string(raw),
+		SourceChannel:      model.SourceKDZS,
+		Platform:           t.Platform,
+		PlatformOrderID:    platformOrderID,
+		PlatformSysTid:     sysTid,
+		ShopID:             t.ShopID,
+		ShopName:           t.ShopName,
+		Status:             model.StatusPendingShip,
+		PlatformStatus:     t.TradeStatus,
+		PlatformStatusText: statusText,
+		BuyerNick:          t.BuyerNick,
+		BuyerName:          t.ReceiverName,
+		BuyerPhone:         t.ReceiverMobile,
+		TotalAmount:        t.Payment,
+		PayAmount:          t.Payment,
+		PayStatus:          "paid",
+		PayTime:            t.PayTime,
+		OrderTime:          t.CreateTime,
+		Remark:             t.BuyerMemo,
+		SellerRemark:       t.SellerMemo,
+		FactoryID:          t.FactoryID,
+		FactoryName:        t.FactoryName,
+		RawPayload:         string(raw),
 		Address: &dto.AddressInput{
 			Name:     t.ReceiverName,
 			Phone:    t.ReceiverMobile,
@@ -777,6 +825,21 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 			FullText: addrFull,
 		},
 		Items: items,
+	}
+}
+
+func kdzsPlatformStatusText(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "wait_audit":
+		return "待推单"
+	case "wait_send":
+		return "待发货"
+	case "shipped", "seller_consigned", "order_shipped":
+		return "已发货"
+	case "completed", "trade_finished":
+		return "交易完成"
+	default:
+		return status
 	}
 }
 

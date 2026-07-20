@@ -72,7 +72,9 @@ type Order struct {
 	FreightAmount    float64    `gorm:"type:decimal(12,2)" json:"freightAmount"`
 	PayStatus        string     `gorm:"size:32" json:"payStatus"`
 	PayTime          *time.Time `json:"payTime,omitempty"`
+	OrderedAt        *time.Time `json:"orderedAt,omitempty"`
 	PlatformStatus   string     `gorm:"size:64" json:"platformStatus"`
+	PlatformStatusText string   `gorm:"size:64" json:"platformStatusText"`
 	Remark           string     `gorm:"size:512" json:"remark"`
 	SellerRemark     string     `gorm:"size:512" json:"sellerRemark"`
 	AllocRemark      string     `gorm:"size:512" json:"allocRemark"`

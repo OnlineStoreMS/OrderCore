@@ -148,6 +148,19 @@ onMounted(load)
 
       <h3>商品明细</h3>
       <el-table :data="order.items || []" size="small">
+        <el-table-column label="图片" width="72">
+          <template #default="{ row }">
+            <el-image
+              v-if="row.picUrl"
+              :src="row.picUrl"
+              :preview-src-list="[row.picUrl]"
+              fit="cover"
+              style="width: 48px; height: 48px; border-radius: 4px"
+              preview-teleported
+            />
+            <span v-else class="muted">-</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="productName" label="商品" min-width="200" />
         <el-table-column prop="skuSpecs" label="规格" width="140" />
         <el-table-column prop="skuCode" label="商家编码" width="140" />
@@ -242,4 +255,5 @@ onMounted(load)
 .actions { display: flex; gap: 8px; }
 h3 { margin: 8px 0 0; font-size: 15px; color: #334155; }
 .hint { margin-left: 10px; color: #94a3b8; font-size: 12px; }
+.muted { color: #94a3b8; }
 </style>
