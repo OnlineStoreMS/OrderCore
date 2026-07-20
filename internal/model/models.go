@@ -94,6 +94,7 @@ type Order struct {
 	AgentType          int        `gorm:"default:0" json:"agentType"`            // 1自营 2厂家代发
 	ShipEntryLocked    bool       `gorm:"default:false" json:"shipEntryLocked"`  // 锁定填单号发货入口
 	ShipLockReason     string     `gorm:"size:256" json:"shipLockReason"`        // 锁定原因说明
+	SkipAutoAlloc      bool       `gorm:"default:false" json:"skipAutoAlloc"`    // 撤回分配后跳过自营自动分配
 	Remark             string     `gorm:"size:512" json:"remark"`
 	SellerRemark       string     `gorm:"size:512" json:"sellerRemark"`
 	AllocRemark        string     `gorm:"size:512" json:"allocRemark"`

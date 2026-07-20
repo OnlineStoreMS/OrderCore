@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   allocateOrder,
+  revokeAllocateOrder,
   getOrder,
   labelAgentType,
   labelAlloc,
@@ -61,6 +62,16 @@ const canAllocate = computed(() => {
   if (o.sourceChannel === 'kdzs' && hasBlockingEcommerce(o)) return false
   const s = o.status
   return s === 'pending_ship' || s === 'allocated' || s === 'purchasing'
+})
+
+const canRevokeAllocate = computed(() => {
+  const o = order.value
+  if (!o) return false
+  if (o.status === 'shipped' || o.status === 'completed' || o.status === 'closed') return false
+  if (!o.allocType) return false
+  // 厂家代发请在快递助手撤单后由同步回退
+  if (o.sourceChannel === 'kdzs' && o.agentType === 2 && o.dropshipMode === 'kdzs_factory') return false
+  return o.status === 'allocated' || o.status === 'purchasing'
 })
 
 const canShip = computed(() => {
@@ -134,6 +145,21 @@ async function submitAllocate() {
   }
 }
 
+async function onRevokeAllocate() {
+  try {
+    await ElMessageBox.confirm('确认撤回分配？订单将回到待分配。', '撤回分配', {
+      type: 'warning',
+      confirmButtonText: '撤回',
+      cancelButtonText: '取消',
+    })
+    order.value = await revokeAllocateOrder(id)
+    ElMessage.success('已撤回分配')
+  } catch (e: any) {
+    if (e === 'cancel' || e === 'close') return
+    ElMessage.error(e.message || '撤回失败')
+  }
+}
+
 async function submitShip() {
   try {
     order.value = await shipOrder(id, { ...shipForm })
@@ -165,6 +191,7 @@ onMounted(load)
       </div>
       <div class="actions">
         <el-button v-if="canAllocate" type="primary" @click="openAllocate">分配</el-button>
+        <el-button v-if="canRevokeAllocate" @click="onRevokeAllocate">撤回分配</el-button>
         <el-tooltip v-if="order?.shipEntryLocked" :content="order.shipLockReason || '已锁定填单号发货'" placement="top">
           <el-button type="success" disabled>填写物流</el-button>
         </el-tooltip>

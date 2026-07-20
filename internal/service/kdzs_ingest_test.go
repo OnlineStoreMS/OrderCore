@@ -46,7 +46,7 @@ func TestDeriveKDZSWaitAuditSelfPending(t *testing.T) {
 		PlatformStatusText: "待推单",
 		AgentType:          1,
 	})
-	if h.ApplySyncAlloc || h.Status != model.StatusPendingShip {
+	if h.ApplySyncAlloc || !h.ClearAlloc || h.Status != model.StatusPendingShip {
 		t.Fatalf("hint=%+v", h)
 	}
 }

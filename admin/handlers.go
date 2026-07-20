@@ -126,6 +126,20 @@ func (h *Handlers) Allocate(c *gin.Context) {
 	response.OK(c, o)
 }
 
+func (h *Handlers) RevokeAllocate(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, "无效 ID")
+		return
+	}
+	o, err := h.orders.RevokeAllocate(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), id, authcontext.BearerToken(c))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, o)
+}
+
 func (h *Handlers) Ship(c *gin.Context) {
 	id, err := parseID(c.Param("id"))
 	if err != nil {

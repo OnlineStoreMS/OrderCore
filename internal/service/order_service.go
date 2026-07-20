@@ -194,36 +194,42 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 				fields["status"] = status
 				statusChanged = fromStatus != status
 			} else if !terminal && hint.ApplySyncAlloc {
-				// 按快递助手实态自动分配（厂家代发 / 自营待发货）
-				fields["alloc_type"] = hint.AllocType
-				fields["dropship_mode"] = hint.DropshipMode
-				fields["factory_id"] = req.FactoryID
-				fields["factory_name"] = req.FactoryName
-				if hint.AllocType == model.AllocSelfShip {
-					fields["supplier_id"] = 0
-					fields["supplier_name"] = ""
+				// 自营自动分配：尊重「撤回分配」标记；厂家代发以快递助手为准强制同步
+				skipSelfAuto := hint.AgentType == model.AgentTypeSelf && existing.SkipAutoAlloc
+				if !skipSelfAuto {
+					fields["alloc_type"] = hint.AllocType
+					fields["dropship_mode"] = hint.DropshipMode
+					fields["factory_id"] = req.FactoryID
+					fields["factory_name"] = req.FactoryName
+					if hint.AllocType == model.AllocSelfShip {
+						fields["supplier_id"] = 0
+						fields["supplier_name"] = ""
+					}
+					fields["status"] = status
+					fields["skip_auto_alloc"] = false
+					statusChanged = fromStatus != status
+					if existing.AllocatedAt == nil {
+						now := time.Now()
+						fields["allocated_at"] = &now
+					}
+				} else {
+					fields["factory_id"] = req.FactoryID
+					fields["factory_name"] = req.FactoryName
 				}
-				fields["status"] = status
-				statusChanged = fromStatus != status
-				if existing.AllocatedAt == nil {
-					now := time.Now()
-					fields["allocated_at"] = &now
-				}
-			} else if !terminal && channel == model.SourceKDZS && hint.AgentType == model.AgentTypeSelf &&
-				existing.DropshipMode == model.DropshipKDZSFactory {
-				// 纠偏：待推单等场景下，误标厂家代发回退为待分配
+			} else if !terminal && hint.ClearAlloc {
+				// 快递助手回到待推单（撤单等）：清空订单中心分配，恢复待分配
 				fields["alloc_type"] = ""
 				fields["dropship_mode"] = ""
 				fields["factory_id"] = req.FactoryID
 				fields["factory_name"] = req.FactoryName
 				fields["supplier_id"] = 0
 				fields["supplier_name"] = ""
+				fields["purchase_order_id"] = ""
+				fields["alloc_remark"] = ""
 				fields["allocated_at"] = nil
+				fields["skip_auto_alloc"] = false
 				fields["status"] = status
 				statusChanged = fromStatus != status
-				if hint.LogRemark == "" || strings.HasPrefix(hint.LogRemark, "同步") {
-					hint.LogRemark = "纠偏：快递助手实为自营，撤销厂家代发分配"
-				}
 			} else if existing.AllocType == "" && !terminal {
 				fields["factory_id"] = req.FactoryID
 				fields["factory_name"] = req.FactoryName
@@ -410,8 +416,22 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	locked, lockReason := computeShipLock(o.SourceChannel, o.PlatformStatus, agentType, dropshipMode)
 
 	if kdzsAction != "" {
-		if err := s.setKDZSAgentType(ctx, o, kdzsAction, factoryID, bearerToken); err != nil {
-			return nil, fmt.Errorf("同步快递助手失败: %w", err)
+		needKDZS := true
+		if kdzsAction == "self_print" && o.AgentType == model.AgentTypeSelf &&
+			(o.PlatformStatus == model.KDZSWaitSend || o.PlatformStatus == model.KDZSWaitAudit) {
+			// 快递助手已是自营（待推/待发）时无需重复改打单类型
+			needKDZS = false
+		}
+		if kdzsAction == "push_factory" && o.AgentType == model.AgentTypeFactory &&
+			o.FactoryID != "" && o.FactoryID == factoryID {
+			needKDZS = false
+		}
+		if needKDZS {
+			if err := s.setKDZSAgentType(ctx, o, kdzsAction, factoryID, bearerToken); err != nil {
+				return nil, fmt.Errorf("同步快递助手失败: %w", err)
+			}
+		} else {
+			kdzsAction = kdzsAction + "(skip)"
 		}
 	}
 
@@ -432,6 +452,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 			"agent_type":        agentType,
 			"ship_entry_locked": locked,
 			"ship_lock_reason":  lockReason,
+			"skip_auto_alloc":   false,
 		}
 		if kdzsAction == "push_factory" {
 			fields["platform_status"] = model.KDZSWaitSend
@@ -449,6 +470,65 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 			ToStatus:   nextStatus,
 			Action:     "allocate",
 			Remark:     fmt.Sprintf("%s/%s kdzs=%s %s", allocType, dropshipMode, kdzsAction, req.Remark),
+			OperatorID: operatorID,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.repos.GetOrder(tenantID, orderID)
+}
+
+// RevokeAllocate 撤回分配：清空履约分配，回到待分配（已发货/完成/关闭不可撤）。
+func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID, orderID uint64, bearerToken string) (*model.Order, error) {
+	_ = ctx
+	_ = bearerToken
+	o, err := s.repos.GetOrder(tenantID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if o.Status == model.StatusShipped || o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
+		return nil, fmt.Errorf("当前状态不可撤回分配")
+	}
+	if o.AllocType == "" && o.Status == model.StatusPendingShip {
+		return nil, fmt.Errorf("订单尚未分配")
+	}
+	if o.SourceChannel == model.SourceKDZS && o.AgentType == model.AgentTypeFactory &&
+		o.DropshipMode == model.DropshipKDZSFactory {
+		return nil, fmt.Errorf("快递助手厂家代发请在快递助手侧撤单；同步后会自动恢复待分配")
+	}
+
+	from := o.Status
+	locked, lockReason := false, ""
+	if o.SourceChannel == model.SourceKDZS {
+		locked, lockReason = computeShipLock(o.SourceChannel, o.PlatformStatus, model.AgentTypeSelf, "")
+		if o.PlatformStatus == model.KDZSWaitAudit {
+			locked = true
+			lockReason = "快递助手待推单，请先分配；仅自营待发货可填单号"
+		}
+	}
+	err = s.repos.Transaction(func(tx *repo.Repos) error {
+		fields := map[string]any{
+			"alloc_type":        "",
+			"dropship_mode":     "",
+			"supplier_id":       0,
+			"supplier_name":     "",
+			"factory_id":        "",
+			"factory_name":      "",
+			"purchase_order_id": "",
+			"alloc_remark":      "",
+			"allocated_at":      nil,
+			"status":            model.StatusPendingShip,
+			"agent_type":        model.AgentTypeSelf,
+			"ship_entry_locked": locked,
+			"ship_lock_reason":  lockReason,
+			"skip_auto_alloc":   true,
+		}
+		return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
+			FromStatus: from,
+			ToStatus:   model.StatusPendingShip,
+			Action:     "revoke_allocate",
+			Remark:     "撤回分配",
 			OperatorID: operatorID,
 		})
 	})
@@ -977,6 +1057,7 @@ type kdzsIngestHint struct {
 	ShipEntryLocked    bool
 	ShipLockReason     string
 	ApplySyncAlloc     bool // 按快递助手实态自动写入履约分配
+	ClearAlloc         bool // 回到待推单等：清空订单中心分配
 	LogRemark          string
 }
 
@@ -1073,9 +1154,10 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 			h.LogRemark = "同步待推单代发单→已分配"
 		} else {
 			h.Status = model.StatusPendingShip
+			h.ClearAlloc = true
 			h.ShipEntryLocked = true
 			h.ShipLockReason = "快递助手待推单，请先分配；仅自营待发货可填单号"
-			h.LogRemark = "同步待推单"
+			h.LogRemark = "同步待推单→清空分配，恢复待分配"
 		}
 	default:
 		if isFactory {
@@ -1097,6 +1179,7 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 		h.AllocType = ""
 		h.DropshipMode = ""
 		h.ApplySyncAlloc = false
+		h.ClearAlloc = false
 		h.ShipEntryLocked = true
 		h.ShipLockReason = reason
 		h.LogRemark = reason

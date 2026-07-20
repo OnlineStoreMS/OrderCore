@@ -10,6 +10,7 @@ func RegisterRoutes(g *gin.RouterGroup, h *Handlers, sh *SettingsHandlers) {
 	g.POST("/orders/ingest", h.Ingest)
 	g.GET("/orders/:id", h.GetOrder)
 	g.POST("/orders/:id/allocate", h.Allocate)
+	g.POST("/orders/:id/revoke-allocate", h.RevokeAllocate)
 	g.POST("/orders/:id/ship", h.Ship)
 	g.POST("/orders/:id/push", sh.PushOrder)
 

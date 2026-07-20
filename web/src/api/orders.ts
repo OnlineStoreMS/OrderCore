@@ -66,6 +66,7 @@ export interface Order {
   agentType?: number
   shipEntryLocked?: boolean
   shipLockReason?: string
+  skipAutoAlloc?: boolean
   remark?: string
   sellerRemark?: string
   allocRemark?: string
@@ -246,6 +247,10 @@ export async function createManualOrder(body: Record<string, unknown>) {
 
 export async function allocateOrder(id: number, body: Record<string, unknown>) {
   return unwrap<Order>(await client.post(`/orders/${id}/allocate`, body))
+}
+
+export async function revokeAllocateOrder(id: number) {
+  return unwrap<Order>(await client.post(`/orders/${id}/revoke-allocate`))
 }
 
 export async function shipOrder(id: number, body: Record<string, unknown>) {
