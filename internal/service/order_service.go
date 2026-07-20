@@ -1177,12 +1177,14 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 			h.ShipLockReason = "快递助手已分配厂家代发，由厂家发货，无需干预"
 			h.LogRemark = "同步待发货代发单→已分配并锁定填单号"
 		} else {
-			// 自营待发货：OMS 侧保持待分配，由人工/记忆规则分配；不镜像为已分配
-			h.Status = model.StatusPendingShip
-			h.ApplySyncAlloc = false
+			// 快递助手已是自营待发货：同步为自营已分配，可直接填单号
+			h.Status = model.StatusAllocated
+			h.AllocType = model.AllocSelfShip
+			h.DropshipMode = ""
+			h.ApplySyncAlloc = true
 			h.ShipEntryLocked = false
 			h.ShipLockReason = ""
-			h.LogRemark = "同步待发货自营单→待分配"
+			h.LogRemark = "同步待发货自营单→已分配"
 		}
 	case model.KDZSWaitAudit:
 		if isFactory {
