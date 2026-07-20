@@ -840,19 +840,14 @@ func (s *OrderService) RefreshOpenKDZSOrders(ctx context.Context, tenantID, oper
 			continue
 		}
 		ingest := mapTradeToIngest(result.Items[0])
-		// 回查结果若仍是电商状态码，优先保留库内已有快递助手列表态
-		normStatus, normText := normalizeKDZSPlatformStatus(ingest.PlatformStatus, ingest.PlatformStatusText)
-		if normStatus == "" || (normStatus != model.KDZSWaitAudit && normStatus != model.KDZSWaitSend &&
-			normStatus != "shipped" && normStatus != "completed") {
-			if o.PlatformStatus == model.KDZSWaitAudit || o.PlatformStatus == model.KDZSWaitSend ||
-				o.PlatformStatus == "shipped" || o.PlatformStatus == "completed" {
-				ingest.PlatformStatus = o.PlatformStatus
-				ingest.PlatformStatusText = o.PlatformStatusText
-			} else {
-				ingest.PlatformStatus = normStatus
-				ingest.PlatformStatusText = normText
-			}
+		// 回查只刷新电商/售后等字段；快递助手列表态以库内（列表同步）为准。
+		// tid 查询常带回电商态+「待发货」文案，会被误判成 wait_send，进而把待分配单镜像成已分配。
+		if o.PlatformStatus == model.KDZSWaitAudit || o.PlatformStatus == model.KDZSWaitSend ||
+			o.PlatformStatus == "shipped" || o.PlatformStatus == "completed" {
+			ingest.PlatformStatus = o.PlatformStatus
+			ingest.PlatformStatusText = o.PlatformStatusText
 		} else {
+			normStatus, normText := normalizeKDZSPlatformStatus(ingest.PlatformStatus, ingest.PlatformStatusText)
 			ingest.PlatformStatus = normStatus
 			ingest.PlatformStatusText = normText
 		}
@@ -1182,14 +1177,12 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 			h.ShipLockReason = "快递助手已分配厂家代发，由厂家发货，无需干预"
 			h.LogRemark = "同步待发货代发单→已分配并锁定填单号"
 		} else {
-			// 快递助手已是自营待发货：同步为自营已分配，可直接填单号
-			h.Status = model.StatusAllocated
-			h.AllocType = model.AllocSelfShip
-			h.DropshipMode = ""
-			h.ApplySyncAlloc = true
+			// 自营待发货：OMS 侧保持待分配，由人工/记忆规则分配；不镜像为已分配
+			h.Status = model.StatusPendingShip
+			h.ApplySyncAlloc = false
 			h.ShipEntryLocked = false
 			h.ShipLockReason = ""
-			h.LogRemark = "同步待发货自营单→已分配"
+			h.LogRemark = "同步待发货自营单→待分配"
 		}
 	case model.KDZSWaitAudit:
 		if isFactory {

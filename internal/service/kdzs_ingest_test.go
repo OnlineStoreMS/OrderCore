@@ -35,8 +35,8 @@ func TestDeriveKDZSSelfIgnoresBareFactoryID(t *testing.T) {
 	if h.AgentType != model.AgentTypeSelf {
 		t.Fatalf("agentType=%d", h.AgentType)
 	}
-	if !h.ApplySyncAlloc || h.Status != model.StatusAllocated || h.AllocType != model.AllocSelfShip {
-		t.Fatalf("hint=%+v", h)
+	if h.ApplySyncAlloc || h.Status != model.StatusPendingShip {
+		t.Fatalf("self wait_send should stay pending, hint=%+v", h)
 	}
 }
 

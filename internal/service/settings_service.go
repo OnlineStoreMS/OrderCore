@@ -51,8 +51,8 @@ func (s *SettingsService) EnsureDefaultSyncJobs(tenantID uint64) error {
 			params: SyncJobParams{
 				PageSize:          50,
 				TradeStatuses:     []string{"wait_audit", "wait_send"},
-				DateRangeDays:     30,
-				RefreshOpenOrders: true,
+				DateRangeDays:     0, // 0=不限时间，与工作台一致
+				RefreshOpenOrders: false,
 			},
 		},
 		{
@@ -157,14 +157,15 @@ func (s *SettingsService) executeSyncJob(ctx context.Context, job *model.SyncJob
 	if len(params.TradeStatuses) == 0 {
 		params.TradeStatuses = []string{"wait_audit", "wait_send"}
 	}
-	if params.DateRangeDays <= 0 {
-		params.DateRangeDays = 30
-	}
 
-	end := time.Now()
-	start := end.AddDate(0, 0, -params.DateRangeDays+1)
-	startStr := start.Format("2006-01-02") + " 00:00:00"
-	endStr := end.Format("2006-01-02") + " 23:59:59"
+	// dateRangeDays<=0：不传时间窗，与工作台「同步电商订单」一致
+	startStr, endStr := "", ""
+	if params.DateRangeDays > 0 {
+		end := time.Now()
+		start := end.AddDate(0, 0, -params.DateRangeDays+1)
+		startStr = start.Format("2006-01-02") + " 00:00:00"
+		endStr = end.Format("2006-01-02") + " 23:59:59"
+	}
 
 	switch job.JobType {
 	case model.SyncJobKDZS:
