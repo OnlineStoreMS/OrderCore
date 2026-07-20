@@ -31,8 +31,20 @@ const (
 
 // 代发子类型
 const (
-	DropshipKDZSFactory  = "kdzs_factory"  // 快递助手厂家代发（推送即可，无需填单号）
-	DropshipOSMSSupplier = "osms_supplier" // OSMS 供应商代发（线下沟通，手动填单号）
+	DropshipKDZSFactory  = "kdzs_factory"  // 快递助手厂家代发（厂家侧发货，订单中心锁定填单号）
+	DropshipOSMSSupplier = "osms_supplier" // OSMS 供应商代发（快递助手侧改自营，线下沟通后可填单号）
+)
+
+// 快递助手 agentType
+const (
+	AgentTypeSelf    = 1 // 自打单/自营
+	AgentTypeFactory = 2 // 推厂家代发
+)
+
+// 快递助手交易状态
+const (
+	KDZSWaitAudit = "wait_audit" // 待推单
+	KDZSWaitSend  = "wait_send"  // 待发货
 )
 
 // 物流回传状态
@@ -73,16 +85,19 @@ type Order struct {
 	PayStatus        string     `gorm:"size:32" json:"payStatus"`
 	PayTime          *time.Time `json:"payTime,omitempty"`
 	OrderedAt        *time.Time `json:"orderedAt,omitempty"`
-	PlatformStatus   string     `gorm:"size:64" json:"platformStatus"`
-	PlatformStatusText string   `gorm:"size:64" json:"platformStatusText"`
-	Remark           string     `gorm:"size:512" json:"remark"`
-	SellerRemark     string     `gorm:"size:512" json:"sellerRemark"`
-	AllocRemark      string     `gorm:"size:512" json:"allocRemark"`
-	AllocatedAt      *time.Time `json:"allocatedAt,omitempty"`
-	ShippedAt        *time.Time `json:"shippedAt,omitempty"`
-	RawPayload       string     `gorm:"type:text" json:"rawPayload,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	UpdatedAt        time.Time  `json:"updatedAt"`
+	PlatformStatus     string     `gorm:"size:64" json:"platformStatus"`         // 快递助手状态码 wait_audit/wait_send
+	PlatformStatusText string     `gorm:"size:64" json:"platformStatusText"`     // 快递助手状态文案
+	AgentType          int        `gorm:"default:0" json:"agentType"`            // 1自营 2厂家代发
+	ShipEntryLocked    bool       `gorm:"default:false" json:"shipEntryLocked"`  // 锁定填单号发货入口
+	ShipLockReason     string     `gorm:"size:256" json:"shipLockReason"`        // 锁定原因说明
+	Remark             string     `gorm:"size:512" json:"remark"`
+	SellerRemark       string     `gorm:"size:512" json:"sellerRemark"`
+	AllocRemark        string     `gorm:"size:512" json:"allocRemark"`
+	AllocatedAt        *time.Time `json:"allocatedAt,omitempty"`
+	ShippedAt          *time.Time `json:"shippedAt,omitempty"`
+	RawPayload         string     `gorm:"type:text" json:"rawPayload,omitempty"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
 
 	Items      []OrderItem       `gorm:"foreignKey:OrderID" json:"items,omitempty"`
 	Address    *OrderAddress     `gorm:"foreignKey:OrderID" json:"address,omitempty"`

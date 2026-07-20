@@ -3,8 +3,11 @@ package admin
 import (
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"ordercore/internal/dto"
+	"ordercore/internal/integration/supplycore"
 	"ordercore/internal/pkg/authcontext"
 	"ordercore/internal/pkg/response"
 	"ordercore/internal/repo"
@@ -15,10 +18,11 @@ import (
 
 type Handlers struct {
 	orders *service.OrderService
+	supply *supplycore.Client
 }
 
-func NewHandlers(orders *service.OrderService) *Handlers {
-	return &Handlers{orders: orders}
+func NewHandlers(orders *service.OrderService, supply *supplycore.Client) *Handlers {
+	return &Handlers{orders: orders, supply: supply}
 }
 
 func (h *Handlers) Dashboard(c *gin.Context) {
@@ -34,12 +38,17 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
 	list, total, err := h.orders.List(authcontext.TenantID(c), repo.OrderListQuery{
-		SourceChannel: c.Query("sourceChannel"),
-		Status:        c.Query("status"),
-		AllocType:     c.Query("allocType"),
-		Keyword:       c.Query("keyword"),
-		Page:          page,
-		PageSize:      pageSize,
+		SourceChannel:  c.Query("sourceChannel"),
+		Status:         c.Query("status"),
+		AllocType:      c.Query("allocType"),
+		Keyword:        c.Query("keyword"),
+		Platform:       c.Query("platform"),
+		OrderedAtStart: parseQueryTime(c.Query("orderedAtStart")),
+		OrderedAtEnd:   parseQueryTime(c.Query("orderedAtEnd")),
+		PayTimeStart:   parseQueryTime(c.Query("payTimeStart")),
+		PayTimeEnd:     parseQueryTime(c.Query("payTimeEnd")),
+		Page:           page,
+		PageSize:       pageSize,
 	})
 	if err != nil {
 		response.Fail(c, http.StatusInternalServerError, err.Error())
@@ -161,6 +170,21 @@ func (h *Handlers) ListFactories(c *gin.Context) {
 	response.OK(c, result)
 }
 
+func (h *Handlers) ListSuppliers(c *gin.Context) {
+	if h.supply == nil {
+		response.Fail(c, http.StatusBadRequest, "SupplyCore 未配置")
+		return
+	}
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "50"))
+	list, total, err := h.supply.ListSuppliers(c.Request.Context(), authcontext.BearerToken(c), c.Query("keyword"), page, pageSize)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, response.PageResult(list, total, page, pageSize))
+}
+
 func (h *Handlers) ListBindings(c *gin.Context) {
 	list, err := h.orders.ListBindings(authcontext.TenantID(c))
 	if err != nil {
@@ -218,4 +242,23 @@ func (h *Handlers) DeleteBinding(c *gin.Context) {
 
 func parseID(s string) (uint64, error) {
 	return strconv.ParseUint(s, 10, 64)
+}
+
+func parseQueryTime(s string) *time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	layouts := []string{
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05",
+		"2006-01-02",
+	}
+	for _, layout := range layouts {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return &t
+		}
+	}
+	return nil
 }

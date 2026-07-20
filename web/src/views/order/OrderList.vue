@@ -7,27 +7,34 @@ import {
   formatAddress,
   formatDateTime,
   formatRemark,
+  labelAgentType,
+  labelKDZSStatus,
   labelPlatform,
-  labelPlatformStatus,
+  labelStatus,
   listOrders,
   syncKDZS,
   syncStore,
   type Order,
   type OrderItem,
 } from '../../api/orders'
+import { dateShortcuts, defaultOrderedRange } from '../../utils/date'
 
 const router = useRouter()
 const route = useRoute()
 const loading = ref(false)
 const list = ref<Order[]>([])
 const total = ref(0)
+const [defaultStart, defaultEnd] = defaultOrderedRange()
 const filters = reactive({
   page: 1,
   pageSize: 20,
   sourceChannel: (route.query.sourceChannel as string) || '',
   status: (route.query.status as string) || '',
+  platform: '',
   allocType: '',
   keyword: '',
+  orderedRange: [defaultStart, defaultEnd] as [string, string] | null,
+  payRange: null as [string, string] | null,
 })
 
 const manualVisible = ref(false)
@@ -44,7 +51,24 @@ const manualForm = reactive({
 async function load() {
   loading.value = true
   try {
-    const data = await listOrders({ ...filters })
+    const params: Record<string, unknown> = {
+      page: filters.page,
+      pageSize: filters.pageSize,
+      sourceChannel: filters.sourceChannel || undefined,
+      status: filters.status || undefined,
+      platform: filters.platform || undefined,
+      allocType: filters.allocType || undefined,
+      keyword: filters.keyword || undefined,
+    }
+    if (filters.orderedRange?.length === 2) {
+      params.orderedAtStart = filters.orderedRange[0]
+      params.orderedAtEnd = filters.orderedRange[1]
+    }
+    if (filters.payRange?.length === 2) {
+      params.payTimeStart = filters.payRange[0]
+      params.payTimeEnd = filters.payRange[1]
+    }
+    const data = await listOrders(params)
     list.value = data.list || []
     total.value = data.total || 0
   } catch (e: any) {
@@ -52,6 +76,11 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+function onFilterChange() {
+  filters.page = 1
+  load()
 }
 
 async function onSyncKDZS() {
@@ -103,15 +132,24 @@ onMounted(load)
     <div class="toolbar">
       <el-form inline @submit.prevent>
         <el-form-item label="来源">
-          <el-select v-model="filters.sourceChannel" clearable style="width: 150px" @change="() => { filters.page = 1; load() }">
+          <el-select v-model="filters.sourceChannel" clearable style="width: 150px" @change="onFilterChange">
             <el-option label="电商(快递助手)" value="kdzs" />
             <el-option label="门店销售" value="store" />
             <el-option label="手工订单" value="manual" />
             <el-option label="微信小程序" value="wx_mall" />
           </el-select>
         </el-form-item>
-        <el-form-item label="状态">
-          <el-select v-model="filters.status" clearable style="width: 130px" @change="() => { filters.page = 1; load() }">
+        <el-form-item label="平台">
+          <el-select v-model="filters.platform" clearable style="width: 120px" @change="onFilterChange">
+            <el-option label="抖店" value="FXG" />
+            <el-option label="淘宝" value="TB" />
+            <el-option label="小红书" value="XHS" />
+            <el-option label="拼多多" value="PDD" />
+            <el-option label="快手" value="KSXD" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="履约状态">
+          <el-select v-model="filters.status" clearable style="width: 130px" @change="onFilterChange">
             <el-option label="待发货" value="pending_ship" />
             <el-option label="已分配" value="allocated" />
             <el-option label="采购中" value="purchasing" />
@@ -119,11 +157,39 @@ onMounted(load)
             <el-option label="已完成" value="completed" />
           </el-select>
         </el-form-item>
-        <el-form-item>
-          <el-input v-model="filters.keyword" clearable placeholder="单号/买家/手机" style="width: 180px" @keyup.enter="() => { filters.page = 1; load() }" />
+        <el-form-item label="下单时间">
+          <el-date-picker
+            v-model="filters.orderedRange"
+            type="datetimerange"
+            range-separator="至"
+            start-placeholder="开始"
+            end-placeholder="结束"
+            value-format="YYYY-MM-DD HH:mm:ss"
+            :shortcuts="dateShortcuts"
+            clearable
+            style="width: 360px"
+            @change="onFilterChange"
+          />
+        </el-form-item>
+        <el-form-item label="付款时间">
+          <el-date-picker
+            v-model="filters.payRange"
+            type="datetimerange"
+            range-separator="至"
+            start-placeholder="开始"
+            end-placeholder="结束"
+            value-format="YYYY-MM-DD HH:mm:ss"
+            :shortcuts="dateShortcuts"
+            clearable
+            style="width: 360px"
+            @change="onFilterChange"
+          />
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" @click="() => { filters.page = 1; load() }">查询</el-button>
+          <el-input v-model="filters.keyword" clearable placeholder="单号/买家/手机" style="width: 180px" @keyup.enter="onFilterChange" />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" @click="onFilterChange">查询</el-button>
         </el-form-item>
       </el-form>
       <div class="right">
@@ -183,9 +249,18 @@ onMounted(load)
       <el-table-column label="付款时间" width="160">
         <template #default="{ row }">{{ formatDateTime(row.payTime) }}</template>
       </el-table-column>
-      <el-table-column label="状态" width="100">
+      <el-table-column label="快递助手状态" width="120">
         <template #default="{ row }">
-          <el-tag size="small">{{ labelPlatformStatus(row) }}</el-tag>
+          <template v-if="row.sourceChannel === 'kdzs'">
+            <el-tag size="small">{{ labelKDZSStatus(row) }}</el-tag>
+            <div class="kdzs-meta">{{ labelAgentType(row.agentType) }}</div>
+          </template>
+          <span v-else>-</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="履约状态" width="100">
+        <template #default="{ row }">
+          <el-tag size="small" type="info">{{ labelStatus(row.status) }}</el-tag>
         </template>
       </el-table-column>
     </el-table>
@@ -242,4 +317,5 @@ onMounted(load)
 }
 .goods-meta { font-size: 12px; color: #909399; }
 .goods-meta span + span::before { content: ' · '; }
+.kdzs-meta { margin-top: 4px; font-size: 12px; color: #909399; }
 </style>

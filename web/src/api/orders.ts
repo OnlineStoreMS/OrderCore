@@ -59,6 +59,9 @@ export interface Order {
   orderedAt?: string
   platformStatus?: string
   platformStatusText?: string
+  agentType?: number
+  shipEntryLocked?: boolean
+  shipLockReason?: string
   remark?: string
   sellerRemark?: string
   allocRemark?: string
@@ -76,6 +79,15 @@ export interface Order {
     remark?: string
     createdAt?: string
   }>
+}
+
+export interface SupplierItem {
+  id: number
+  code?: string
+  name: string
+  shortName?: string
+  contactName?: string
+  phone?: string
 }
 
 export interface SupplierBinding {
@@ -160,12 +172,19 @@ export function labelDropship(v?: string) {
 export function labelPlatform(v?: string) {
   return (v && platformLabels[v]) || v || '-'
 }
-export function labelPlatformStatus(order: Pick<Order, 'platformStatus' | 'platformStatusText' | 'status' | 'sourceChannel'>) {
+export function labelKDZSStatus(order: Pick<Order, 'platformStatus' | 'platformStatusText' | 'sourceChannel'>) {
+  if (order.sourceChannel !== 'kdzs') return '-'
   if (order.platformStatusText) return order.platformStatusText
   if (order.platformStatus && platformStatusLabels[order.platformStatus]) {
     return platformStatusLabels[order.platformStatus]
   }
-  return labelStatus(order.status)
+  return order.platformStatus || '-'
+}
+
+export function labelAgentType(v?: number) {
+  if (v === 2) return '厂家代发'
+  if (v === 1) return '自营'
+  return '-'
 }
 
 export function formatDateTime(v?: string | null) {
@@ -231,6 +250,10 @@ export async function syncStore(body: Record<string, unknown> = {}) {
 
 export async function listFactories(params: Record<string, unknown> = {}) {
   return unwrap<{ items: FactoryItem[] }>(await client.get('/kdzs/factories', { params }))
+}
+
+export async function listSuppliers(params: Record<string, unknown> = {}) {
+  return unwrap<PageData<SupplierItem>>(await client.get('/suppliers', { params }))
 }
 
 export async function listBindings() {

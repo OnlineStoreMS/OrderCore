@@ -33,12 +33,17 @@ func (r *Repos) Transaction(fn func(txRepos *Repos) error) error {
 }
 
 type OrderListQuery struct {
-	SourceChannel string
-	Status        string
-	AllocType     string
-	Keyword       string
-	Page          int
-	PageSize      int
+	SourceChannel  string
+	Status         string
+	AllocType      string
+	Keyword        string
+	Platform       string
+	OrderedAtStart *time.Time
+	OrderedAtEnd   *time.Time
+	PayTimeStart   *time.Time
+	PayTimeEnd     *time.Time
+	Page           int
+	PageSize       int
 }
 
 func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, int64, error) {
@@ -58,6 +63,21 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	if q.AllocType != "" {
 		tx = tx.Where("alloc_type = ?", q.AllocType)
 	}
+	if q.Platform != "" {
+		tx = tx.Where("platform = ?", q.Platform)
+	}
+	if q.OrderedAtStart != nil {
+		tx = tx.Where("COALESCE(ordered_at, created_at) >= ?", q.OrderedAtStart)
+	}
+	if q.OrderedAtEnd != nil {
+		tx = tx.Where("COALESCE(ordered_at, created_at) <= ?", q.OrderedAtEnd)
+	}
+	if q.PayTimeStart != nil {
+		tx = tx.Where("pay_time >= ?", q.PayTimeStart)
+	}
+	if q.PayTimeEnd != nil {
+		tx = tx.Where("pay_time <= ?", q.PayTimeEnd)
+	}
 	if kw := strings.TrimSpace(q.Keyword); kw != "" {
 		like := "%" + strings.ToLower(kw) + "%"
 		tx = tx.Where(
@@ -71,7 +91,7 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	}
 	var list []model.Order
 	err := tx.Preload("Items").Preload("Address").Preload("Shipments").
-		Order("id DESC").
+		Order("COALESCE(ordered_at, created_at) DESC, id DESC").
 		Offset((q.Page - 1) * q.PageSize).Limit(q.PageSize).
 		Find(&list).Error
 	return list, total, err

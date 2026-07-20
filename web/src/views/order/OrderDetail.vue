@@ -3,8 +3,20 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
-  allocateOrder, getOrder, labelAlloc, labelDropship, labelSource, labelStatus, listBindings, listFactories,
-  shipOrder, type FactoryItem, type Order, type SupplierBinding,
+  allocateOrder,
+  getOrder,
+  labelAgentType,
+  labelAlloc,
+  labelDropship,
+  labelKDZSStatus,
+  labelSource,
+  labelStatus,
+  listBindings,
+  listSuppliers,
+  shipOrder,
+  type Order,
+  type SupplierBinding,
+  type SupplierItem,
 } from '../../api/orders'
 
 const route = useRoute()
@@ -15,16 +27,13 @@ const order = ref<Order | null>(null)
 
 const allocVisible = ref(false)
 const shipVisible = ref(false)
-const factories = ref<FactoryItem[]>([])
 const bindings = ref<SupplierBinding[]>([])
+const suppliers = ref<SupplierItem[]>([])
 
 const allocForm = reactive({
   allocType: 'self_ship',
-  dropshipMode: 'osms_supplier',
   supplierId: undefined as number | undefined,
   supplierName: '',
-  factoryId: '',
-  factoryName: '',
   purchaseOrderId: '',
   remark: '',
 })
@@ -37,16 +46,30 @@ const shipForm = reactive({
 })
 
 const canAllocate = computed(() => {
-  const s = order.value?.status
+  const o = order.value
+  if (!o) return false
+  // 快递助手已推厂家代发：只跟踪，不再二次分配
+  if (o.sourceChannel === 'kdzs' && o.agentType === 2) return false
+  const s = o.status
   return s === 'pending_ship' || s === 'allocated' || s === 'purchasing'
 })
 
 const canShip = computed(() => {
   const o = order.value
   if (!o) return false
+  if (o.shipEntryLocked) return false
   if (o.status === 'shipped' || o.status === 'completed' || o.status === 'closed') return false
   if (o.allocType === 'dropship' && o.dropshipMode === 'kdzs_factory') return false
   return !!o.allocType
+})
+
+const bindingHint = computed(() => {
+  if (allocForm.allocType !== 'dropship' || !allocForm.supplierId) return ''
+  const b = bindings.value.find((x) => x.supplierId === allocForm.supplierId)
+  if (b?.externalFactoryId) {
+    return `已绑定快递助手厂家：${b.externalFactoryName || b.externalFactoryId}，将推送厂家代发`
+  }
+  return '未绑定快递助手厂家：快递助手侧改为自营，由该供应商线下代发'
 })
 
 async function load() {
@@ -63,38 +86,37 @@ async function load() {
 async function openAllocate() {
   allocVisible.value = true
   try {
-    bindings.value = await listBindings()
-    const res = await listFactories({ platform: order.value?.platform || 'FXG', pageSize: 100 })
-    factories.value = res.items || []
+    const [b, s] = await Promise.all([
+      listBindings(),
+      listSuppliers({ page: 1, pageSize: 200 }),
+    ])
+    bindings.value = b || []
+    suppliers.value = s.list || []
   } catch {
-    // 工厂列表依赖 StoreSyncAgent，失败时仍可手工填
+    bindings.value = []
+    suppliers.value = []
   }
 }
 
 function onSupplierPick(sid: number) {
+  const s = suppliers.value.find((x) => x.id === sid)
+  if (s) {
+    allocForm.supplierName = s.name
+    return
+  }
   const b = bindings.value.find((x) => x.supplierId === sid)
-  if (b) {
-    allocForm.supplierName = b.supplierName
-    if (allocForm.dropshipMode === 'kdzs_factory') {
-      allocForm.factoryId = b.externalFactoryId
-      allocForm.factoryName = b.externalFactoryName || ''
-    }
-  }
-}
-
-function onFactoryPick(fid: string) {
-  const f = factories.value.find((x) => x.factoryId === fid)
-  if (f) allocForm.factoryName = f.factoryName
-  const b = bindings.value.find((x) => x.externalFactoryId === fid)
-  if (b) {
-    allocForm.supplierId = b.supplierId
-    allocForm.supplierName = b.supplierName
-  }
+  if (b) allocForm.supplierName = b.supplierName
 }
 
 async function submitAllocate() {
   try {
-    order.value = await allocateOrder(id, { ...allocForm })
+    order.value = await allocateOrder(id, {
+      allocType: allocForm.allocType,
+      supplierId: allocForm.supplierId,
+      supplierName: allocForm.supplierName,
+      purchaseOrderId: allocForm.purchaseOrderId,
+      remark: allocForm.remark,
+    })
     ElMessage.success('分配成功')
     allocVisible.value = false
   } catch (e: any) {
@@ -124,7 +146,10 @@ onMounted(load)
       </div>
       <div class="actions">
         <el-button v-if="canAllocate" type="primary" @click="openAllocate">分配</el-button>
-        <el-button v-if="canShip" type="success" @click="shipVisible = true">填写物流</el-button>
+        <el-tooltip v-if="order?.shipEntryLocked" :content="order.shipLockReason || '已锁定填单号发货'" placement="top">
+          <el-button type="success" disabled>填写物流</el-button>
+        </el-tooltip>
+        <el-button v-else-if="canShip" type="success" @click="shipVisible = true">填写物流</el-button>
       </div>
     </div>
 
@@ -133,7 +158,16 @@ onMounted(load)
         <el-descriptions-item label="来源">{{ labelSource(order.sourceChannel) }}</el-descriptions-item>
         <el-descriptions-item label="平台">{{ order.platform || '-' }} / {{ order.shopName || '-' }}</el-descriptions-item>
         <el-descriptions-item label="平台单号">{{ order.platformOrderId || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="状态">{{ labelStatus(order.status) }}</el-descriptions-item>
+        <el-descriptions-item label="履约状态">{{ labelStatus(order.status) }}</el-descriptions-item>
+        <el-descriptions-item label="快递助手状态">
+          {{ labelKDZSStatus(order) }}
+          <span v-if="order.sourceChannel === 'kdzs'" class="muted"> · {{ labelAgentType(order.agentType) }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="发货入口">
+          <el-tag v-if="order.shipEntryLocked" type="warning" size="small">已锁定</el-tag>
+          <el-tag v-else type="success" size="small">可填单号</el-tag>
+          <div v-if="order.shipLockReason" class="muted">{{ order.shipLockReason }}</div>
+        </el-descriptions-item>
         <el-descriptions-item label="分配类型">{{ labelAlloc(order.allocType) }}</el-descriptions-item>
         <el-descriptions-item label="代发方式">{{ labelDropship(order.dropshipMode) }}</el-descriptions-item>
         <el-descriptions-item label="供应商">{{ order.supplierName || '-' }}</el-descriptions-item>
@@ -201,24 +235,26 @@ onMounted(load)
             <el-radio value="purchase_then_ship">采购发货</el-radio>
           </el-radio-group>
         </el-form-item>
-        <template v-if="allocForm.allocType === 'dropship'">
-          <el-form-item label="代发方式">
-            <el-radio-group v-model="allocForm.dropshipMode">
-              <el-radio value="kdzs_factory">快递助手厂家代发</el-radio>
-              <el-radio value="osms_supplier">OSMS供应商代发</el-radio>
-            </el-radio-group>
-          </el-form-item>
-          <el-form-item v-if="allocForm.dropshipMode === 'kdzs_factory'" label="厂家">
-            <el-select v-model="allocForm.factoryId" filterable allow-create style="width: 100%" @change="onFactoryPick">
-              <el-option v-for="f in factories" :key="f.factoryId" :label="f.factoryName" :value="f.factoryId" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="供应商">
-            <el-select v-model="allocForm.supplierId" filterable clearable style="width: 100%" @change="onSupplierPick">
-              <el-option v-for="b in bindings" :key="b.id" :label="`${b.supplierName} (#${b.supplierId})`" :value="b.supplierId" />
-            </el-select>
-          </el-form-item>
-        </template>
+        <p v-if="order?.sourceChannel === 'kdzs'" class="alloc-tip">
+          自营/采购：快递助手改为自营。代发：按厂家绑定自动推厂家，无绑定则快递助手改自营。
+        </p>
+        <el-form-item v-if="allocForm.allocType === 'dropship'" label="OSMS供应商" required>
+          <el-select
+            v-model="allocForm.supplierId"
+            filterable
+            style="width: 100%"
+            placeholder="从 SupplyCore 选择供应商"
+            @change="onSupplierPick"
+          >
+            <el-option
+              v-for="s in suppliers"
+              :key="s.id"
+              :label="`${s.name}${s.code ? ' (' + s.code + ')' : ''}`"
+              :value="s.id"
+            />
+          </el-select>
+          <div v-if="bindingHint" class="alloc-tip">{{ bindingHint }}</div>
+        </el-form-item>
         <el-form-item v-if="allocForm.allocType === 'purchase_then_ship'" label="采购单号">
           <el-input v-model="allocForm.purchaseOrderId" placeholder="可选，关联 SupplyCore 采购单" />
         </el-form-item>
@@ -255,5 +291,6 @@ onMounted(load)
 .actions { display: flex; gap: 8px; }
 h3 { margin: 8px 0 0; font-size: 15px; color: #334155; }
 .hint { margin-left: 10px; color: #94a3b8; font-size: 12px; }
-.muted { color: #94a3b8; }
+.muted { color: #94a3b8; font-size: 12px; }
+.alloc-tip { margin: 0 0 12px 110px; color: #64748b; font-size: 12px; line-height: 1.5; }
 </style>

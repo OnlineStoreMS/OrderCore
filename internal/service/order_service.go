@@ -18,9 +18,9 @@ import (
 )
 
 type OrderService struct {
-	repos      *repo.Repos
-	storeSync  *storesync.Client
-	storeCore  *storecore.Client
+	repos     *repo.Repos
+	storeSync *storesync.Client
+	storeCore *storecore.Client
 }
 
 func NewOrderService(repos *repo.Repos, storeSync *storesync.Client, storeCore *storecore.Client) *OrderService {
@@ -148,31 +148,31 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 		}
 	}
 
-	status := req.Status
-	if status == "" {
-		status = model.StatusPendingShip
-	}
+	hint := deriveKDZSIngest(channel, req)
+	status := hint.Status
 	if existing != nil {
 		fromStatus := existing.Status
 		err = s.repos.Transaction(func(tx *repo.Repos) error {
-			// 已分配/已发货的订单不覆盖分配字段，只刷新基础信息
 			fields := map[string]any{
-				"platform":              req.Platform,
-				"platform_sys_tid":      req.PlatformSysTid,
-				"shop_id":               req.ShopID,
-				"shop_name":             req.ShopName,
-				"buyer_nick":            req.BuyerNick,
-				"buyer_name":            req.BuyerName,
-				"buyer_phone":           req.BuyerPhone,
-				"total_amount":          req.TotalAmount,
-				"pay_amount":            req.PayAmount,
-				"freight_amount":        req.FreightAmount,
-				"pay_status":            req.PayStatus,
-				"platform_status":       req.PlatformStatus,
-				"platform_status_text":  req.PlatformStatusText,
-				"remark":                req.Remark,
-				"seller_remark":         req.SellerRemark,
-				"raw_payload":           req.RawPayload,
+				"platform":             req.Platform,
+				"platform_sys_tid":     req.PlatformSysTid,
+				"shop_id":              req.ShopID,
+				"shop_name":            req.ShopName,
+				"buyer_nick":           req.BuyerNick,
+				"buyer_name":           req.BuyerName,
+				"buyer_phone":          req.BuyerPhone,
+				"total_amount":         req.TotalAmount,
+				"pay_amount":           req.PayAmount,
+				"freight_amount":       req.FreightAmount,
+				"pay_status":           req.PayStatus,
+				"platform_status":      req.PlatformStatus,
+				"platform_status_text": req.PlatformStatusText,
+				"agent_type":           hint.AgentType,
+				"ship_entry_locked":    hint.ShipEntryLocked,
+				"ship_lock_reason":     hint.ShipLockReason,
+				"remark":               req.Remark,
+				"seller_remark":        req.SellerRemark,
+				"raw_payload":          req.RawPayload,
 			}
 			if t := parseTime(req.PayTime); t != nil {
 				fields["pay_time"] = t
@@ -180,13 +180,33 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 			if t := parseTime(req.OrderTime); t != nil {
 				fields["ordered_at"] = t
 			}
+
 			statusChanged := false
-			if existing.AllocType == "" {
+			terminal := existing.Status == model.StatusShipped || existing.Status == model.StatusCompleted || existing.Status == model.StatusClosed
+			// 快递助手已代发：同步为已分配（不覆盖已发货/完成）
+			if !terminal && hint.ApplyDropshipAlloc {
+				if existing.AllocType == "" || existing.Status == model.StatusPendingShip {
+					fields["alloc_type"] = hint.AllocType
+					fields["dropship_mode"] = hint.DropshipMode
+					fields["factory_id"] = req.FactoryID
+					fields["factory_name"] = req.FactoryName
+					fields["status"] = status
+					statusChanged = fromStatus != status
+				} else {
+					fields["factory_id"] = req.FactoryID
+					fields["factory_name"] = req.FactoryName
+				}
+			} else if existing.AllocType == "" && !terminal {
 				fields["factory_id"] = req.FactoryID
 				fields["factory_name"] = req.FactoryName
 				fields["status"] = status
 				statusChanged = fromStatus != status
+			} else if !terminal {
+				// 已分配的自营单：同步后若进入待发货且非厂家代发，则解锁填单号
+				fields["factory_id"] = coalesceStr(req.FactoryID, existing.FactoryID)
+				fields["factory_name"] = coalesceStr(req.FactoryName, existing.FactoryName)
 			}
+
 			if err := tx.UpdateOrderFields(tenantID, existing.ID, fields); err != nil {
 				return err
 			}
@@ -207,7 +227,7 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 					FromStatus: fromStatus,
 					ToStatus:   status,
 					Action:     "ingest_update",
-					Remark:     "同步更新状态: " + channel,
+					Remark:     hint.LogRemark,
 					OperatorID: operatorID,
 				})
 			}
@@ -225,30 +245,39 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 		return nil, false, err
 	}
 	o := &model.Order{
-		TenantID:        tenantID,
-		OrderNo:         orderNo,
-		SourceChannel:   channel,
-		Platform:        req.Platform,
-		PlatformOrderID: req.PlatformOrderID,
-		PlatformSysTid:  req.PlatformSysTid,
-		ShopID:          req.ShopID,
-		ShopName:        req.ShopName,
-		ExternalRefID:   req.ExternalRefID,
-		Status:          status,
-		BuyerNick:       req.BuyerNick,
-		BuyerName:       req.BuyerName,
-		BuyerPhone:      req.BuyerPhone,
-		TotalAmount:     req.TotalAmount,
-		PayAmount:       req.PayAmount,
-		FreightAmount:   req.FreightAmount,
+		TenantID:           tenantID,
+		OrderNo:            orderNo,
+		SourceChannel:      channel,
+		Platform:           req.Platform,
+		PlatformOrderID:    req.PlatformOrderID,
+		PlatformSysTid:     req.PlatformSysTid,
+		ShopID:             req.ShopID,
+		ShopName:           req.ShopName,
+		ExternalRefID:      req.ExternalRefID,
+		Status:             status,
+		AllocType:          hint.AllocType,
+		DropshipMode:       hint.DropshipMode,
+		BuyerNick:          req.BuyerNick,
+		BuyerName:          req.BuyerName,
+		BuyerPhone:         req.BuyerPhone,
+		TotalAmount:        req.TotalAmount,
+		PayAmount:          req.PayAmount,
+		FreightAmount:      req.FreightAmount,
 		PayStatus:          req.PayStatus,
 		PlatformStatus:     req.PlatformStatus,
 		PlatformStatusText: req.PlatformStatusText,
+		AgentType:          hint.AgentType,
+		ShipEntryLocked:    hint.ShipEntryLocked,
+		ShipLockReason:     hint.ShipLockReason,
 		Remark:             req.Remark,
 		SellerRemark:       req.SellerRemark,
 		FactoryID:          req.FactoryID,
 		FactoryName:        req.FactoryName,
 		RawPayload:         req.RawPayload,
+	}
+	if hint.ApplyDropshipAlloc {
+		now := time.Now()
+		o.AllocatedAt = &now
 	}
 	if t := parseTime(req.PayTime); t != nil {
 		o.PayTime = t
@@ -269,7 +298,7 @@ func (s *OrderService) Ingest(tenantID, operatorID uint64, req dto.IngestOrderRe
 			OrderID:    o.ID,
 			ToStatus:   o.Status,
 			Action:     "ingest",
-			Remark:     "同步入库: " + channel,
+			Remark:     hint.LogRemark,
 			OperatorID: operatorID,
 		})
 	})
@@ -288,68 +317,72 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	if o.Status == model.StatusShipped || o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
 		return nil, fmt.Errorf("当前状态不可分配")
 	}
-
-	allocType := strings.TrimSpace(req.AllocType)
-	dropshipMode := strings.TrimSpace(req.DropshipMode)
-	switch allocType {
-	case model.AllocSelfShip:
-		dropshipMode = ""
-	case model.AllocDropship:
-		if dropshipMode == "" {
-			return nil, fmt.Errorf("代发发货需指定 dropshipMode")
-		}
-		if dropshipMode != model.DropshipKDZSFactory && dropshipMode != model.DropshipOSMSSupplier {
-			return nil, fmt.Errorf("无效的 dropshipMode")
-		}
-	case model.AllocPurchaseThenShip:
-		dropshipMode = ""
-	default:
-		return nil, fmt.Errorf("无效的分配类型")
+	if o.SourceChannel == model.SourceKDZS && o.AgentType == model.AgentTypeFactory {
+		return nil, fmt.Errorf("快递助手已推厂家代发，无需在订单中心再分配")
 	}
 
+	allocType := strings.TrimSpace(req.AllocType)
 	supplierID := req.SupplierID
 	supplierName := req.SupplierName
 	factoryID := req.FactoryID
 	factoryName := req.FactoryName
+	dropshipMode := ""
+	agentType := model.AgentTypeSelf
+	kdzsAction := "" // self_print | push_factory | ""
 
-	if allocType == model.AllocDropship {
-		switch dropshipMode {
-		case model.DropshipKDZSFactory:
-			if factoryID == "" {
-				return nil, fmt.Errorf("快递助手厂家代发需指定 factoryId")
-			}
-			if supplierID == 0 {
-				if b, err := s.repos.FindBindingByFactory(tenantID, model.SourceKDZS, factoryID); err == nil {
-					supplierID = b.SupplierID
-					supplierName = b.SupplierName
-					if factoryName == "" {
-						factoryName = b.ExternalFactoryName
-					}
-				}
-			}
-		case model.DropshipOSMSSupplier:
-			if supplierID == 0 {
-				return nil, fmt.Errorf("OSMS 供应商代发需指定 supplierId")
+	switch allocType {
+	case model.AllocSelfShip, model.AllocPurchaseThenShip:
+		dropshipMode = ""
+		if o.SourceChannel == model.SourceKDZS {
+			kdzsAction = "self_print"
+			agentType = model.AgentTypeSelf
+		}
+	case model.AllocDropship:
+		if supplierID == 0 {
+			return nil, fmt.Errorf("代发发货请选择 OSMS 供应商")
+		}
+		if supplierName == "" {
+			if b, err := s.repos.FindBindingBySupplier(tenantID, supplierID, model.SourceKDZS); err == nil {
+				supplierName = b.SupplierName
 			}
 		}
+		// 有厂家绑定 → 推快递助手厂家；无绑定 → 快递助手改自营，线下给供应商代发
+		if b, err := s.repos.FindBindingBySupplier(tenantID, supplierID, model.SourceKDZS); err == nil && b.ExternalFactoryID != "" {
+			dropshipMode = model.DropshipKDZSFactory
+			factoryID = b.ExternalFactoryID
+			factoryName = b.ExternalFactoryName
+			supplierName = b.SupplierName
+			agentType = model.AgentTypeFactory
+			if o.SourceChannel == model.SourceKDZS {
+				kdzsAction = "push_factory"
+			}
+		} else {
+			dropshipMode = model.DropshipOSMSSupplier
+			factoryID = ""
+			factoryName = ""
+			agentType = model.AgentTypeSelf
+			if o.SourceChannel == model.SourceKDZS {
+				kdzsAction = "self_print"
+			}
+		}
+	default:
+		return nil, fmt.Errorf("无效的分配类型")
 	}
 
 	nextStatus := model.StatusAllocated
 	if allocType == model.AllocPurchaseThenShip {
 		nextStatus = model.StatusPurchasing
 	}
-	now := time.Now()
-	from := o.Status
-	pushKDZS := allocType == model.AllocDropship && dropshipMode == model.DropshipKDZSFactory &&
-		o.SourceChannel == model.SourceKDZS
+	locked, lockReason := computeShipLock(o.SourceChannel, o.PlatformStatus, agentType, dropshipMode)
 
-	// 外部推送放在事务外；落库用事务保证状态+流水+发货单一致
-	if pushKDZS {
-		if err := s.pushKDZSFactory(ctx, o, factoryID, bearerToken); err != nil {
-			return nil, fmt.Errorf("推送快递助手失败: %w", err)
+	if kdzsAction != "" {
+		if err := s.setKDZSAgentType(ctx, o, kdzsAction, factoryID, bearerToken); err != nil {
+			return nil, fmt.Errorf("同步快递助手失败: %w", err)
 		}
 	}
 
+	now := time.Now()
+	from := o.Status
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
 		fields := map[string]any{
 			"alloc_type":        allocType,
@@ -362,47 +395,26 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 			"alloc_remark":      req.Remark,
 			"status":            nextStatus,
 			"allocated_at":      now,
+			"agent_type":        agentType,
+			"ship_entry_locked": locked,
+			"ship_lock_reason":  lockReason,
 		}
-		if err := tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
+		if kdzsAction == "push_factory" {
+			fields["platform_status"] = model.KDZSWaitSend
+			fields["platform_status_text"] = "待发货"
+		} else if kdzsAction == "self_print" && o.PlatformStatus == model.KDZSWaitAudit {
+			// 推单后快递助手侧通常进入待发货；先乐观更新，下次同步校正
+			fields["platform_status"] = model.KDZSWaitSend
+			fields["platform_status_text"] = "待发货"
+			locked2, reason2 := computeShipLock(o.SourceChannel, model.KDZSWaitSend, agentType, dropshipMode)
+			fields["ship_entry_locked"] = locked2
+			fields["ship_lock_reason"] = reason2
+		}
+		return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
 			FromStatus: from,
 			ToStatus:   nextStatus,
 			Action:     "allocate",
-			Remark:     fmt.Sprintf("%s/%s %s", allocType, dropshipMode, req.Remark),
-			OperatorID: operatorID,
-		}); err != nil {
-			return err
-		}
-
-		if !pushKDZS {
-			return nil
-		}
-		shipNo, err := tx.NextShipmentNo(tenantID)
-		if err != nil {
-			return err
-		}
-		shippedAt := time.Now()
-		sh := &model.OrderShipment{
-			TenantID:        tenantID,
-			OrderID:         orderID,
-			ShipmentNo:      shipNo,
-			NeedTracking:    false,
-			CallbackStatus:  model.CallbackSucceeded,
-			CallbackMessage: "已推送快递助手厂家代发",
-			CallbackAt:      &shippedAt,
-			ShippedAt:       &shippedAt,
-			Remark:          "KDZS 厂家代发推送",
-		}
-		if err := tx.CreateShipment(sh); err != nil {
-			return err
-		}
-		return tx.TransitionOrder(tenantID, orderID, map[string]any{
-			"status":     model.StatusShipped,
-			"shipped_at": shippedAt,
-		}, &model.OrderStatusLog{
-			FromStatus: nextStatus,
-			ToStatus:   model.StatusShipped,
-			Action:     "kdzs_push_factory",
-			Remark:     "推送厂家代发成功",
+			Remark:     fmt.Sprintf("%s/%s kdzs=%s %s", allocType, dropshipMode, kdzsAction, req.Remark),
 			OperatorID: operatorID,
 		})
 	})
@@ -412,7 +424,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	return s.repos.GetOrder(tenantID, orderID)
 }
 
-func (s *OrderService) pushKDZSFactory(ctx context.Context, o *model.Order, factoryID, token string) error {
+func (s *OrderService) setKDZSAgentType(ctx context.Context, o *model.Order, action, factoryID, token string) error {
 	if s.storeSync == nil {
 		return fmt.Errorf("StoreSyncAgent 未配置")
 	}
@@ -421,12 +433,16 @@ func (s *OrderService) pushKDZSFactory(ctx context.Context, o *model.Order, fact
 		sysTid = o.PlatformOrderID
 	}
 	if sysTid == "" {
-		return fmt.Errorf("缺少平台系统单号，无法推送")
+		return fmt.Errorf("缺少平台系统单号，无法同步快递助手")
+	}
+	tradeStatus := o.PlatformStatus
+	if tradeStatus == "" {
+		tradeStatus = model.KDZSWaitAudit
 	}
 	return s.storeSync.SetOrderAgentType(ctx, token, storesync.SetAgentTypeRequest{
 		Platform:    o.Platform,
-		TradeStatus: o.PlatformStatus,
-		Action:      "push_factory",
+		TradeStatus: tradeStatus,
+		Action:      action,
 		FactoryID:   factoryID,
 		SysTids:     []string{sysTid},
 	})
@@ -440,8 +456,21 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	if o.Status == model.StatusClosed {
 		return nil, fmt.Errorf("订单已关闭")
 	}
+	if o.ShipEntryLocked {
+		reason := o.ShipLockReason
+		if reason == "" {
+			reason = "当前订单已锁定填单号发货"
+		}
+		return nil, fmt.Errorf("%s", reason)
+	}
 	if o.AllocType == model.AllocDropship && o.DropshipMode == model.DropshipKDZSFactory {
-		return nil, fmt.Errorf("快递助手厂家代发无需手工填单号")
+		return nil, fmt.Errorf("快递助手厂家代发由厂家发货，无需手工填单号")
+	}
+	if o.SourceChannel == model.SourceKDZS && o.PlatformStatus != model.KDZSWaitSend {
+		return nil, fmt.Errorf("仅快递助手「待发货」且自营单可填单号回传")
+	}
+	if o.AllocType == "" {
+		return nil, fmt.Errorf("请先完成分配再发货")
 	}
 	if strings.TrimSpace(req.ExpressNo) == "" {
 		return nil, fmt.Errorf("物流单号不能为空")
@@ -805,6 +834,7 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 		Status:             model.StatusPendingShip,
 		PlatformStatus:     t.TradeStatus,
 		PlatformStatusText: statusText,
+		AgentType:          t.AgentType,
 		BuyerNick:          t.BuyerNick,
 		BuyerName:          t.ReceiverName,
 		BuyerPhone:         t.ReceiverMobile,
@@ -828,6 +858,79 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 	}
 }
 
+type kdzsIngestHint struct {
+	Status            string
+	AllocType         string
+	DropshipMode      string
+	AgentType         int
+	ShipEntryLocked   bool
+	ShipLockReason    string
+	ApplyDropshipAlloc bool
+	LogRemark         string
+}
+
+func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint {
+	h := kdzsIngestHint{
+		Status:    req.Status,
+		LogRemark: "同步入库: " + channel,
+	}
+	if h.Status == "" {
+		h.Status = model.StatusPendingShip
+	}
+	if channel != model.SourceKDZS {
+		h.ShipEntryLocked = false
+		return h
+	}
+
+	agentType := req.AgentType
+	isFactory := agentType == model.AgentTypeFactory || (req.FactoryID != "" && agentType != model.AgentTypeSelf)
+	if isFactory {
+		agentType = model.AgentTypeFactory
+	} else if agentType == 0 {
+		agentType = model.AgentTypeSelf
+	}
+	h.AgentType = agentType
+
+	switch strings.ToLower(strings.TrimSpace(req.PlatformStatus)) {
+	case model.KDZSWaitSend:
+		if agentType == model.AgentTypeFactory {
+			h.Status = model.StatusAllocated
+			h.AllocType = model.AllocDropship
+			h.DropshipMode = model.DropshipKDZSFactory
+			h.ApplyDropshipAlloc = true
+			h.ShipEntryLocked = true
+			h.ShipLockReason = "快递助手已分配厂家代发，由厂家发货"
+			h.LogRemark = "同步待发货代发单→已分配并锁定填单号"
+		} else {
+			h.Status = model.StatusPendingShip
+			h.ShipEntryLocked = false
+			h.ShipLockReason = ""
+			h.LogRemark = "同步待发货自营单"
+		}
+	case model.KDZSWaitAudit:
+		h.Status = model.StatusPendingShip
+		h.ShipEntryLocked = true
+		h.ShipLockReason = "快递助手待推单，请先分配；仅自营待发货可填单号"
+		h.LogRemark = "同步待推单"
+	default:
+		h.ShipEntryLocked, h.ShipLockReason = computeShipLock(channel, req.PlatformStatus, agentType, "")
+	}
+	return h
+}
+
+func computeShipLock(channel, platformStatus string, agentType int, dropshipMode string) (bool, string) {
+	if channel != model.SourceKDZS {
+		return false, ""
+	}
+	if agentType == model.AgentTypeFactory || dropshipMode == model.DropshipKDZSFactory {
+		return true, "快递助手厂家代发，填单号入口已锁定"
+	}
+	if strings.ToLower(strings.TrimSpace(platformStatus)) != model.KDZSWaitSend {
+		return true, "仅快递助手「待发货」自营单可填单号发货"
+	}
+	return false, ""
+}
+
 func kdzsPlatformStatusText(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "wait_audit":
@@ -841,6 +944,13 @@ func kdzsPlatformStatusText(status string) string {
 	default:
 		return status
 	}
+}
+
+func coalesceStr(a, b string) string {
+	if strings.TrimSpace(a) != "" {
+		return a
+	}
+	return b
 }
 
 func mapStoreSalesToIngest(so storecore.SalesOrder) dto.IngestOrderRequest {

@@ -52,29 +52,28 @@ type IngestOrderRequest struct {
 	PayAmount       float64          `json:"payAmount"`
 	FreightAmount   float64          `json:"freightAmount"`
 	PayStatus       string           `json:"payStatus"`
-	PayTime         string           `json:"payTime"`
-	OrderTime       string           `json:"orderTime"`
-	PlatformStatusText string         `json:"platformStatusText"`
-	Remark          string           `json:"remark"`
-	SellerRemark    string           `json:"sellerRemark"`
-	FactoryID       string           `json:"factoryId"`
-	FactoryName     string           `json:"factoryName"`
-	RawPayload      string           `json:"rawPayload"`
-	Address         *AddressInput    `json:"address"`
-	Items           []OrderItemInput `json:"items"`
+	PayTime              string           `json:"payTime"`
+	OrderTime            string           `json:"orderTime"`
+	PlatformStatusText   string           `json:"platformStatusText"`
+	AgentType            int              `json:"agentType"`
+	Remark               string           `json:"remark"`
+	SellerRemark         string           `json:"sellerRemark"`
+	FactoryID            string           `json:"factoryId"`
+	FactoryName          string           `json:"factoryName"`
+	RawPayload           string           `json:"rawPayload"`
+	Address              *AddressInput    `json:"address"`
+	Items                []OrderItemInput `json:"items"`
 }
 
 type AllocateRequest struct {
 	AllocType       string `json:"allocType" binding:"required"` // self_ship | dropship | purchase_then_ship
-	DropshipMode    string `json:"dropshipMode"`                // kdzs_factory | osms_supplier
+	DropshipMode    string `json:"dropshipMode"`                // 可选；代发时由绑定关系自动推断
 	SupplierID      uint64 `json:"supplierId"`
 	SupplierName    string `json:"supplierName"`
 	FactoryID       string `json:"factoryId"`
 	FactoryName     string `json:"factoryName"`
 	PurchaseOrderID string `json:"purchaseOrderId"`
 	Remark          string `json:"remark"`
-	// 电商厂家代发时是否立即推送快递助手
-	PushKDZS bool `json:"pushKdzs"`
 }
 
 type ShipRequest struct {

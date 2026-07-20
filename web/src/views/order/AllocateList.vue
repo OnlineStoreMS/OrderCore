@@ -6,30 +6,45 @@ import {
   formatAddress,
   formatDateTime,
   formatRemark,
+  labelAgentType,
   labelAlloc,
   labelDropship,
+  labelKDZSStatus,
   labelPlatform,
-  labelPlatformStatus,
+  labelStatus,
   listOrders,
   type Order,
   type OrderItem,
 } from '../../api/orders'
+import { dateShortcuts, defaultOrderedRange } from '../../utils/date'
 
 const router = useRouter()
 const loading = ref(false)
 const list = ref<Order[]>([])
 const total = ref(0)
+const [defaultStart, defaultEnd] = defaultOrderedRange()
 const filters = reactive({
   page: 1,
   pageSize: 20,
   status: 'pending_ship',
   keyword: '',
+  orderedRange: [defaultStart, defaultEnd] as [string, string] | null,
 })
 
 async function load() {
   loading.value = true
   try {
-    const data = await listOrders({ ...filters })
+    const params: Record<string, unknown> = {
+      page: filters.page,
+      pageSize: filters.pageSize,
+      status: filters.status || undefined,
+      keyword: filters.keyword || undefined,
+    }
+    if (filters.orderedRange?.length === 2) {
+      params.orderedAtStart = filters.orderedRange[0]
+      params.orderedAtEnd = filters.orderedRange[1]
+    }
+    const data = await listOrders(params)
     list.value = data.list || []
     total.value = data.total || 0
   } catch (e: any) {
@@ -39,19 +54,36 @@ async function load() {
   }
 }
 
+function onFilterChange() {
+  filters.page = 1
+  load()
+}
+
 onMounted(load)
 </script>
 
 <template>
   <div class="page">
     <div class="toolbar">
-      <el-radio-group v-model="filters.status" @change="() => { filters.page = 1; load() }">
+      <el-radio-group v-model="filters.status" @change="onFilterChange">
         <el-radio-button value="pending_ship">待分配</el-radio-button>
         <el-radio-button value="allocated">已分配</el-radio-button>
         <el-radio-button value="purchasing">采购中</el-radio-button>
         <el-radio-button value="">全部</el-radio-button>
       </el-radio-group>
-      <el-input v-model="filters.keyword" clearable placeholder="搜索单号/买家" style="width: 220px" @keyup.enter="() => { filters.page = 1; load() }" />
+      <el-date-picker
+        v-model="filters.orderedRange"
+        type="datetimerange"
+        range-separator="至"
+        start-placeholder="下单开始"
+        end-placeholder="下单结束"
+        value-format="YYYY-MM-DD HH:mm:ss"
+        :shortcuts="dateShortcuts"
+        clearable
+        style="width: 360px"
+        @change="onFilterChange"
+      />
+      <el-input v-model="filters.keyword" clearable placeholder="搜索单号/买家" style="width: 220px" @keyup.enter="onFilterChange" />
     </div>
 
     <el-alert
@@ -112,9 +144,18 @@ onMounted(load)
       <el-table-column label="付款时间" width="160">
         <template #default="{ row }">{{ formatDateTime(row.payTime) }}</template>
       </el-table-column>
-      <el-table-column label="状态" width="100">
+      <el-table-column label="快递助手状态" width="120">
         <template #default="{ row }">
-          <el-tag size="small">{{ labelPlatformStatus(row) }}</el-tag>
+          <template v-if="row.sourceChannel === 'kdzs'">
+            <el-tag size="small">{{ labelKDZSStatus(row) }}</el-tag>
+            <div class="kdzs-meta">{{ labelAgentType(row.agentType) }}</div>
+          </template>
+          <span v-else>-</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="履约状态" width="100">
+        <template #default="{ row }">
+          <el-tag size="small" type="info">{{ labelStatus(row.status) }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="分配" width="100">
@@ -123,9 +164,10 @@ onMounted(load)
       <el-table-column label="代发方式" width="140" show-overflow-tooltip>
         <template #default="{ row }">{{ labelDropship(row.dropshipMode) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="100" fixed="right">
+      <el-table-column label="操作" width="120" fixed="right">
         <template #default="{ row }">
           <el-button type="primary" link @click="router.push(`/orders/${row.id}`)">去处理</el-button>
+          <div v-if="row.shipEntryLocked" class="lock-tip">已锁发货</div>
         </template>
       </el-table-column>
     </el-table>
@@ -164,4 +206,6 @@ onMounted(load)
 }
 .goods-meta { font-size: 12px; color: #909399; }
 .goods-meta span + span::before { content: ' · '; }
+.kdzs-meta { margin-top: 4px; font-size: 12px; color: #909399; }
+.lock-tip { font-size: 11px; color: #e6a23c; margin-top: 2px; }
 </style>

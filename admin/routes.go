@@ -16,6 +16,7 @@ func RegisterRoutes(g *gin.RouterGroup, h *Handlers) {
 	g.POST("/sync/store", h.SyncStore)
 
 	g.GET("/kdzs/factories", h.ListFactories)
+	g.GET("/suppliers", h.ListSuppliers)
 
 	g.GET("/supplier-bindings", h.ListBindings)
 	g.POST("/supplier-bindings", h.CreateBinding)

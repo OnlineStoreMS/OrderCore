@@ -6,6 +6,7 @@ import (
 	"ordercore/internal/config"
 	"ordercore/internal/integration/storecore"
 	"ordercore/internal/integration/storesync"
+	"ordercore/internal/integration/supplycore"
 	jwtmgr "ordercore/internal/pkg/jwt"
 	"ordercore/internal/repo"
 	"ordercore/internal/service"
@@ -25,8 +26,9 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	repos := repo.New(db)
 	ssClient := storesync.NewClient(cfg.Integrations.StoreSyncAgentAPIURL)
 	scClient := storecore.NewClient(cfg.Integrations.StoreCoreAPIURL)
+	supplyClient := supplycore.NewClient(cfg.Integrations.SupplyCoreAPIURL)
 	orderSvc := service.NewOrderService(repos, ssClient, scClient)
-	h := admin.NewHandlers(orderSvc)
+	h := admin.NewHandlers(orderSvc, supplyClient)
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok", "service": "ordercore"})
