@@ -27,15 +27,19 @@ const list = ref<Order[]>([])
 const total = ref(0)
 const [defaultStart, defaultEnd] = defaultOrderedRange()
 const statusFromQuery = typeof route.query.status === 'string' ? route.query.status : ''
+const shipStatusFromQuery = typeof route.query.shipStatus === 'string' ? route.query.shipStatus : ''
 const normalizedStatus =
   statusFromQuery === 'pending_ship' ? 'pending_alloc' : statusFromQuery || 'pending_alloc'
 const filters = reactive({
   page: 1,
   pageSize: 20,
   status: normalizedStatus,
+  shipStatus: shipStatusFromQuery || '',
   keyword: '',
   // 从工作台带入状态时不限默认时间窗，与卡片数量对齐
-  orderedRange: statusFromQuery ? null : ([defaultStart, defaultEnd] as [string, string] | null),
+  orderedRange: statusFromQuery || shipStatusFromQuery
+    ? null
+    : ([defaultStart, defaultEnd] as [string, string] | null),
 })
 
 async function load() {
@@ -45,6 +49,7 @@ async function load() {
       page: filters.page,
       pageSize: filters.pageSize,
       status: filters.status || undefined,
+      shipStatus: filters.shipStatus || undefined,
       keyword: filters.keyword || undefined,
     }
     if (filters.orderedRange?.length === 2) {
@@ -78,6 +83,16 @@ onMounted(load)
         <el-radio-button value="purchasing">采购中</el-radio-button>
         <el-radio-button value="">全部</el-radio-button>
       </el-radio-group>
+      <el-select
+        v-model="filters.shipStatus"
+        clearable
+        placeholder="发货状态"
+        style="width: 120px"
+        @change="onFilterChange"
+      >
+        <el-option label="待发货" value="wait_ship" />
+        <el-option label="已发货" value="shipped" />
+      </el-select>
       <el-date-picker
         v-model="filters.orderedRange"
         type="datetimerange"
