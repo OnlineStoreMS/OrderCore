@@ -105,14 +105,6 @@ function onFilterChange() {
   load()
 }
 
-function clearShipStatusFilter() {
-  filters.shipStatus = ''
-  if (!filters.orderedRange) {
-    filters.orderedRange = [defaultStart, defaultEnd]
-  }
-  onFilterChange()
-}
-
 async function onSyncKDZS() {
   try {
     const stats = await syncKDZS({ pageSize: 50 }) as Record<string, number>
@@ -203,9 +195,6 @@ onMounted(load)
             <el-option label="待发货" value="wait_ship" />
             <el-option label="已发货" value="shipped" />
           </el-select>
-        </el-form-item>
-        <el-form-item v-if="filters.shipStatus === 'wait_ship' && waitShipFocus">
-          <el-tag type="warning" closable @close="clearShipStatusFilter">待发货（含已分配）</el-tag>
         </el-form-item>
         <el-form-item label="下单时间">
           <el-date-picker

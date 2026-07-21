@@ -55,7 +55,7 @@ const workCards = computed(() => [
   {
     key: 'waitShip',
     label: '待发货',
-    tip: '发货状态「待发货」（含已分配）',
+    tip: '发货状态待发货',
     value: cards.value.waitShipEcommerce || 0,
     color: '#409eff',
     go: () => router.push({ path: '/orders', query: { shipStatus: 'wait_ship' } }),
