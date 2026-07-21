@@ -142,7 +142,8 @@ async function submitAllocate() {
       purchaseOrderId: allocForm.purchaseOrderId,
       remark: allocForm.remark,
     })
-    ElMessage.success('分配成功')
+    const poTip = order.value?.purchaseOrderId ? `，已生成供应商代发单 ${order.value.purchaseOrderId}` : ''
+    ElMessage.success(`分配成功${poTip}`)
     allocVisible.value = false
   } catch (e: any) {
     ElMessage.error(e.message || '分配失败')

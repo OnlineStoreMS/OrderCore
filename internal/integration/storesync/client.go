@@ -136,7 +136,7 @@ func (c *Client) ListOrders(ctx context.Context, token string, q OrderQuery) (*O
 }
 
 type FactoryItem struct {
-	ID          string `json:"id"`
+	ID          int64  `json:"id"`
 	FactoryID   string `json:"factoryId"`
 	FactoryName string `json:"factoryName"`
 	FactoryNick string `json:"factoryNick"`

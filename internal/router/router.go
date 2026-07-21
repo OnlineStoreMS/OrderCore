@@ -28,7 +28,7 @@ func Setup(db *gorm.DB, cfg *config.Config) (*gin.Engine, *scheduler.SyncSchedul
 	ssClient := storesync.NewClient(cfg.Integrations.StoreSyncAgentAPIURL)
 	scClient := storecore.NewClient(cfg.Integrations.StoreCoreAPIURL)
 	supplyClient := supplycore.NewClient(cfg.Integrations.SupplyCoreAPIURL)
-	orderSvc := service.NewOrderService(repos, ssClient, scClient)
+	orderSvc := service.NewOrderService(repos, ssClient, scClient, supplyClient)
 	jwtMgr := jwtmgr.NewManager(cfg.Auth.JWTSecret)
 	settingsSvc := service.NewSettingsService(repos, orderSvc, jwtMgr)
 	h := admin.NewHandlers(orderSvc, supplyClient)

@@ -11,6 +11,7 @@ import (
 	"ordercore/internal/dto"
 	"ordercore/internal/integration/storecore"
 	"ordercore/internal/integration/storesync"
+	"ordercore/internal/integration/supplycore"
 	"ordercore/internal/model"
 	"ordercore/internal/repo"
 
@@ -21,11 +22,12 @@ type OrderService struct {
 	repos       *repo.Repos
 	storeSync   *storesync.Client
 	storeCore   *storecore.Client
+	supply      *supplycore.Client
 	onAllocated func(tenantID, orderID uint64)
 }
 
-func NewOrderService(repos *repo.Repos, storeSync *storesync.Client, storeCore *storecore.Client) *OrderService {
-	return &OrderService{repos: repos, storeSync: storeSync, storeCore: storeCore}
+func NewOrderService(repos *repo.Repos, storeSync *storesync.Client, storeCore *storecore.Client, supply *supplycore.Client) *OrderService {
+	return &OrderService{repos: repos, storeSync: storeSync, storeCore: storeCore, supply: supply}
 }
 
 func (s *OrderService) SetOnAllocated(fn func(tenantID, orderID uint64)) {
@@ -435,6 +437,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	dropshipMode := ""
 	agentType := model.AgentTypeSelf
 	kdzsAction := "" // self_print | push_factory | ""
+	purchaseOrderID := strings.TrimSpace(req.PurchaseOrderID)
 
 	switch allocType {
 	case model.AllocSelfShip, model.AllocPurchaseThenShip:
@@ -475,6 +478,19 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 		return nil, fmt.Errorf("无效的分配类型")
 	}
 
+	// 代发：先建 SupplyCore 草稿代发单，再推 KDZS；失败则回滚草稿
+	var createdPOID uint64
+	if allocType == model.AllocDropship {
+		poNo, poID, created, err := s.ensureDropshipPurchaseOrder(ctx, o, supplierID, supplierName, bearerToken)
+		if err != nil {
+			return nil, err
+		}
+		purchaseOrderID = poNo
+		if created {
+			createdPOID = poID
+		}
+	}
+
 	nextStatus := model.StatusAllocated
 	if allocType == model.AllocPurchaseThenShip {
 		nextStatus = model.StatusPurchasing
@@ -494,6 +510,9 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 		}
 		if needKDZS {
 			if err := s.setKDZSAgentType(ctx, o, kdzsAction, factoryID, bearerToken); err != nil {
+				if createdPOID > 0 {
+					_ = s.rollbackDropshipPurchaseOrder(ctx, bearerToken, createdPOID)
+				}
 				return nil, fmt.Errorf("同步快递助手失败: %w", err)
 			}
 		} else {
@@ -511,7 +530,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 			"supplier_name":     supplierName,
 			"factory_id":        factoryID,
 			"factory_name":      factoryName,
-			"purchase_order_id": req.PurchaseOrderID,
+			"purchase_order_id": purchaseOrderID,
 			"alloc_remark":      req.Remark,
 			"status":            nextStatus,
 			"ship_status":       model.ShipWaitShip,
@@ -536,11 +555,14 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 			FromStatus: from,
 			ToStatus:   nextStatus,
 			Action:     "allocate",
-			Remark:     fmt.Sprintf("%s/%s kdzs=%s %s", allocType, dropshipMode, kdzsAction, req.Remark),
+			Remark:     fmt.Sprintf("%s/%s kdzs=%s po=%s %s", allocType, dropshipMode, kdzsAction, purchaseOrderID, req.Remark),
 			OperatorID: operatorID,
 		})
 	})
 	if err != nil {
+		if createdPOID > 0 {
+			_ = s.rollbackDropshipPurchaseOrder(ctx, bearerToken, createdPOID)
+		}
 		return nil, err
 	}
 	out, err := s.repos.GetOrder(tenantID, orderID)
@@ -557,6 +579,117 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	return out, nil
 }
 
+// ensureDropshipPurchaseOrder 按 refSoId 复用未取消的代发单，否则新建草稿。
+// 返回 poNo、poID、是否本轮新建。
+func (s *OrderService) ensureDropshipPurchaseOrder(ctx context.Context, o *model.Order, supplierID uint64, supplierName, bearerToken string) (poNo string, poID uint64, created bool, err error) {
+	if s.supply == nil {
+		return "", 0, false, fmt.Errorf("SupplyCore 未配置，无法创建代发采购单")
+	}
+	if len(o.Items) == 0 {
+		return "", 0, false, fmt.Errorf("订单无明细，无法创建代发采购单")
+	}
+
+	existing, _, listErr := s.supply.ListPurchaseOrders(ctx, bearerToken, o.ID, "dropship", 1, 20)
+	if listErr == nil {
+		for _, it := range existing {
+			if it.Status == "cancelled" {
+				continue
+			}
+			if it.PayStatus == "paid" || it.PayStatus == "partial" {
+				return it.PoNo, it.ID, false, nil
+			}
+			if it.Status == "draft" || it.Status == "ordered" || it.Status == "paid" ||
+				it.Status == "partial_shipped" || it.Status == "in_transit" || it.Status == "partial_received" || it.Status == "completed" {
+				return it.PoNo, it.ID, false, nil
+			}
+		}
+	}
+
+	items := make([]supplycore.PurchaseOrderItemInput, 0, len(o.Items))
+	for _, it := range o.Items {
+		qty := it.Quantity
+		if qty <= 0 {
+			qty = 1
+		}
+		code := strings.TrimSpace(it.SkuCode)
+		if code == "" {
+			code = strings.TrimSpace(it.PlatformSkuID)
+		}
+		items = append(items, supplycore.PurchaseOrderItemInput{
+			SkuID:           it.SkuID,
+			ProductName:     it.ProductName,
+			SupplierSkuCode: code,
+			Qty:             qty,
+			UnitPrice:       0,
+			Remark:          it.SkuSpecs,
+		})
+	}
+	remark := fmt.Sprintf("OMS代发 %s", o.OrderNo)
+	if supplierName != "" {
+		remark = remark + " → " + supplierName
+	}
+	po, err := s.supply.CreatePurchaseOrder(ctx, bearerToken, supplycore.PurchaseOrderInput{
+		SupplierID:      supplierID,
+		FulfillmentType: "dropship",
+		RefSoID:         o.ID,
+		RefTraceID:      o.OrderNo,
+		Remark:          remark,
+		Items:           items,
+	})
+	if err != nil {
+		return "", 0, false, fmt.Errorf("创建 SupplyCore 代发单失败: %w", err)
+	}
+	return po.PoNo, po.ID, true, nil
+}
+
+func (s *OrderService) rollbackDropshipPurchaseOrder(ctx context.Context, bearerToken string, poID uint64) error {
+	if s.supply == nil || poID == 0 {
+		return nil
+	}
+	if err := s.supply.DeletePurchaseOrder(ctx, bearerToken, poID); err == nil {
+		return nil
+	}
+	_, err := s.supply.CancelPurchaseOrder(ctx, bearerToken, poID)
+	return err
+}
+
+// cancelLinkedDropshipPOs 撤回分配时取消关联草稿/已下单代发单；已付款则拒绝。
+func (s *OrderService) cancelLinkedDropshipPOs(ctx context.Context, orderID uint64, purchaseOrderID, bearerToken string) error {
+	if s.supply == nil {
+		return nil
+	}
+	list, _, err := s.supply.ListPurchaseOrders(ctx, bearerToken, orderID, "dropship", 1, 50)
+	if err != nil {
+		// 有本地采购单号时仍尝试按号提示；列表失败不阻断若无采购单
+		if strings.TrimSpace(purchaseOrderID) == "" {
+			return nil
+		}
+		return fmt.Errorf("查询关联代发单失败: %w", err)
+	}
+	for _, it := range list {
+		if it.Status == "cancelled" {
+			continue
+		}
+		if it.PayStatus == "paid" || it.Status == "paid" || it.Status == "partial_shipped" ||
+			it.Status == "in_transit" || it.Status == "partial_received" || it.Status == "completed" {
+			return fmt.Errorf("关联代发单 %s 已进入付款/履约，不可撤回分配", it.PoNo)
+		}
+		if it.Status == "draft" || it.Status == "ordered" {
+			if _, err := s.supply.CancelPurchaseOrder(ctx, bearerToken, it.ID); err != nil {
+				// 草稿优先删除
+				if it.Status == "draft" {
+					if delErr := s.supply.DeletePurchaseOrder(ctx, bearerToken, it.ID); delErr != nil {
+						return fmt.Errorf("取消代发单 %s 失败: %w", it.PoNo, err)
+					}
+					continue
+				}
+				return fmt.Errorf("取消代发单 %s 失败: %w", it.PoNo, err)
+			}
+		}
+	}
+	return nil
+}
+
 // RevokeAllocate 撤回分配：快递助手侧先撤单/退审到待推单，再清空 OMS 履约分配。
 func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID, orderID uint64, bearerToken string) (*model.Order, error) {
 	o, err := s.repos.GetOrder(tenantID, orderID)
@@ -571,6 +704,13 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 	}
 	if o.AllocType == "" && o.Status == model.StatusPendingAlloc {
 		return nil, fmt.Errorf("订单尚未分配")
+	}
+
+	// 先处理关联代发采购单（已付款则禁止撤回）
+	if o.AllocType == model.AllocDropship || strings.TrimSpace(o.PurchaseOrderID) != "" {
+		if err := s.cancelLinkedDropshipPOs(ctx, o.ID, o.PurchaseOrderID, bearerToken); err != nil {
+			return nil, err
+		}
 	}
 
 	kdzsRemark := ""
