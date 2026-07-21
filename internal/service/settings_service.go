@@ -50,7 +50,7 @@ func (s *SettingsService) EnsureDefaultSyncJobs(tenantID uint64) error {
 			name:    "定时同步电商订单",
 			params: SyncJobParams{
 				PageSize:          50,
-				TradeStatuses:     []string{"wait_audit", "wait_send"},
+				TradeStatuses:     []string{"wait_audit", "wait_send", "shipped"},
 				DateRangeDays:     0, // 0=不限时间，与工作台一致
 				RefreshOpenOrders: false,
 			},
@@ -155,7 +155,7 @@ func (s *SettingsService) executeSyncJob(ctx context.Context, job *model.SyncJob
 		params.PageSize = 50
 	}
 	if len(params.TradeStatuses) == 0 {
-		params.TradeStatuses = []string{"wait_audit", "wait_send"}
+		params.TradeStatuses = []string{"wait_audit", "wait_send", "shipped"}
 	}
 
 	// dateRangeDays<=0：不传时间窗，与工作台「同步电商订单」一致

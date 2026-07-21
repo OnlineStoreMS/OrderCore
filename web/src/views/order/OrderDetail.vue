@@ -11,6 +11,7 @@ import {
   labelDropship,
   labelEcommerceStatus,
   labelKDZSStatus,
+  labelShipStatus,
   labelSource,
   labelStatus,
   listBindings,
@@ -56,18 +57,20 @@ function hasBlockingEcommerce(o: Order) {
 const canAllocate = computed(() => {
   const o = order.value
   if (!o) return false
-  if (o.status === 'closed') return false
+  if (o.status === 'closed' || o.status === 'completed') return false
+  if (o.shipStatus === 'shipped') return false
   // 快递助手已推厂家代发：只跟踪，不再二次分配
   if (o.sourceChannel === 'kdzs' && o.agentType === 2) return false
   if (o.sourceChannel === 'kdzs' && hasBlockingEcommerce(o)) return false
   const s = o.status
-  return s === 'pending_ship' || s === 'allocated' || s === 'purchasing'
+  return s === 'pending_alloc' || s === 'pending_ship' || s === 'allocated' || s === 'purchasing'
 })
 
 const canRevokeAllocate = computed(() => {
   const o = order.value
   if (!o) return false
-  if (o.status === 'shipped' || o.status === 'completed' || o.status === 'closed') return false
+  if (o.status === 'completed' || o.status === 'closed') return false
+  if (o.shipStatus === 'shipped') return false
   if (!o.allocType) return false
   // 厂家代发请在快递助手撤单后由同步回退
   if (o.sourceChannel === 'kdzs' && o.agentType === 2 && o.dropshipMode === 'kdzs_factory') return false
@@ -78,7 +81,8 @@ const canShip = computed(() => {
   const o = order.value
   if (!o) return false
   if (o.shipEntryLocked) return false
-  if (o.status === 'shipped' || o.status === 'completed' || o.status === 'closed') return false
+  if (o.shipStatus === 'shipped') return false
+  if (o.status === 'completed' || o.status === 'closed') return false
   if (o.allocType === 'dropship' && o.dropshipMode === 'kdzs_factory') return false
   if (o.sourceChannel === 'kdzs' && hasBlockingEcommerce(o)) return false
   return !!o.allocType
@@ -202,10 +206,11 @@ onMounted(load)
 
     <template v-if="order">
       <el-descriptions :column="3" border>
-        <el-descriptions-item label="来源">{{ labelSource(order.sourceChannel) }}</el-descriptions-item>
+        <el-descriptions-item label="订单类型">{{ labelSource(order.sourceChannel) }}</el-descriptions-item>
         <el-descriptions-item label="平台">{{ order.platform || '-' }} / {{ order.shopName || '-' }}</el-descriptions-item>
         <el-descriptions-item label="平台单号">{{ order.platformOrderId || '-' }}</el-descriptions-item>
         <el-descriptions-item label="履约状态">{{ labelStatus(order.status) }}</el-descriptions-item>
+        <el-descriptions-item label="发货状态">{{ labelShipStatus(order.shipStatus) }}</el-descriptions-item>
         <el-descriptions-item label="快递助手状态">
           {{ labelKDZSStatus(order) }}
           <span v-if="order.sourceChannel === 'kdzs'" class="muted"> · {{ labelAgentType(order.agentType) }}</span>

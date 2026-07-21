@@ -33,6 +33,10 @@ func (s *OrderService) SetOnAllocated(fn func(tenantID, orderID uint64)) {
 }
 
 func (s *OrderService) Dashboard(tenantID uint64) (map[string]any, error) {
+	cards, err := s.repos.DashboardCards(tenantID)
+	if err != nil {
+		return nil, err
+	}
 	byStatus, err := s.repos.CountByStatus(tenantID)
 	if err != nil {
 		return nil, err
@@ -41,9 +45,15 @@ func (s *OrderService) Dashboard(tenantID uint64) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	trend, err := s.repos.DailyOrderTrend(tenantID, 14)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
+		"cards":    cards,
 		"byStatus": byStatus,
 		"bySource": bySource,
+		"trend":    trend,
 	}, nil
 }
 
@@ -67,7 +77,8 @@ func (s *OrderService) CreateManual(tenantID, operatorID uint64, req dto.ManualC
 		TenantID:      tenantID,
 		OrderNo:       orderNo,
 		SourceChannel: model.SourceManual,
-		Status:        model.StatusPendingShip,
+		Status:        model.StatusPendingAlloc,
+		ShipStatus:    model.ShipWaitShip,
 		BuyerName:     req.BuyerName,
 		BuyerPhone:    req.BuyerPhone,
 		BuyerNick:     req.BuyerNick,
@@ -155,6 +166,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 
 	hint := deriveKDZSIngest(channel, req)
 	status := hint.Status
+	shipStatus := hint.ShipStatus
 	platformStatus := coalesceStr(hint.PlatformStatus, req.PlatformStatus)
 	platformStatusText := coalesceStr(hint.PlatformStatusText, req.PlatformStatusText)
 	if existing != nil {
@@ -193,14 +205,15 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			}
 
 			statusChanged := false
-			terminal := existing.Status == model.StatusShipped || existing.Status == model.StatusCompleted || existing.Status == model.StatusClosed
-			// 退款成功/交易关闭：同步关闭（不覆盖已发货/已完成）
+			terminal := existing.Status == model.StatusCompleted || existing.Status == model.StatusClosed
+			// 退款成功/交易关闭：同步关闭（不覆盖已完成）
 			if !terminal && status == model.StatusClosed {
 				fields["status"] = status
 				statusChanged = fromStatus != status
 			} else if !terminal && hint.ApplySyncAlloc {
-				// 自营自动分配：尊重「撤回分配」标记；厂家代发以快递助手为准强制同步
-				skipSelfAuto := hint.AgentType == model.AgentTypeSelf && existing.SkipAutoAlloc
+				// 自营自动分配：尊重「撤回分配」标记；厂家代发/已发货以快递助手为准强制同步
+				skipSelfAuto := hint.AgentType == model.AgentTypeSelf && existing.SkipAutoAlloc &&
+					hint.ShipStatus != model.ShipShipped && hint.Status != model.StatusCompleted
 				if !skipSelfAuto {
 					fields["alloc_type"] = hint.AllocType
 					fields["dropship_mode"] = hint.DropshipMode
@@ -245,6 +258,15 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				fields["factory_name"] = req.FactoryName
 			}
 
+			// 发货状态独立更新（关闭场景 hint.ShipStatus 为空则不改）
+			if shipStatus != "" && existing.Status != model.StatusClosed {
+				fields["ship_status"] = shipStatus
+				if shipStatus == model.ShipShipped && existing.ShippedAt == nil {
+					now := time.Now()
+					fields["shipped_at"] = &now
+				}
+			}
+
 			if err := tx.UpdateOrderFields(tenantID, existing.ID, fields); err != nil {
 				return err
 			}
@@ -287,6 +309,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	if err != nil {
 		return nil, false, err
 	}
+	if shipStatus == "" {
+		shipStatus = model.ShipWaitShip
+	}
 	o := &model.Order{
 		TenantID:           tenantID,
 		OrderNo:            orderNo,
@@ -298,6 +323,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		ShopName:           req.ShopName,
 		ExternalRefID:      req.ExternalRefID,
 		Status:             status,
+		ShipStatus:         shipStatus,
 		AllocType:          hint.AllocType,
 		DropshipMode:       hint.DropshipMode,
 		BuyerNick:          req.BuyerNick,
@@ -325,6 +351,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	if hint.ApplySyncAlloc {
 		now := time.Now()
 		o.AllocatedAt = &now
+		if shipStatus == model.ShipShipped || status == model.StatusCompleted {
+			o.ShippedAt = &now
+		}
 	}
 	if t := parseTime(req.PayTime); t != nil {
 		o.PayTime = t
@@ -366,8 +395,11 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	if err != nil {
 		return nil, err
 	}
-	if o.Status == model.StatusShipped || o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
+	if o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
 		return nil, fmt.Errorf("当前状态不可分配")
+	}
+	if o.ShipStatus == model.ShipShipped {
+		return nil, fmt.Errorf("订单已发货，不可再分配")
 	}
 	if o.SourceChannel == model.SourceKDZS && o.AgentType == model.AgentTypeFactory {
 		return nil, fmt.Errorf("快递助手已推厂家代发，无需在订单中心再分配")
@@ -463,6 +495,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 			"purchase_order_id": req.PurchaseOrderID,
 			"alloc_remark":      req.Remark,
 			"status":            nextStatus,
+			"ship_status":       model.ShipWaitShip,
 			"allocated_at":      now,
 			"agent_type":        agentType,
 			"ship_entry_locked": locked,
@@ -513,10 +546,13 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 	if err != nil {
 		return nil, err
 	}
-	if o.Status == model.StatusShipped || o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
+	if o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
 		return nil, fmt.Errorf("当前状态不可撤回分配")
 	}
-	if o.AllocType == "" && o.Status == model.StatusPendingShip {
+	if o.ShipStatus == model.ShipShipped {
+		return nil, fmt.Errorf("订单已发货，不可撤回分配")
+	}
+	if o.AllocType == "" && o.Status == model.StatusPendingAlloc {
 		return nil, fmt.Errorf("订单尚未分配")
 	}
 	if o.SourceChannel == model.SourceKDZS && o.AgentType == model.AgentTypeFactory &&
@@ -544,7 +580,8 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 			"purchase_order_id": "",
 			"alloc_remark":      "",
 			"allocated_at":      nil,
-			"status":            model.StatusPendingShip,
+			"status":            model.StatusPendingAlloc,
+			"ship_status":       model.ShipWaitShip,
 			"agent_type":        model.AgentTypeSelf,
 			"ship_entry_locked": locked,
 			"ship_lock_reason":  lockReason,
@@ -552,7 +589,7 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 		}
 		return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
 			FromStatus: from,
-			ToStatus:   model.StatusPendingShip,
+			ToStatus:   model.StatusPendingAlloc,
 			Action:     "revoke_allocate",
 			Remark:     "撤回分配",
 			OperatorID: operatorID,
@@ -595,6 +632,9 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	}
 	if o.Status == model.StatusClosed {
 		return nil, fmt.Errorf("订单已关闭")
+	}
+	if o.ShipStatus == model.ShipShipped {
+		return nil, fmt.Errorf("订单已发货")
 	}
 	if o.ShipEntryLocked {
 		reason := o.ShipLockReason
@@ -663,13 +703,13 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 			return err
 		}
 		return tx.TransitionOrder(tenantID, orderID, map[string]any{
-			"status":     model.StatusShipped,
-			"shipped_at": now,
+			"ship_status": model.ShipShipped,
+			"shipped_at":  now,
 		}, &model.OrderStatusLog{
 			FromStatus: from,
-			ToStatus:   model.StatusShipped,
+			ToStatus:   from, // 履约状态不变
 			Action:     "ship",
-			Remark:     fmt.Sprintf("%s %s", req.ExpressCompany, req.ExpressNo),
+			Remark:     fmt.Sprintf("发货状态→已发货 %s %s", req.ExpressCompany, req.ExpressNo),
 			OperatorID: operatorID,
 		})
 	})
@@ -716,6 +756,9 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 	if s.storeSync == nil {
 		return nil, fmt.Errorf("StoreSyncAgent 未配置")
 	}
+	if tid := strings.TrimSpace(req.Tid); tid != "" {
+		return s.syncKDZSByTid(ctx, tenantID, operatorID, tid, req.Platform, token)
+	}
 	pageNo := req.PageNo
 	if pageNo <= 0 {
 		pageNo = 1
@@ -724,68 +767,129 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 	if pageSize <= 0 {
 		pageSize = 50
 	}
-	statuses := make([]string, 0, 2)
+	statuses := make([]string, 0, 3)
 	if len(req.TradeStatuses) > 0 {
 		statuses = append(statuses, req.TradeStatuses...)
 	} else if strings.TrimSpace(req.TradeStatus) != "" {
 		statuses = append(statuses, strings.TrimSpace(req.TradeStatus))
 	} else {
-		// 默认同步待推单 + 待发货
-		statuses = []string{"wait_audit", "wait_send"}
+		statuses = []string{"wait_audit", "wait_send", "shipped"}
 	}
 
 	created, updated, fetched, total := 0, 0, 0, 0
 	seen := map[string]struct{}{}
 	for i, status := range statuses {
 		if i > 0 {
-			// 快递助手限流：连续查询需间隔数秒
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(3500 * time.Millisecond):
 			}
 		}
-		result, err := s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
-			Platform:      req.Platform,
-			ShopID:        req.ShopID,
-			TradeStatus:   status,
-			PageNo:        pageNo,
-			PageSize:      pageSize,
-			StartDateTime: req.StartTime,
-			EndDateTime:   req.EndTime,
-		})
-		if err != nil {
-			return map[string]int{"created": created, "updated": updated, "fetched": fetched, "total": total}, err
-		}
-		fetched += len(result.Items)
-		total += result.Total
-		for _, t := range result.Items {
-			ingest := mapTradeToIngest(t)
-			// 快递助手列表态以本次同步筛选项为准；电商平台状态保留在 ecommerceStatus
-			ingest.PlatformStatus = status
-			ingest.PlatformStatusText = kdzsPlatformStatusText(status)
-			key := ingest.PlatformOrderID
-			if key == "" {
-				key = ingest.PlatformSysTid
-			}
-			if key != "" {
-				if _, ok := seen[key]; ok {
-					continue
+		maxPages := 3
+		for page := pageNo; page < pageNo+maxPages; page++ {
+			if page > pageNo {
+				select {
+				case <-ctx.Done():
+					return map[string]int{"created": created, "updated": updated, "fetched": fetched, "total": total}, ctx.Err()
+				case <-time.After(3500 * time.Millisecond):
 				}
-				seen[key] = struct{}{}
 			}
-			_, isNew, err := s.Ingest(ctx, tenantID, operatorID, ingest, token)
+			result, err := s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
+				Platform:      req.Platform,
+				ShopID:        req.ShopID,
+				TradeStatus:   status,
+				PageNo:        page,
+				PageSize:      pageSize,
+				StartDateTime: req.StartTime,
+				EndDateTime:   req.EndTime,
+			})
 			if err != nil {
-				return nil, err
+				return map[string]int{"created": created, "updated": updated, "fetched": fetched, "total": total}, err
 			}
-			if isNew {
-				created++
-			} else {
-				updated++
+			fetched += len(result.Items)
+			if page == pageNo {
+				total += result.Total
+			}
+			for _, t := range result.Items {
+				ingest := mapTradeToIngest(t)
+				ingest.PlatformStatus = status
+				ingest.PlatformStatusText = kdzsPlatformStatusText(status)
+				key := ingest.PlatformOrderID
+				if key == "" {
+					key = ingest.PlatformSysTid
+				}
+				if key != "" {
+					if _, ok := seen[key]; ok {
+						continue
+					}
+					seen[key] = struct{}{}
+				}
+				_, isNew, err := s.Ingest(ctx, tenantID, operatorID, ingest, token)
+				if err != nil {
+					return nil, err
+				}
+				if isNew {
+					created++
+				} else {
+					updated++
+				}
+			}
+			if len(result.Items) == 0 || page*pageSize >= result.Total {
+				break
 			}
 		}
 	}
 	return map[string]int{"created": created, "updated": updated, "fetched": fetched, "total": total}, nil
+}
+
+func (s *OrderService) syncKDZSByTid(ctx context.Context, tenantID, operatorID uint64, tid, platform, token string) (map[string]int, error) {
+	result, err := s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
+		Platform: platform,
+		Tid:      tid,
+		PageNo:   1,
+		PageSize: 5,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if result == nil || len(result.Items) == 0 {
+		return map[string]int{"created": 0, "updated": 0, "fetched": 0, "total": 0}, fmt.Errorf("快递助手未找到平台单号 %s", tid)
+	}
+	created, updated := 0, 0
+	for _, t := range result.Items {
+		ingest := mapTradeToIngest(t)
+		norm, text := normalizeKDZSPlatformStatus(ingest.PlatformStatus, ingest.PlatformStatusText)
+		if norm != "" {
+			ingest.PlatformStatus = norm
+			ingest.PlatformStatusText = text
+		}
+		_, isNew, err := s.Ingest(ctx, tenantID, operatorID, ingest, token)
+		if err != nil {
+			return nil, err
+		}
+		if isNew {
+			created++
+		} else {
+			updated++
+		}
+	}
+	return map[string]int{"created": created, "updated": updated, "fetched": len(result.Items), "total": result.Total}, nil
+}
+
+// EnsureKDZSOrderByPlatformID 本地没有该平台单号时，尝试从快递助手补拉。
+func (s *OrderService) EnsureKDZSOrderByPlatformID(ctx context.Context, tenantID, operatorID uint64, platformOrderID, token string) error {
+	platformOrderID = strings.TrimSpace(platformOrderID)
+	if platformOrderID == "" || s.storeSync == nil || strings.TrimSpace(token) == "" {
+		return nil
+	}
+	if existing, err := s.repos.FindBySourcePlatform(tenantID, model.SourceKDZS, platformOrderID); err == nil && existing != nil {
+		return nil
+	} else if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	_, err := s.syncKDZSByTid(ctx, tenantID, operatorID, platformOrderID, "", token)
+	return err
 }
 
 // RefreshOpenKDZSOrders 按平台单号回查快递助手，刷新未完结订单的状态/售后等信息。
@@ -840,14 +944,16 @@ func (s *OrderService) RefreshOpenKDZSOrders(ctx context.Context, tenantID, oper
 			continue
 		}
 		ingest := mapTradeToIngest(result.Items[0])
-		// 回查只刷新电商/售后等字段；快递助手列表态以库内（列表同步）为准。
-		// tid 查询常带回电商态+「待发货」文案，会被误判成 wait_send，进而把待分配单镜像成已分配。
-		if o.PlatformStatus == model.KDZSWaitAudit || o.PlatformStatus == model.KDZSWaitSend ||
+		normStatus, normText := normalizeKDZSPlatformStatus(ingest.PlatformStatus, ingest.PlatformStatusText)
+		// 已发货/已完成允许从回查升态；待推/待发仍以库内列表同步为准，避免电商文案误判
+		if normStatus == "shipped" || normStatus == "completed" {
+			ingest.PlatformStatus = normStatus
+			ingest.PlatformStatusText = normText
+		} else if o.PlatformStatus == model.KDZSWaitAudit || o.PlatformStatus == model.KDZSWaitSend ||
 			o.PlatformStatus == "shipped" || o.PlatformStatus == "completed" {
 			ingest.PlatformStatus = o.PlatformStatus
 			ingest.PlatformStatusText = o.PlatformStatusText
 		} else {
-			normStatus, normText := normalizeKDZSPlatformStatus(ingest.PlatformStatus, ingest.PlatformStatusText)
 			ingest.PlatformStatus = normStatus
 			ingest.PlatformStatusText = normText
 		}
@@ -1060,7 +1166,7 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 		PlatformSysTid:      sysTid,
 		ShopID:              t.ShopID,
 		ShopName:            t.ShopName,
-		Status:              model.StatusPendingShip,
+		Status:              model.StatusPendingAlloc,
 		PlatformStatus:      kdzsStatus,
 		PlatformStatusText:  kdzsText,
 		EcommerceStatus:     ecomStatus,
@@ -1093,6 +1199,7 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 
 type kdzsIngestHint struct {
 	Status             string
+	ShipStatus         string
 	PlatformStatus     string
 	PlatformStatusText string
 	AllocType          string
@@ -1150,10 +1257,12 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 		LogRemark: "同步入库: " + channel,
 	}
 	if h.Status == "" {
-		h.Status = model.StatusPendingShip
+		h.Status = model.StatusPendingAlloc
+		h.ShipStatus = model.ShipWaitShip
 	}
 	if channel != model.SourceKDZS {
 		h.ShipEntryLocked = false
+		normalizeNonKDZSHint(&h)
 		return h
 	}
 
@@ -1168,6 +1277,7 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 
 	switch strings.ToLower(strings.TrimSpace(platformStatus)) {
 	case model.KDZSWaitSend:
+		h.ShipStatus = model.ShipWaitShip
 		if isFactory {
 			h.Status = model.StatusAllocated
 			h.AllocType = model.AllocDropship
@@ -1175,7 +1285,7 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 			h.ApplySyncAlloc = true
 			h.ShipEntryLocked = true
 			h.ShipLockReason = "快递助手已分配厂家代发，由厂家发货，无需干预"
-			h.LogRemark = "同步待发货代发单→已分配并锁定填单号"
+			h.LogRemark = "同步待发货代发单→已分配+待发货并锁定填单号"
 		} else {
 			// 快递助手已是自营待发货：同步为自营已分配，可直接填单号
 			h.Status = model.StatusAllocated
@@ -1184,9 +1294,39 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 			h.ApplySyncAlloc = true
 			h.ShipEntryLocked = false
 			h.ShipLockReason = ""
-			h.LogRemark = "同步待发货自营单→已分配"
+			h.LogRemark = "同步待发货自营单→已分配+待发货"
 		}
+	case "shipped":
+		h.Status = model.StatusAllocated
+		h.ShipStatus = model.ShipShipped
+		h.ApplySyncAlloc = true
+		h.ShipEntryLocked = true
+		h.ShipLockReason = "快递助手已发货"
+		if isFactory {
+			h.AllocType = model.AllocDropship
+			h.DropshipMode = model.DropshipKDZSFactory
+			h.LogRemark = "同步已发货代发单→已分配+已发货"
+		} else {
+			h.AllocType = model.AllocSelfShip
+			h.DropshipMode = ""
+			h.LogRemark = "同步已发货自营单→已分配+已发货"
+		}
+	case "completed":
+		h.Status = model.StatusCompleted
+		h.ShipStatus = model.ShipShipped
+		h.ApplySyncAlloc = true
+		h.ShipEntryLocked = true
+		h.ShipLockReason = "快递助手交易完成"
+		if isFactory {
+			h.AllocType = model.AllocDropship
+			h.DropshipMode = model.DropshipKDZSFactory
+		} else {
+			h.AllocType = model.AllocSelfShip
+			h.DropshipMode = ""
+		}
+		h.LogRemark = "同步交易完成→已完成+已发货"
 	case model.KDZSWaitAudit:
+		h.ShipStatus = model.ShipWaitShip
 		if isFactory {
 			// 待推单但快递助手侧已标厂家代发：视为已分配，无需再干预
 			h.Status = model.StatusAllocated
@@ -1197,13 +1337,14 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 			h.ShipLockReason = "快递助手已推厂家代发，无需干预"
 			h.LogRemark = "同步待推单代发单→已分配"
 		} else {
-			h.Status = model.StatusPendingShip
+			h.Status = model.StatusPendingAlloc
 			h.ClearAlloc = true
 			h.ShipEntryLocked = true
 			h.ShipLockReason = "快递助手待推单，请先分配；仅自营待发货可填单号"
 			h.LogRemark = "同步待推单→清空分配，恢复待分配"
 		}
 	default:
+		h.ShipStatus = model.ShipWaitShip
 		if isFactory {
 			h.Status = model.StatusAllocated
 			h.AllocType = model.AllocDropship
@@ -1224,6 +1365,7 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 		h.DropshipMode = ""
 		h.ApplySyncAlloc = false
 		h.ClearAlloc = false
+		h.ShipStatus = "" // 关闭时不改发货状态
 		h.ShipEntryLocked = true
 		h.ShipLockReason = reason
 		h.LogRemark = reason
@@ -1237,6 +1379,30 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 		}
 	}
 	return h
+}
+
+// normalizeNonKDZSHint 将门店/手工等来源的旧单一 status 归一为履约+发货
+func normalizeNonKDZSHint(h *kdzsIngestHint) {
+	switch h.Status {
+	case model.StatusPendingShip, "":
+		h.Status = model.StatusPendingAlloc
+		if h.ShipStatus == "" {
+			h.ShipStatus = model.ShipWaitShip
+		}
+	case model.StatusShipped, model.StatusPartialShip:
+		h.Status = model.StatusAllocated
+		h.ShipStatus = model.ShipShipped
+	case model.StatusCompleted:
+		if h.ShipStatus == "" {
+			h.ShipStatus = model.ShipShipped
+		}
+	case model.StatusClosed:
+		// 关闭不强制改发货
+	case model.StatusPendingPayment, model.StatusPendingAlloc, model.StatusAllocated, model.StatusPurchasing:
+		if h.ShipStatus == "" {
+			h.ShipStatus = model.ShipWaitShip
+		}
+	}
 }
 
 func computeShipLock(channel, platformStatus string, agentType int, dropshipMode string) (bool, string) {
@@ -1349,18 +1515,19 @@ func coalesceStr(a, b string) string {
 }
 
 func mapStoreSalesToIngest(so storecore.SalesOrder) dto.IngestOrderRequest {
-	status := model.StatusPendingShip
+	status := model.StatusPendingAlloc
 	switch so.Status {
 	case "completed":
 		status = model.StatusCompleted
 	case "cancelled":
 		status = model.StatusClosed
 	case "shipping":
+		// 历史 shipped 值经 normalizeNonKDZSHint → allocated + shipped
 		status = model.StatusShipped
 	case "draft", "preview":
 		status = model.StatusPendingPayment
 	}
-	if so.NeedProcurement && status == model.StatusPendingShip {
+	if so.NeedProcurement && (status == model.StatusPendingAlloc || status == model.StatusPendingShip) {
 		// 门店侧已标记需采购，同步后便于分配采购发货
 	}
 	items := make([]dto.OrderItemInput, 0, len(so.Items))

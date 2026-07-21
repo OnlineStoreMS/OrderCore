@@ -54,7 +54,43 @@ func AutoMigrate(db *gorm.DB) error {
 	); err != nil {
 		return err
 	}
+	if err := backfillFulfillmentShipStatus(db); err != nil {
+		return err
+	}
 	return ensureIndexes(db)
+}
+
+// backfillFulfillmentShipStatus 将历史单一 status 拆成履约 + 发货（幂等）
+func backfillFulfillmentShipStatus(db *gorm.DB) error {
+	steps := []string{
+		// pending_ship → pending_alloc + wait_ship
+		`UPDATE orders SET status = 'pending_alloc', ship_status = 'wait_ship'
+		 WHERE status = 'pending_ship'`,
+		// open fulfillment without ship_status
+		`UPDATE orders SET ship_status = 'wait_ship'
+		 WHERE (ship_status IS NULL OR ship_status = '')
+		   AND status IN ('pending_alloc','allocated','purchasing','pending_payment')`,
+		// legacy shipped / partial_ship → allocated|purchasing + shipped
+		`UPDATE orders SET
+			status = CASE WHEN alloc_type = 'purchase_then_ship' THEN 'purchasing' ELSE 'allocated' END,
+			ship_status = 'shipped'
+		 WHERE status IN ('shipped','partial_ship')`,
+		// completed → ship shipped
+		`UPDATE orders SET ship_status = 'shipped'
+		 WHERE status = 'completed' AND (ship_status IS NULL OR ship_status = '' OR ship_status = 'wait_ship')`,
+		// closed: infer ship from shipped_at
+		`UPDATE orders SET ship_status = CASE WHEN shipped_at IS NOT NULL THEN 'shipped' ELSE 'wait_ship' END
+		 WHERE status = 'closed' AND (ship_status IS NULL OR ship_status = '')`,
+		// safety net
+		`UPDATE orders SET ship_status = 'wait_ship'
+		 WHERE ship_status IS NULL OR ship_status = ''`,
+	}
+	for _, sql := range steps {
+		if err := db.Exec(sql).Error; err != nil {
+			return fmt.Errorf("backfill fulfillment/ship status: %w", err)
+		}
+	}
+	return nil
 }
 
 func ensureIndexes(db *gorm.DB) error {

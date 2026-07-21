@@ -2,24 +2,43 @@ package model
 
 import "time"
 
-// 订单来源
+// 订单类型（source_channel）：业务来源渠道
 const (
-	SourceKDZS   = "kdzs"    // 快递助手电商（StoreSyncAgent）
-	SourceWXMall = "wx_mall" // 微信小程序商城（预留）
-	SourceStore  = "store"   // 门店销售（StoreCore）
+	SourceKDZS   = "kdzs"    // 电商（StoreSyncAgent / 快递助手）
+	SourceWXMall = "wx_mall" // 小程序（私域商城 MallCore）
+	SourceStore  = "store"   // 门店（StoreCore）
+	SourceXianyu = "xianyu"  // 闲鱼（后续）
 	SourceManual = "manual"  // 手工订单
 )
 
-// 统一订单状态
+// KnownSourceChannels 工作台/筛选项展示的全部订单类型（含尚未接入的）
+var KnownSourceChannels = []string{
+	SourceKDZS,
+	SourceWXMall,
+	SourceStore,
+	SourceXianyu,
+	SourceManual,
+}
+
+// 履约状态（分配与履约进度；发货见 ShipStatus）
 const (
 	StatusPendingPayment = "pending_payment"
-	StatusPendingShip    = "pending_ship"
+	StatusPendingAlloc   = "pending_alloc" // 待分配
 	StatusAllocated      = "allocated"
 	StatusPurchasing     = "purchasing"
-	StatusShipped        = "shipped"
-	StatusPartialShip    = "partial_ship"
 	StatusCompleted      = "completed"
 	StatusClosed         = "closed"
+
+	// 以下为历史履约值，仅用于回填/读旧日志，不再写入
+	StatusPendingShip = "pending_ship"
+	StatusShipped     = "shipped"
+	StatusPartialShip = "partial_ship"
+)
+
+// 发货状态
+const (
+	ShipWaitShip = "wait_ship" // 待发货
+	ShipShipped  = "shipped"   // 已发货
 )
 
 // 分配类型
@@ -68,7 +87,8 @@ type Order struct {
 	ShopID           string     `gorm:"size:64" json:"shopId"`
 	ShopName         string     `gorm:"size:128" json:"shopName"`
 	ExternalRefID    string     `gorm:"size:64;index" json:"externalRefId"` // StoreCore 销售单 ID 等
-	Status           string     `gorm:"size:32;not null;index" json:"status"`
+	Status           string     `gorm:"size:32;not null;index" json:"status"`         // 履约状态
+	ShipStatus       string     `gorm:"size:32;not null;index;default:wait_ship" json:"shipStatus"` // 发货状态
 	AllocType        string     `gorm:"size:32;index" json:"allocType"`
 	DropshipMode     string     `gorm:"size:32" json:"dropshipMode"`
 	SupplierID       uint64     `gorm:"index" json:"supplierId"`

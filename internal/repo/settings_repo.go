@@ -58,9 +58,10 @@ func (r *Repos) ListOpenKDZSOrders(tenantID uint64, limit int) ([]model.Order, e
 	}
 	var list []model.Order
 	err := r.db.Where(
-		"tenant_id = ? AND source_channel = ? AND status IN ?",
+		"tenant_id = ? AND source_channel = ? AND status IN ? AND ship_status = ?",
 		tenantID, model.SourceKDZS,
-		[]string{model.StatusPendingShip, model.StatusAllocated, model.StatusPurchasing},
+		[]string{model.StatusPendingAlloc, model.StatusAllocated, model.StatusPurchasing},
+		model.ShipWaitShip,
 	).Order("updated_at ASC").Limit(limit).Find(&list).Error
 	return list, err
 }

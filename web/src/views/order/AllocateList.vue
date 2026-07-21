@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   formatAddress,
@@ -12,6 +12,7 @@ import {
   labelEcommerceStatus,
   labelKDZSStatus,
   labelPlatform,
+  labelShipStatus,
   labelStatus,
   listOrders,
   type Order,
@@ -20,16 +21,21 @@ import {
 import { dateShortcuts, defaultOrderedRange } from '../../utils/date'
 
 const router = useRouter()
+const route = useRoute()
 const loading = ref(false)
 const list = ref<Order[]>([])
 const total = ref(0)
 const [defaultStart, defaultEnd] = defaultOrderedRange()
+const statusFromQuery = typeof route.query.status === 'string' ? route.query.status : ''
+const normalizedStatus =
+  statusFromQuery === 'pending_ship' ? 'pending_alloc' : statusFromQuery || 'pending_alloc'
 const filters = reactive({
   page: 1,
   pageSize: 20,
-  status: 'pending_ship',
+  status: normalizedStatus,
   keyword: '',
-  orderedRange: [defaultStart, defaultEnd] as [string, string] | null,
+  // 从工作台带入状态时不限默认时间窗，与卡片数量对齐
+  orderedRange: statusFromQuery ? null : ([defaultStart, defaultEnd] as [string, string] | null),
 })
 
 async function load() {
@@ -67,7 +73,7 @@ onMounted(load)
   <div class="page">
     <div class="toolbar">
       <el-radio-group v-model="filters.status" @change="onFilterChange">
-        <el-radio-button value="pending_ship">待分配</el-radio-button>
+        <el-radio-button value="pending_alloc">待分配</el-radio-button>
         <el-radio-button value="allocated">已分配</el-radio-button>
         <el-radio-button value="purchasing">采购中</el-radio-button>
         <el-radio-button value="">全部</el-radio-button>
@@ -99,7 +105,11 @@ onMounted(load)
       <el-table-column label="平台" width="90">
         <template #default="{ row }">{{ labelPlatform(row.platform) }}</template>
       </el-table-column>
-      <el-table-column prop="platformOrderId" label="平台单号" min-width="150" show-overflow-tooltip />
+      <el-table-column prop="platformOrderId" label="平台单号" min-width="200" width="220">
+        <template #default="{ row }">
+          <span class="platform-oid">{{ row.platformOrderId || '-' }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="买家" min-width="120" show-overflow-tooltip>
         <template #default="{ row }">{{ row.buyerNick || row.buyerName || '-' }}</template>
       </el-table-column>
@@ -165,9 +175,16 @@ onMounted(load)
           <span v-else>-</span>
         </template>
       </el-table-column>
-      <el-table-column label="履约状态" width="100">
+      <el-table-column label="履约状态" width="90">
         <template #default="{ row }">
           <el-tag size="small" type="info">{{ labelStatus(row.status) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="发货状态" width="90">
+        <template #default="{ row }">
+          <el-tag size="small" :type="row.shipStatus === 'shipped' ? 'success' : 'warning'">
+            {{ labelShipStatus(row.shipStatus) }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column label="分配" width="100">
@@ -220,4 +237,10 @@ onMounted(load)
 .goods-meta span + span::before { content: ' · '; }
 .kdzs-meta { margin-top: 4px; font-size: 12px; color: #909399; }
 .lock-tip { font-size: 11px; color: #e6a23c; margin-top: 2px; }
+.platform-oid {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  word-break: keep-all;
+}
 </style>

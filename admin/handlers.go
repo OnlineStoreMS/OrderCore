@@ -37,22 +37,41 @@ func (h *Handlers) Dashboard(c *gin.Context) {
 func (h *Handlers) ListOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
-	list, total, err := h.orders.List(authcontext.TenantID(c), repo.OrderListQuery{
-		SourceChannel:  c.Query("sourceChannel"),
-		Status:         c.Query("status"),
-		AllocType:      c.Query("allocType"),
-		Keyword:        c.Query("keyword"),
-		Platform:       c.Query("platform"),
-		OrderedAtStart: parseQueryTime(c.Query("orderedAtStart")),
-		OrderedAtEnd:   parseQueryTime(c.Query("orderedAtEnd")),
-		PayTimeStart:   parseQueryTime(c.Query("payTimeStart")),
-		PayTimeEnd:     parseQueryTime(c.Query("payTimeEnd")),
-		Page:           page,
-		PageSize:       pageSize,
-	})
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	q := repo.OrderListQuery{
+		SourceChannel:     c.Query("sourceChannel"),
+		Status:            c.Query("status"),
+		ShipStatus:        c.Query("shipStatus"),
+		AllocType:         c.Query("allocType"),
+		Keyword:           keyword,
+		Platform:          c.Query("platform"),
+		EcommerceWaitShip: c.Query("ecommerceWaitShip") == "1" || c.Query("ecommerceWaitShip") == "true",
+		OrderedAtStart:    parseQueryTime(c.Query("orderedAtStart")),
+		OrderedAtEnd:      parseQueryTime(c.Query("orderedAtEnd")),
+		PayTimeStart:      parseQueryTime(c.Query("payTimeStart")),
+		PayTimeEnd:        parseQueryTime(c.Query("payTimeEnd")),
+		Page:              page,
+		PageSize:          pageSize,
+	}
+	// 按单号搜索时放宽时间窗，避免日期筛选把补拉订单挡住
+	if keyword != "" {
+		q.OrderedAtStart, q.OrderedAtEnd = nil, nil
+		q.PayTimeStart, q.PayTimeEnd = nil, nil
+	}
+	list, total, err := h.orders.List(authcontext.TenantID(c), q)
 	if err != nil {
 		response.Fail(c, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// 本地没有且像平台单号时，尝试从快递助手补拉后再查一次
+	if total == 0 && looksLikePlatformOrderID(keyword) {
+		if err := h.orders.EnsureKDZSOrderByPlatformID(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), keyword, authcontext.BearerToken(c)); err == nil {
+			list, total, err = h.orders.List(authcontext.TenantID(c), q)
+			if err != nil {
+				response.Fail(c, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
 	}
 	response.OK(c, response.PageResult(list, total, page, pageSize))
 }
@@ -334,6 +353,19 @@ func (h *Handlers) DeleteSkuSupplierRule(c *gin.Context) {
 
 func parseID(s string) (uint64, error) {
 	return strconv.ParseUint(s, 10, 64)
+}
+
+func looksLikePlatformOrderID(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 12 || len(s) > 32 {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func parseQueryTime(s string) *time.Time {

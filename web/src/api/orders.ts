@@ -43,6 +43,7 @@ export interface Order {
   shopId?: string
   shopName?: string
   status: string
+  shipStatus?: string
   allocType?: string
   dropshipMode?: string
   supplierId?: number
@@ -116,21 +117,37 @@ export interface FactoryItem {
 }
 
 const sourceLabels: Record<string, string> = {
-  kdzs: '电商(快递助手)',
-  wx_mall: '微信小程序',
-  store: '门店销售',
+  kdzs: '电商',
+  wx_mall: '小程序',
+  store: '门店',
+  xianyu: '闲鱼',
   manual: '手工订单',
 }
 
+/** 工作台/筛选项固定订单类型顺序 */
+export const orderTypeOptions = [
+  { value: 'kdzs', label: '电商', tip: 'StoreSyncAgent' },
+  { value: 'wx_mall', label: '小程序', tip: 'MallCore 私域商城' },
+  { value: 'store', label: '门店', tip: 'StoreCore' },
+  { value: 'xianyu', label: '闲鱼', tip: '后续接入' },
+  { value: 'manual', label: '手工订单', tip: '' },
+] as const
+
 const statusLabels: Record<string, string> = {
   pending_payment: '待付款',
-  pending_ship: '待发货',
+  pending_alloc: '待分配',
+  pending_ship: '待分配', // 历史值兼容
   allocated: '已分配',
   purchasing: '采购中',
-  shipped: '已发货',
+  shipped: '已发货', // 历史履约值兼容
   partial_ship: '部分发货',
   completed: '已完成',
   closed: '已关闭',
+}
+
+const shipStatusLabels: Record<string, string> = {
+  wait_ship: '待发货',
+  shipped: '已发货',
 }
 
 const allocLabels: Record<string, string> = {
@@ -167,6 +184,9 @@ export function labelSource(v?: string) {
 }
 export function labelStatus(v?: string) {
   return (v && statusLabels[v]) || v || '-'
+}
+export function labelShipStatus(v?: string) {
+  return (v && shipStatusLabels[v]) || v || '-'
 }
 export function labelAlloc(v?: string) {
   return (v && allocLabels[v]) || v || '-'

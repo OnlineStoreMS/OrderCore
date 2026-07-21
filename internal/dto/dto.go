@@ -115,14 +115,15 @@ type SkuSupplierRuleRequest struct {
 }
 
 type SyncKDZSRequest struct {
-	Platform     string   `json:"platform"`
-	ShopID       string   `json:"shopId"`
-	TradeStatus  string   `json:"tradeStatus"`
-	TradeStatuses []string `json:"tradeStatuses"`
-	PageNo       int      `json:"pageNo"`
-	PageSize     int      `json:"pageSize"`
-	StartTime    string   `json:"startTime"`
-	EndTime      string   `json:"endTime"`
+	Platform      string   `json:"platform"`
+	ShopID        string   `json:"shopId"`
+	TradeStatus   string   `json:"tradeStatus"`
+	TradeStatuses  []string `json:"tradeStatuses"`
+	PageNo        int      `json:"pageNo"`
+	PageSize      int      `json:"pageSize"`
+	StartTime     string   `json:"startTime"`
+	EndTime       string   `json:"endTime"`
+	Tid           string   `json:"tid"` // 平台单号精确拉取（补单）
 }
 
 type SyncStoreRequest struct {

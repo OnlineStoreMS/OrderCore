@@ -33,17 +33,19 @@ func (r *Repos) Transaction(fn func(txRepos *Repos) error) error {
 }
 
 type OrderListQuery struct {
-	SourceChannel  string
-	Status         string
-	AllocType      string
-	Keyword        string
-	Platform       string
-	OrderedAtStart *time.Time
-	OrderedAtEnd   *time.Time
-	PayTimeStart   *time.Time
-	PayTimeEnd     *time.Time
-	Page           int
-	PageSize       int
+	SourceChannel     string
+	Status            string
+	ShipStatus        string
+	AllocType         string
+	Keyword           string
+	Platform          string
+	EcommerceWaitShip bool // 兼容：按电商订单「待发货」筛选
+	OrderedAtStart    *time.Time
+	OrderedAtEnd      *time.Time
+	PayTimeStart      *time.Time
+	PayTimeEnd        *time.Time
+	Page              int
+	PageSize          int
 }
 
 func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, int64, error) {
@@ -60,11 +62,23 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	if q.Status != "" {
 		tx = tx.Where("status = ?", q.Status)
 	}
+	if q.ShipStatus != "" {
+		tx = tx.Where("ship_status = ?", q.ShipStatus)
+	}
 	if q.AllocType != "" {
 		tx = tx.Where("alloc_type = ?", q.AllocType)
 	}
 	if q.Platform != "" {
 		tx = tx.Where("platform = ?", q.Platform)
+	}
+	if q.EcommerceWaitShip {
+		tx = tx.Where("ship_status = ?", model.ShipWaitShip).
+			Where("status NOT IN ?", []string{model.StatusClosed, model.StatusCompleted}).
+			Where(`(
+				UPPER(COALESCE(ecommerce_status,'')) IN ('ORDER_PAID','WAIT_SELLER_SEND_GOODS','WAIT_SELLER_STOCK_OUT','PAID')
+				OR COALESCE(ecommerce_status_text,'') LIKE '%待发货%'
+				OR (COALESCE(ecommerce_status,'') = '' AND platform_status = ?)
+			)`, model.KDZSWaitSend)
 	}
 	if q.OrderedAtStart != nil {
 		tx = tx.Where("COALESCE(ordered_at, created_at) >= ?", q.OrderedAtStart)
@@ -302,7 +316,13 @@ func (r *Repos) CountBySource(tenantID uint64) (map[string]int64, error) {
 		return nil, err
 	}
 	out := map[string]int64{}
+	for _, ch := range model.KnownSourceChannels {
+		out[ch] = 0
+	}
 	for _, r0 := range rows {
+		if r0.SourceChannel == "" {
+			continue
+		}
 		out[r0.SourceChannel] = r0.Cnt
 	}
 	return out, nil

@@ -194,7 +194,7 @@ func (s *OrderService) TryAutoAllocateBySKU(ctx context.Context, tenantID, opera
 	if order == nil {
 		return
 	}
-	if order.Status != model.StatusPendingShip || order.AllocType != "" {
+	if order.Status != model.StatusPendingAlloc || order.AllocType != "" {
 		return
 	}
 	if order.SkipAutoAlloc {
@@ -212,7 +212,7 @@ func (s *OrderService) TryAutoAllocateBySKU(ctx context.Context, tenantID, opera
 	if err != nil || o == nil {
 		return
 	}
-	if o.Status != model.StatusPendingShip || o.AllocType != "" || o.SkipAutoAlloc {
+	if o.Status != model.StatusPendingAlloc || o.AllocType != "" || o.SkipAutoAlloc {
 		return
 	}
 	if len(o.Items) == 0 {

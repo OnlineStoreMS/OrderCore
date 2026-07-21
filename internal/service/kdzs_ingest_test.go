@@ -20,6 +20,9 @@ func TestDeriveKDZSFactoryFromFactoryName(t *testing.T) {
 	if !h.ApplySyncAlloc || h.Status != model.StatusAllocated || h.AllocType != model.AllocDropship {
 		t.Fatalf("hint=%+v", h)
 	}
+	if h.ShipStatus != model.ShipWaitShip {
+		t.Fatalf("shipStatus=%s", h.ShipStatus)
+	}
 	if h.PlatformStatus != model.KDZSWaitSend {
 		t.Fatalf("platformStatus=%s", h.PlatformStatus)
 	}
@@ -38,6 +41,20 @@ func TestDeriveKDZSSelfIgnoresBareFactoryID(t *testing.T) {
 	if !h.ApplySyncAlloc || h.Status != model.StatusAllocated || h.AllocType != model.AllocSelfShip {
 		t.Fatalf("self wait_send should be self_ship allocated, hint=%+v", h)
 	}
+	if h.ShipStatus != model.ShipWaitShip {
+		t.Fatalf("shipStatus=%s", h.ShipStatus)
+	}
+}
+
+func TestDeriveKDZSShippedSelf(t *testing.T) {
+	h := deriveKDZSIngest(model.SourceKDZS, dto.IngestOrderRequest{
+		PlatformStatus:     "shipped",
+		PlatformStatusText: "已发货",
+		AgentType:          1,
+	})
+	if !h.ApplySyncAlloc || h.Status != model.StatusAllocated || h.AllocType != model.AllocSelfShip || h.ShipStatus != model.ShipShipped {
+		t.Fatalf("shipped self hint=%+v", h)
+	}
 }
 
 func TestDeriveKDZSWaitAuditSelfPending(t *testing.T) {
@@ -46,7 +63,7 @@ func TestDeriveKDZSWaitAuditSelfPending(t *testing.T) {
 		PlatformStatusText: "待推单",
 		AgentType:          1,
 	})
-	if h.ApplySyncAlloc || !h.ClearAlloc || h.Status != model.StatusPendingShip {
+	if h.ApplySyncAlloc || !h.ClearAlloc || h.Status != model.StatusPendingAlloc || h.ShipStatus != model.ShipWaitShip {
 		t.Fatalf("hint=%+v", h)
 	}
 }

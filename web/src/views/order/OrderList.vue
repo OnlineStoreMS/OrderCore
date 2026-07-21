@@ -11,6 +11,7 @@ import {
   labelEcommerceStatus,
   labelKDZSStatus,
   labelPlatform,
+  labelShipStatus,
   labelStatus,
   listOrders,
   syncKDZS,
@@ -26,17 +27,36 @@ const loading = ref(false)
 const list = ref<Order[]>([])
 const total = ref(0)
 const [defaultStart, defaultEnd] = defaultOrderedRange()
+const shipStatusInit =
+  (route.query.shipStatus as string) ||
+  (route.query.status === 'shipped' ? 'shipped' : '')
+const ecommerceWaitShipInit =
+  !shipStatusInit &&
+  (route.query.ecommerceWaitShip === '1' || route.query.ecommerceWaitShip === 'true')
+const waitShipFocus = shipStatusInit === 'wait_ship' || ecommerceWaitShipInit
 const filters = reactive({
   page: 1,
   pageSize: 20,
   sourceChannel: (route.query.sourceChannel as string) || '',
-  status: (route.query.status as string) || '',
+  status: waitShipFocus || shipStatusInit === 'shipped'
+    ? ''
+    : normalizeFulfillmentStatus((route.query.status as string) || ''),
+  shipStatus: shipStatusInit || (ecommerceWaitShipInit ? 'wait_ship' : ''),
   platform: '',
   allocType: '',
   keyword: '',
-  orderedRange: [defaultStart, defaultEnd] as [string, string] | null,
+  orderedRange:
+    waitShipFocus || shipStatusInit === 'shipped'
+      ? null
+      : ([defaultStart, defaultEnd] as [string, string] | null),
   payRange: null as [string, string] | null,
 })
+
+function normalizeFulfillmentStatus(s: string) {
+  if (s === 'pending_ship') return 'pending_alloc'
+  if (s === 'shipped') return '' // 已发货改用发货状态筛选
+  return s
+}
 
 const manualVisible = ref(false)
 const manualForm = reactive({
@@ -57,6 +77,7 @@ async function load() {
       pageSize: filters.pageSize,
       sourceChannel: filters.sourceChannel || undefined,
       status: filters.status || undefined,
+      shipStatus: filters.shipStatus || undefined,
       platform: filters.platform || undefined,
       allocType: filters.allocType || undefined,
       keyword: filters.keyword || undefined,
@@ -84,10 +105,18 @@ function onFilterChange() {
   load()
 }
 
+function clearShipStatusFilter() {
+  filters.shipStatus = ''
+  if (!filters.orderedRange) {
+    filters.orderedRange = [defaultStart, defaultEnd]
+  }
+  onFilterChange()
+}
+
 async function onSyncKDZS() {
   try {
     const stats = await syncKDZS({ pageSize: 50 }) as Record<string, number>
-    ElMessage.success(`同步完成（待推单+待发货）：新增 ${stats.created || 0}，更新 ${stats.updated || 0}`)
+    ElMessage.success(`同步完成（待推单+待发货+已发货）：新增 ${stats.created || 0}，更新 ${stats.updated || 0}`)
     await load()
   } catch (e: any) {
     ElMessage.error(e.message || '同步失败')
@@ -132,12 +161,13 @@ onMounted(load)
   <div class="page">
     <div class="toolbar">
       <el-form inline @submit.prevent>
-        <el-form-item label="来源">
-          <el-select v-model="filters.sourceChannel" clearable style="width: 150px" @change="onFilterChange">
-            <el-option label="电商(快递助手)" value="kdzs" />
-            <el-option label="门店销售" value="store" />
+        <el-form-item label="订单类型">
+          <el-select v-model="filters.sourceChannel" clearable style="width: 140px" @change="onFilterChange">
+            <el-option label="电商" value="kdzs" />
+            <el-option label="小程序" value="wx_mall" />
+            <el-option label="门店" value="store" />
+            <el-option label="闲鱼" value="xianyu" />
             <el-option label="手工订单" value="manual" />
-            <el-option label="微信小程序" value="wx_mall" />
           </el-select>
         </el-form-item>
         <el-form-item label="平台">
@@ -150,13 +180,32 @@ onMounted(load)
           </el-select>
         </el-form-item>
         <el-form-item label="履约状态">
-          <el-select v-model="filters.status" clearable style="width: 130px" @change="onFilterChange">
-            <el-option label="待发货" value="pending_ship" />
+          <el-select
+            v-model="filters.status"
+            clearable
+            style="width: 130px"
+            @change="onFilterChange"
+          >
+            <el-option label="待分配" value="pending_alloc" />
             <el-option label="已分配" value="allocated" />
             <el-option label="采购中" value="purchasing" />
-            <el-option label="已发货" value="shipped" />
             <el-option label="已完成" value="completed" />
+            <el-option label="已关闭" value="closed" />
           </el-select>
+        </el-form-item>
+        <el-form-item label="发货状态">
+          <el-select
+            v-model="filters.shipStatus"
+            clearable
+            style="width: 120px"
+            @change="onFilterChange"
+          >
+            <el-option label="待发货" value="wait_ship" />
+            <el-option label="已发货" value="shipped" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="filters.shipStatus === 'wait_ship' && waitShipFocus">
+          <el-tag type="warning" closable @close="clearShipStatusFilter">待发货（含已分配）</el-tag>
         </el-form-item>
         <el-form-item label="下单时间">
           <el-date-picker
@@ -204,7 +253,11 @@ onMounted(load)
       <el-table-column label="平台" width="90">
         <template #default="{ row }">{{ labelPlatform(row.platform) }}</template>
       </el-table-column>
-      <el-table-column prop="platformOrderId" label="平台单号" min-width="150" show-overflow-tooltip />
+      <el-table-column prop="platformOrderId" label="平台单号" min-width="200" width="220">
+        <template #default="{ row }">
+          <span class="platform-oid">{{ row.platformOrderId || '-' }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="买家" min-width="120" show-overflow-tooltip>
         <template #default="{ row }">{{ row.buyerNick || row.buyerName || '-' }}</template>
       </el-table-column>
@@ -270,9 +323,16 @@ onMounted(load)
           <span v-else>-</span>
         </template>
       </el-table-column>
-      <el-table-column label="履约状态" width="100">
+      <el-table-column label="履约状态" width="90">
         <template #default="{ row }">
           <el-tag size="small" type="info">{{ labelStatus(row.status) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="发货状态" width="90">
+        <template #default="{ row }">
+          <el-tag size="small" :type="row.shipStatus === 'shipped' ? 'success' : 'warning'">
+            {{ labelShipStatus(row.shipStatus) }}
+          </el-tag>
         </template>
       </el-table-column>
     </el-table>
@@ -330,4 +390,10 @@ onMounted(load)
 .goods-meta { font-size: 12px; color: #909399; }
 .goods-meta span + span::before { content: ' · '; }
 .kdzs-meta { margin-top: 4px; font-size: 12px; color: #909399; }
+.platform-oid {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  word-break: keep-all;
+}
 </style>
