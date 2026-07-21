@@ -50,8 +50,8 @@ func (s *SettingsService) EnsureDefaultSyncJobs(tenantID uint64) error {
 			name:    "定时同步电商订单",
 			params: SyncJobParams{
 				PageSize:          50,
-				TradeStatuses:     []string{"wait_audit", "wait_send", "shipped"},
-				DateRangeDays:     0, // 0=不限时间，与工作台一致
+				TradeStatuses:     []string{"all"},
+				DateRangeDays:     30, // 近 30 天全状态
 				RefreshOpenOrders: false,
 			},
 		},
@@ -64,7 +64,13 @@ func (s *SettingsService) EnsureDefaultSyncJobs(tenantID uint64) error {
 		},
 	}
 	for _, d := range defaults {
-		if _, err := s.repos.GetSyncJobByType(tenantID, d.jobType); err == nil {
+		if existing, err := s.repos.GetSyncJobByType(tenantID, d.jobType); err == nil && existing != nil {
+			// 旧默认：待推/待发/已发 → 升级为「全部」+ 近30天
+			if d.jobType == model.SyncJobKDZS && shouldUpgradeKDZSSyncParams(existing.ParamsJSON) {
+				raw, _ := json.Marshal(d.params)
+				existing.ParamsJSON = string(raw)
+				_ = s.repos.SaveSyncJob(existing)
+			}
 			continue
 		}
 		raw, _ := json.Marshal(d.params)
@@ -81,6 +87,17 @@ func (s *SettingsService) EnsureDefaultSyncJobs(tenantID uint64) error {
 		}
 	}
 	return nil
+}
+
+func shouldUpgradeKDZSSyncParams(paramsJSON string) bool {
+	var p SyncJobParams
+	if err := json.Unmarshal([]byte(paramsJSON), &p); err != nil {
+		return true
+	}
+	joined := strings.Join(p.TradeStatuses, ",")
+	return joined == "" ||
+		joined == "wait_audit,wait_send,shipped" ||
+		joined == "wait_audit,wait_send"
 }
 
 func (s *SettingsService) ListSyncJobs(tenantID uint64) ([]model.SyncJob, error) {
@@ -155,7 +172,11 @@ func (s *SettingsService) executeSyncJob(ctx context.Context, job *model.SyncJob
 		params.PageSize = 50
 	}
 	if len(params.TradeStatuses) == 0 {
-		params.TradeStatuses = []string{"wait_audit", "wait_send", "shipped"}
+		params.TradeStatuses = []string{"all"}
+	}
+	if params.DateRangeDays == 0 && params.TradeStatuses[0] == "all" {
+		// 「全部」状态建议带时间窗，避免全量过重；已有显式配置则尊重
+		params.DateRangeDays = 30
 	}
 
 	// dateRangeDays<=0：不传时间窗，与工作台「同步电商订单」一致

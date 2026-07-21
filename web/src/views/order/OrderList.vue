@@ -6,12 +6,13 @@ import {
   createManualOrder,
   formatAddress,
   formatDateTime,
+  formatPlatformShop,
   formatRemark,
   labelAgentType,
   labelEcommerceStatus,
   labelKDZSStatus,
-  labelPlatform,
   labelShipStatus,
+  labelSource,
   labelStatus,
   listOrders,
   syncKDZS,
@@ -107,8 +108,16 @@ function onFilterChange() {
 
 async function onSyncKDZS() {
   try {
-    const stats = await syncKDZS({ pageSize: 50 }) as Record<string, number>
-    ElMessage.success(`同步完成（待推单+待发货+已发货）：新增 ${stats.created || 0}，更新 ${stats.updated || 0}`)
+    const body: Record<string, unknown> = {
+      pageSize: 50,
+      tradeStatuses: ['all'],
+    }
+    if (filters.orderedRange?.length === 2) {
+      body.startTime = filters.orderedRange[0]
+      body.endTime = filters.orderedRange[1]
+    }
+    const stats = await syncKDZS(body) as Record<string, number>
+    ElMessage.success(`同步完成（快递助手全部状态）：新增 ${stats.created || 0}，更新 ${stats.updated || 0}`)
     await load()
   } catch (e: any) {
     ElMessage.error(e.message || '同步失败')
@@ -239,8 +248,11 @@ onMounted(load)
     </div>
 
     <el-table v-loading="loading" :data="list" stripe @row-click="(row: Order) => router.push(`/orders/${row.id}`)">
-      <el-table-column label="平台" width="90">
-        <template #default="{ row }">{{ labelPlatform(row.platform) }}</template>
+      <el-table-column label="订单类型" width="88">
+        <template #default="{ row }">{{ labelSource(row.sourceChannel) }}</template>
+      </el-table-column>
+      <el-table-column label="平台" min-width="180" show-overflow-tooltip>
+        <template #default="{ row }">{{ formatPlatformShop(row) }}</template>
       </el-table-column>
       <el-table-column prop="platformOrderId" label="平台单号" min-width="200" width="220">
         <template #default="{ row }">

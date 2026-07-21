@@ -182,6 +182,15 @@ const platformStatusLabels: Record<string, string> = {
 export function labelSource(v?: string) {
   return (v && sourceLabels[v]) || v || '-'
 }
+/** 平台展示：FXG / 店铺名 */
+export function formatPlatformShop(row: Pick<Order, 'platform' | 'shopName'>) {
+  const p = (row.platform || '').trim()
+  const shop = (row.shopName || '').trim()
+  if (p && shop) return `${p} / ${shop}`
+  if (p) return p
+  if (shop) return shop
+  return '-'
+}
 export function labelStatus(v?: string) {
   return (v && statusLabels[v]) || v || '-'
 }

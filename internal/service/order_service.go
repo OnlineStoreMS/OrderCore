@@ -767,13 +767,14 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 	if pageSize <= 0 {
 		pageSize = 50
 	}
-	statuses := make([]string, 0, 3)
+	statuses := make([]string, 0, 1)
 	if len(req.TradeStatuses) > 0 {
 		statuses = append(statuses, req.TradeStatuses...)
 	} else if strings.TrimSpace(req.TradeStatus) != "" {
 		statuses = append(statuses, strings.TrimSpace(req.TradeStatus))
 	} else {
-		statuses = []string{"wait_audit", "wait_send", "shipped"}
+		// 默认同步快递助手「全部」状态（含已发货/已完成等），按时间窗筛选
+		statuses = []string{"all"}
 	}
 
 	created, updated, fetched, total := 0, 0, 0, 0
@@ -786,7 +787,10 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 			case <-time.After(3500 * time.Millisecond):
 			}
 		}
-		maxPages := 3
+		maxPages := 5
+		if status == "all" {
+			maxPages = 8
+		}
 		for page := pageNo; page < pageNo+maxPages; page++ {
 			if page > pageNo {
 				select {
@@ -813,8 +817,11 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 			}
 			for _, t := range result.Items {
 				ingest := mapTradeToIngest(t)
-				ingest.PlatformStatus = status
-				ingest.PlatformStatusText = kdzsPlatformStatusText(status)
+				// 「全部」以订单自身列表态为准；分状态同步时用请求态兜底
+				if status != "all" {
+					ingest.PlatformStatus = status
+					ingest.PlatformStatusText = kdzsPlatformStatusText(status)
+				}
 				key := ingest.PlatformOrderID
 				if key == "" {
 					key = ingest.PlatformSysTid
