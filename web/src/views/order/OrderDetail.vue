@@ -151,13 +151,17 @@ async function submitAllocate() {
 
 async function onRevokeAllocate() {
   try {
-    await ElMessageBox.confirm('确认撤回分配？订单将回到待分配。', '撤回分配', {
-      type: 'warning',
-      confirmButtonText: '撤回',
-      cancelButtonText: '取消',
-    })
+    await ElMessageBox.confirm(
+      '确认撤回分配？将同步在快递助手撤单（回到待推单），订单中心恢复为待分配。',
+      '撤回分配',
+      {
+        type: 'warning',
+        confirmButtonText: '撤回',
+        cancelButtonText: '取消',
+      },
+    )
     order.value = await revokeAllocateOrder(id)
-    ElMessage.success('已撤回分配')
+    ElMessage.success('已撤回分配（快递助手已同步）')
   } catch (e: any) {
     if (e === 'cancel' || e === 'close') return
     ElMessage.error(e.message || '撤回失败')

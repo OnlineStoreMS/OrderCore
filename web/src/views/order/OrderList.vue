@@ -117,7 +117,7 @@ async function onSyncKDZS() {
       body.endTime = filters.orderedRange[1]
     }
     const stats = await syncKDZS(body) as Record<string, number>
-    ElMessage.success(`同步完成（快递助手全部状态）：新增 ${stats.created || 0}，更新 ${stats.updated || 0}`)
+    ElMessage.success(`同步完成（全平台全部状态）：合计 ${stats.total || 0}，拉取 ${stats.fetched || 0}，新增 ${stats.created || 0}，更新 ${stats.updated || 0}`)
     await load()
   } catch (e: any) {
     ElMessage.error(e.message || '同步失败')

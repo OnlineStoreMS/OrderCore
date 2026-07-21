@@ -64,6 +64,10 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	}
 	if q.ShipStatus != "" {
 		tx = tx.Where("ship_status = ?", q.ShipStatus)
+		// 待发货工作队列：排除已关闭/已完成（关闭单常残留 wait_ship）
+		if q.ShipStatus == model.ShipWaitShip {
+			tx = tx.Where("status NOT IN ?", []string{model.StatusClosed, model.StatusCompleted})
+		}
 	}
 	if q.AllocType != "" {
 		tx = tx.Where("alloc_type = ?", q.AllocType)

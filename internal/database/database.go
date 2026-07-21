@@ -78,12 +78,46 @@ func backfillFulfillmentShipStatus(db *gorm.DB) error {
 		// completed → ship shipped
 		`UPDATE orders SET ship_status = 'shipped'
 		 WHERE status = 'completed' AND (ship_status IS NULL OR ship_status = '' OR ship_status = 'wait_ship')`,
-		// closed: infer ship from shipped_at
-		`UPDATE orders SET ship_status = CASE WHEN shipped_at IS NOT NULL THEN 'shipped' ELSE 'wait_ship' END
-		 WHERE status = 'closed' AND (ship_status IS NULL OR ship_status = '')`,
-		// safety net
+		// closed 未发货：清空发货态，避免混入待发货队列
+		`UPDATE orders SET ship_status = ''
+		 WHERE status = 'closed' AND shipped_at IS NULL
+		   AND (ship_status IS NULL OR ship_status = '' OR ship_status = 'wait_ship')`,
+		// closed 已发货
+		`UPDATE orders SET ship_status = 'shipped'
+		 WHERE status = 'closed' AND shipped_at IS NOT NULL
+		   AND (ship_status IS NULL OR ship_status = '' OR ship_status = 'wait_ship')`,
+		// safety net：仅开放履约单补 wait_ship
 		`UPDATE orders SET ship_status = 'wait_ship'
-		 WHERE ship_status IS NULL OR ship_status = ''`,
+		 WHERE (ship_status IS NULL OR ship_status = '')
+		   AND status IN ('pending_alloc','allocated','purchasing','pending_payment')`,
+		// 取消/退款完成单不应落在待分配/已分配
+		`UPDATE orders SET
+			status = 'closed',
+			alloc_type = '',
+			dropship_mode = '',
+			supplier_id = 0,
+			supplier_name = '',
+			factory_id = '',
+			factory_name = '',
+			purchase_order_id = '',
+			alloc_remark = '',
+			allocated_at = NULL,
+			ship_entry_locked = true,
+			ship_lock_reason = '电商订单已关闭/取消/退款完成'
+		 WHERE status NOT IN ('closed','completed')
+		   AND (
+			 UPPER(COALESCE(ecommerce_status,'')) IN (
+			   'ORDER_CANCELLED','ORDER_CANCEL','TRADE_CLOSED','CANCEL','CANCELLED','CLOSED',
+			   'REFUND_SUCCESS','REFUNDED','SUCCESS_REFUND','REFUND_MONEY_FINISH','REFUND_MONEY_SUCCESS'
+			 )
+			 OR LOWER(COALESCE(platform_status,'')) IN ('order_cancelled','cancelled','trade_closed','closed','cancel')
+			 OR COALESCE(ecommerce_status_text,'') LIKE '%订单取消%'
+			 OR COALESCE(ecommerce_status_text,'') LIKE '%已取消%'
+			 OR COALESCE(ecommerce_status_text,'') LIKE '%交易关闭%'
+			 OR COALESCE(ecommerce_status_text,'') LIKE '%退款成功%'
+			 OR COALESCE(ecommerce_status_text,'') LIKE '%退款完成%'
+			 OR UPPER(COALESCE(ecommerce_status,'')) LIKE '%CANCEL%'
+		   )`,
 	}
 	for _, sql := range steps {
 		if err := db.Exec(sql).Error; err != nil {

@@ -258,8 +258,8 @@ export function formatRemark(order: Pick<Order, 'remark' | 'sellerRemark'>) {
   return parts.length ? parts.join(' / ') : '-'
 }
 
-export async function fetchDashboard() {
-  return unwrap(await client.get('/dashboard'))
+export async function fetchDashboard(params: { startDate?: string; endDate?: string } = {}) {
+  return unwrap(await client.get('/dashboard', { params }))
 }
 
 export async function listOrders(params: Record<string, unknown>) {
@@ -287,7 +287,7 @@ export async function shipOrder(id: number, body: Record<string, unknown>) {
 }
 
 export async function syncKDZS(body: Record<string, unknown> = {}) {
-  return unwrap(await client.post('/sync/kdzs', body, { timeout: 180000 }))
+  return unwrap(await client.post('/sync/kdzs', body, { timeout: 600000 }))
 }
 
 export async function syncStore(body: Record<string, unknown> = {}) {

@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import type { DateModelType } from 'element-plus'
 import * as echarts from 'echarts/core'
 import { LineChart, BarChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
@@ -22,12 +23,36 @@ interface DashCards {
   weekAmount?: number
   monthOrders?: number
   monthAmount?: number
+  rangeOrders?: number
+  rangeAmount?: number
+  rangeSelfAmount?: number
+  rangeDropshipAmount?: number
+  rangeStart?: string
+  rangeEnd?: string
 }
 
 interface TrendPoint {
   date: string
   orderCount: number
   amount: number
+  selfAmount?: number
+  dropshipAmount?: number
+}
+
+function pad(n: number) {
+  return String(n).padStart(2, '0')
+}
+function fmtDate(d: Date) {
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+function startOfDay(d = new Date()) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate())
+}
+function defaultRange(): [string, string] {
+  const end = startOfDay()
+  const start = new Date(end)
+  start.setDate(start.getDate() - 6)
+  return [fmtDate(start), fmtDate(end)]
 }
 
 const router = useRouter()
@@ -37,11 +62,19 @@ const cards = ref<DashCards>({})
 const byStatus = ref<Record<string, number>>({})
 const bySource = ref<Record<string, number>>({})
 const trend = ref<TrendPoint[]>([])
+const dateRange = ref<[DateModelType, DateModelType] | null>(defaultRange())
 
 const orderChartEl = ref<HTMLDivElement | null>(null)
-const amountChartEl = ref<HTMLDivElement | null>(null)
+const channelChartEl = ref<HTMLDivElement | null>(null)
 let orderChart: echarts.ECharts | null = null
-let amountChart: echarts.ECharts | null = null
+let channelChart: echarts.ECharts | null = null
+
+const rangeLabel = computed(() => {
+  const s = cards.value.rangeStart
+  const e = cards.value.rangeEnd
+  if (!s || !e) return ''
+  return s === e ? s : `${s} ~ ${e}`
+})
 
 const workCards = computed(() => [
   {
@@ -102,15 +135,108 @@ const metricCards = computed(() => [
   { label: '本月订单', value: cards.value.monthOrders || 0, sub: `¥${fmtMoney(cards.value.monthAmount)}` },
 ])
 
+const rangeSummaryCards = computed(() => [
+  {
+    label: '区间订单量',
+    tip: rangeLabel.value || '当前筛选',
+    value: String(cards.value.rangeOrders || 0),
+    color: '#1677ff',
+  },
+  {
+    label: '区间销售额',
+    tip: '排除关闭/退款',
+    value: `¥${fmtMoney(cards.value.rangeAmount)}`,
+    color: '#13c2c2',
+  },
+  {
+    label: '自营销售额',
+    tip: '自营发货 / 未推厂家',
+    value: `¥${fmtMoney(cards.value.rangeSelfAmount)}`,
+    color: '#1677ff',
+  },
+  {
+    label: '代发销售额',
+    tip: '厂家代发 / OSMS 代发',
+    value: `¥${fmtMoney(cards.value.rangeDropshipAmount)}`,
+    color: '#722ed1',
+  },
+])
+
+const pickerShortcuts = [
+  {
+    text: '今天',
+    value: () => {
+      const d = startOfDay()
+      return [d, d] as [Date, Date]
+    },
+  },
+  {
+    text: '昨天',
+    value: () => {
+      const d = startOfDay()
+      d.setDate(d.getDate() - 1)
+      return [d, d] as [Date, Date]
+    },
+  },
+  {
+    text: '最近7天',
+    value: () => {
+      const end = startOfDay()
+      const start = new Date(end)
+      start.setDate(start.getDate() - 6)
+      return [start, end] as [Date, Date]
+    },
+  },
+  {
+    text: '最近14天',
+    value: () => {
+      const end = startOfDay()
+      const start = new Date(end)
+      start.setDate(start.getDate() - 13)
+      return [start, end] as [Date, Date]
+    },
+  },
+  {
+    text: '最近30天',
+    value: () => {
+      const end = startOfDay()
+      const start = new Date(end)
+      start.setDate(start.getDate() - 29)
+      return [start, end] as [Date, Date]
+    },
+  },
+  {
+    text: '本月',
+    value: () => {
+      const end = startOfDay()
+      const start = new Date(end.getFullYear(), end.getMonth(), 1)
+      return [start, end] as [Date, Date]
+    },
+  },
+]
+
 function fmtMoney(v?: number) {
   const n = Number(v || 0)
   return n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+function axisDates() {
+  return trend.value.map((t) => (t.date.length >= 10 ? t.date.slice(5) : t.date))
+}
+
+function moneyAxisLabel(v: number) {
+  return v >= 10000 ? `${(v / 10000).toFixed(1)}万` : String(v)
+}
+
 async function load() {
+  if (!dateRange.value || dateRange.value.length !== 2) {
+    ElMessage.warning('请选择时间范围')
+    return
+  }
+  const [startDate, endDate] = dateRange.value.map(String)
   loading.value = true
   try {
-    const data = await fetchDashboard() as {
+    const data = await fetchDashboard({ startDate, endDate }) as {
       cards?: DashCards
       byStatus?: Record<string, number>
       bySource?: Record<string, number>
@@ -130,58 +256,96 @@ async function load() {
 }
 
 function renderCharts() {
-  const dates = trend.value.map((t) => t.date.slice(5))
+  const dates = axisDates()
   const counts = trend.value.map((t) => t.orderCount)
   const amounts = trend.value.map((t) => Number(t.amount || 0))
+  const selfAmts = trend.value.map((t) => Number(t.selfAmount || 0))
+  const dropAmts = trend.value.map((t) => Number(t.dropshipAmount || 0))
+  const moneyFmt = (v: number) => `¥${fmtMoney(v)}`
 
   if (orderChartEl.value) {
     if (!orderChart) orderChart = echarts.init(orderChartEl.value)
     orderChart.setOption({
-      color: ['#1677ff'],
-      tooltip: { trigger: 'axis' },
-      grid: { left: 48, right: 16, top: 32, bottom: 28 },
-      xAxis: { type: 'category', data: dates, boundaryGap: false },
-      yAxis: { type: 'value', minInterval: 1 },
-      series: [{
-        name: '订单数',
-        type: 'line',
-        smooth: true,
-        areaStyle: { opacity: 0.12 },
-        data: counts,
-      }],
-    })
+      color: ['#1677ff', '#13c2c2'],
+      legend: { data: ['订单量', '销售额'], top: 0 },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+      grid: { left: 48, right: 56, top: 40, bottom: 28 },
+      xAxis: { type: 'category', data: dates, boundaryGap: true },
+      yAxis: [
+        { type: 'value', name: '单', minInterval: 1 },
+        {
+          type: 'value',
+          name: '元',
+          splitLine: { show: false },
+          axisLabel: { formatter: moneyAxisLabel },
+        },
+      ],
+      series: [
+        {
+          name: '订单量',
+          type: 'line',
+          smooth: true,
+          yAxisIndex: 0,
+          areaStyle: { opacity: 0.08 },
+          data: counts,
+        },
+        {
+          name: '销售额',
+          type: 'bar',
+          yAxisIndex: 1,
+          barMaxWidth: 28,
+          data: amounts,
+          tooltip: { valueFormatter: moneyFmt },
+        },
+      ],
+    }, true)
   }
-  if (amountChartEl.value) {
-    if (!amountChart) amountChart = echarts.init(amountChartEl.value)
-    amountChart.setOption({
-      color: ['#13c2c2'],
-      tooltip: {
-        trigger: 'axis',
-        valueFormatter: (v: number) => `¥${fmtMoney(v)}`,
-      },
-      grid: { left: 56, right: 16, top: 32, bottom: 28 },
+
+  if (channelChartEl.value) {
+    if (!channelChart) channelChart = echarts.init(channelChartEl.value)
+    channelChart.setOption({
+      color: ['#1677ff', '#722ed1'],
+      legend: { data: ['自营销售额', '代发销售额'], top: 0 },
+      tooltip: { trigger: 'axis' },
+      grid: { left: 48, right: 24, top: 40, bottom: 28 },
       xAxis: { type: 'category', data: dates },
-      yAxis: { type: 'value' },
-      series: [{
-        name: '销售额',
-        type: 'bar',
-        barMaxWidth: 28,
-        data: amounts,
-      }],
-    })
+      yAxis: {
+        type: 'value',
+        name: '元',
+        axisLabel: { formatter: moneyAxisLabel },
+      },
+      series: [
+        {
+          name: '自营销售额',
+          type: 'bar',
+          stack: 'channel',
+          barMaxWidth: 28,
+          data: selfAmts,
+          tooltip: { valueFormatter: moneyFmt },
+        },
+        {
+          name: '代发销售额',
+          type: 'bar',
+          stack: 'channel',
+          barMaxWidth: 28,
+          data: dropAmts,
+          tooltip: { valueFormatter: moneyFmt },
+        },
+      ],
+    }, true)
   }
 }
 
 function onResize() {
   orderChart?.resize()
-  amountChart?.resize()
+  channelChart?.resize()
 }
 
 async function doSyncKDZS() {
   syncing.value = 'kdzs'
   try {
     const stats = await syncKDZS({ pageSize: 50, tradeStatuses: ['all'] }) as Record<string, number>
-    ElMessage.success(`电商同步完成（全部状态）：新增 ${stats.created || 0}，更新 ${stats.updated || 0}`)
+    ElMessage.success(`电商同步完成（全平台）：合计 ${stats.total || 0}，拉取 ${stats.fetched || 0}，新增 ${stats.created || 0}，更新 ${stats.updated || 0}`)
     await load()
   } catch (e: any) {
     ElMessage.error(e.message || '同步失败')
@@ -212,7 +376,7 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('resize', onResize)
   orderChart?.dispose()
-  amountChart?.dispose()
+  channelChart?.dispose()
 })
 </script>
 
@@ -260,18 +424,51 @@ onUnmounted(() => {
       <div v-for="m in metricCards" :key="m.label" class="metric-card">
         <div class="metric-label">{{ m.label }}</div>
         <div class="metric-value">{{ m.value }}</div>
-        <div class="metric-sub">成交额 {{ m.sub }}</div>
+        <div class="metric-sub">实际成交额 {{ m.sub }}</div>
+      </div>
+    </div>
+
+    <div class="section-head row-between">
+      <span>趋势分析</span>
+      <div class="range-tools">
+        <el-date-picker
+          v-model="dateRange"
+          type="daterange"
+          unlink-panels
+          range-separator="至"
+          start-placeholder="开始日期"
+          end-placeholder="结束日期"
+          value-format="YYYY-MM-DD"
+          :shortcuts="pickerShortcuts"
+          :clearable="false"
+          @change="load"
+        />
+      </div>
+    </div>
+
+    <div class="channel-sales-row">
+      <div
+        v-for="m in rangeSummaryCards"
+        :key="m.label"
+        class="channel-sales-card"
+        :style="{ '--accent': m.color }"
+      >
+        <div class="metric-label">{{ m.label }}</div>
+        <div class="channel-sales-value">{{ m.value }}</div>
+        <div class="metric-sub">{{ m.tip }}</div>
       </div>
     </div>
 
     <div class="charts">
       <section>
-        <h3>近14日订单量</h3>
+        <h3>订单量 / 销售额</h3>
+        <p class="chart-tip">按下单日；排除关闭与退款完成；销售额优先实付</p>
         <div ref="orderChartEl" class="chart" />
       </section>
       <section>
-        <h3>近14日销售额</h3>
-        <div ref="amountChartEl" class="chart" />
+        <h3>自营 / 代发销售额</h3>
+        <p class="chart-tip">代发=厂家代发或 OSMS 供应商代发；其余计自营</p>
+        <div ref="channelChartEl" class="chart" />
       </section>
     </div>
 
@@ -297,6 +494,8 @@ onUnmounted(() => {
 .page { display: flex; flex-direction: column; gap: 14px; }
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
 .section-head { font-size: 13px; font-weight: 600; color: #64748b; margin-top: 2px; }
+.row-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.range-tools { display: flex; align-items: center; gap: 8px; }
 
 .type-cards, .work-cards {
   display: grid;
@@ -333,6 +532,26 @@ onUnmounted(() => {
 .metric-value { margin-top: 4px; font-size: 24px; font-weight: 700; color: #0f172a; }
 .metric-sub { margin-top: 4px; font-size: 13px; color: #0f766e; }
 
+.channel-sales-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.channel-sales-card {
+  background: #fff;
+  border: 1px solid #eef0f3;
+  border-radius: 10px;
+  padding: 14px 16px;
+  border-top: 3px solid var(--accent, #1677ff);
+}
+.channel-sales-value {
+  margin-top: 6px;
+  font-size: 22px;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.15;
+}
+
 .charts {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -344,7 +563,8 @@ onUnmounted(() => {
   padding: 16px 18px;
   border: 1px solid #eef0f3;
 }
-.chart { width: 100%; height: 260px; }
+.chart-tip { margin: -4px 0 8px; font-size: 12px; color: #94a3b8; }
+.chart { width: 100%; height: 300px; }
 h3 { margin: 0 0 10px; font-size: 15px; color: #334155; }
 .chips { display: flex; flex-wrap: wrap; gap: 10px; }
 .chip {
@@ -357,7 +577,7 @@ h3 { margin: 0 0 10px; font-size: 15px; color: #334155; }
 
 @media (max-width: 1100px) {
   .type-cards, .work-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .charts, .metric-row { grid-template-columns: 1fr; }
+  .metric-row, .channel-sales-row, .charts { grid-template-columns: 1fr; }
 }
 @media (max-width: 700px) {
   .type-cards, .work-cards { grid-template-columns: 1fr 1fr; }

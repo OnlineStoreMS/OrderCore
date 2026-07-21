@@ -26,9 +26,26 @@ func NewHandlers(orders *service.OrderService, supply *supplycore.Client) *Handl
 }
 
 func (h *Handlers) Dashboard(c *gin.Context) {
-	data, err := h.orders.Dashboard(authcontext.TenantID(c))
+	var start, end time.Time
+	if s := strings.TrimSpace(c.Query("startDate")); s != "" {
+		t, err := time.ParseInLocation("2006-01-02", s, time.Local)
+		if err != nil {
+			response.Fail(c, http.StatusBadRequest, "startDate 格式应为 YYYY-MM-DD")
+			return
+		}
+		start = t
+	}
+	if s := strings.TrimSpace(c.Query("endDate")); s != "" {
+		t, err := time.ParseInLocation("2006-01-02", s, time.Local)
+		if err != nil {
+			response.Fail(c, http.StatusBadRequest, "endDate 格式应为 YYYY-MM-DD")
+			return
+		}
+		end = t
+	}
+	data, err := h.orders.Dashboard(authcontext.TenantID(c), start, end)
 	if err != nil {
-		response.Fail(c, http.StatusInternalServerError, err.Error())
+		response.Fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	response.OK(c, data)

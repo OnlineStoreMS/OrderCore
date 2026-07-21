@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,7 +22,7 @@ func NewClient(baseURL string) *Client {
 	return &Client{
 		baseURL: stringsTrimRightSlash(baseURL),
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: 180 * time.Second,
 		},
 	}
 }
@@ -172,6 +173,52 @@ func (c *Client) ListFactories(ctx context.Context, token, platform string, page
 	return &result, nil
 }
 
+type ShopItem struct {
+	Platform     string `json:"platform"`
+	PlatformName string `json:"platformName"`
+	MallUserID   string `json:"mallUserId"`
+	MallUserName string `json:"mallUserName"`
+}
+
+type ShopListResult struct {
+	Items []ShopItem `json:"items"`
+	Total int        `json:"total"`
+}
+
+func (c *Client) ListShops(ctx context.Context, token string) (*ShopListResult, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("storesyncagent url not configured")
+	}
+	u := c.baseURL + "/api/v1/admin/shops"
+	var result ShopListResult
+	if err := c.get(ctx, token, u, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+// ListEcommercePlatforms 返回已授权电商平台码（去重）
+func (c *Client) ListEcommercePlatforms(ctx context.Context, token string) ([]string, error) {
+	shops, err := c.ListShops(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, s := range shops.Items {
+		p := strings.TrimSpace(s.Platform)
+		if p == "" {
+			continue
+		}
+		if _, ok := seen[p]; ok {
+			continue
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 type SetAgentTypeRequest struct {
 	Platform    string   `json:"platform"`
 	TradeStatus string   `json:"tradeStatus"`
@@ -182,6 +229,16 @@ type SetAgentTypeRequest struct {
 
 func (c *Client) SetOrderAgentType(ctx context.Context, token string, req SetAgentTypeRequest) error {
 	return c.post(ctx, token, c.baseURL+"/api/v1/admin/orders/agent-type", req, nil)
+}
+
+type CancelPushRequest struct {
+	Platform    string   `json:"platform"`
+	TradeStatus string   `json:"tradeStatus"`
+	SysTids     []string `json:"sysTids"`
+}
+
+func (c *Client) CancelOrderPush(ctx context.Context, token string, req CancelPushRequest) error {
+	return c.post(ctx, token, c.baseURL+"/api/v1/admin/orders/cancel-push", req, nil)
 }
 
 type ShipCallbackRequest struct {
@@ -250,15 +307,18 @@ func decodeAPI(resp *http.Response, out any) error {
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("storesyncagent http %d: %s", resp.StatusCode, string(raw))
-	}
 	var body apiBody
 	if err := json.Unmarshal(raw, &body); err != nil {
+		if resp.StatusCode >= 400 {
+			return fmt.Errorf("storesyncagent http %d: %s", resp.StatusCode, string(raw))
+		}
 		return fmt.Errorf("decode response: %w", err)
 	}
-	if body.Code != 200 {
-		return fmt.Errorf("storesyncagent: %s", body.Message)
+	if resp.StatusCode >= 400 || body.Code != 200 {
+		if msg := strings.TrimSpace(body.Message); msg != "" {
+			return fmt.Errorf("%s", msg)
+		}
+		return fmt.Errorf("storesyncagent http %d", resp.StatusCode)
 	}
 	if out == nil || len(body.Data) == 0 || string(body.Data) == "null" {
 		return nil

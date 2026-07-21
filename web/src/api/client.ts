@@ -42,7 +42,8 @@ client.interceptors.response.use(
       clearToken()
       redirectToPortal()
     }
-    return Promise.reject(err)
+    const msg = err.response?.data?.message || err.message || '请求失败'
+    return Promise.reject(new Error(msg))
   },
 )
 
