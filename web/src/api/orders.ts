@@ -58,6 +58,7 @@ export interface Order {
   buyerPhone?: string
   totalAmount?: number
   payAmount?: number
+  freightAmount?: number
   payTime?: string
   orderedAt?: string
   platformStatus?: string
@@ -286,6 +287,24 @@ export async function createManualOrder(body: Record<string, unknown>) {
 
 export async function allocateOrder(id: number, body: Record<string, unknown>) {
   return unwrap<Order>(await client.post(`/orders/${id}/allocate`, body))
+}
+
+export async function batchDropshipOrders(body: {
+  orderIds: number[]
+  supplierId: number
+  supplierName?: string
+}) {
+  return unwrap<{
+    poNo: string
+    poId: number
+    saleAmount?: number
+    totalAmount: number
+    orderCount: number
+    lineCount: number
+    success: number
+    failed: number
+    errors?: string[]
+  }>(await client.post('/orders/batch-dropship', body))
 }
 
 export async function revokeAllocateOrder(id: number) {

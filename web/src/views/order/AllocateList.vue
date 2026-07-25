@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   allocateOrder,
+  batchDropshipOrders,
   formatAddress,
   formatDateTime,
   formatRemark,
@@ -53,7 +54,10 @@ const filters = reactive({
   page: 1,
   pageSize: 20,
   status: normalizedStatus,
-  shipStatus: shipStatusFromQuery || '',
+  // 已分配默认待发货；其它状态尊重 URL 或留空
+  shipStatus:
+    shipStatusFromQuery ||
+    (normalizedStatus === 'allocated' ? 'wait_ship' : ''),
   allocType: '',
   keyword: '',
   orderedRange: [defaultStart, defaultEnd] as [string, string] | null,
@@ -104,6 +108,14 @@ async function load() {
 function onFilterChange() {
   filters.page = 1
   load()
+}
+
+function onStatusTabChange() {
+  // 切到「已分配」时默认待发货
+  if (filters.status === 'allocated') {
+    filters.shipStatus = 'wait_ship'
+  }
+  onFilterChange()
 }
 
 function onSelectionChange(rows: Order[]) {
@@ -201,14 +213,40 @@ async function submitBatchDropship() {
     return
   }
   const rows = selected.value.filter((o) => o.status === 'pending_alloc' || o.status === 'pending_ship')
+  if (!rows.length) {
+    ElMessage.warning('请勾选待分配订单')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认将 ${rows.length} 笔订单合并代发给「${dropshipForm.supplierName || '供应商'}」？将生成一张代发采购单。`,
+      '批量代发',
+      { type: 'warning', confirmButtonText: '执行', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
   dropshipVisible.value = false
-  await runBatch(rows, '批量代发', async (o) => {
-    await allocateOrder(o.id, {
-      allocType: 'dropship',
+  batching.value = true
+  try {
+    const res = await batchDropshipOrders({
+      orderIds: rows.map((o) => o.id),
       supplierId: dropshipForm.supplierId,
       supplierName: dropshipForm.supplierName,
     })
-  })
+    const failHint = res.failed ? `，失败 ${res.failed}` : ''
+    ElMessage.success(
+      `已生成代发单 ${res.poNo}：${res.success} 笔销售单 / ${res.lineCount} 行明细，原始订单金额合计 ¥${Number(res.saleAmount ?? res.totalAmount ?? 0).toFixed(2)}${failHint}`,
+    )
+    if (res.errors?.length) {
+      ElMessage.warning(res.errors[0])
+    }
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e.message || '批量代发失败')
+  } finally {
+    batching.value = false
+  }
 }
 
 async function batchRevoke() {
@@ -225,7 +263,7 @@ onMounted(load)
   <div class="page">
     <div class="toolbar">
       <div class="filters">
-        <el-radio-group v-model="filters.status" @change="onFilterChange">
+        <el-radio-group v-model="filters.status" @change="onStatusTabChange">
           <el-radio-button value="pending_alloc">待分配</el-radio-button>
           <el-radio-button value="allocated">已分配</el-radio-button>
           <el-radio-button value="purchasing">采购中</el-radio-button>

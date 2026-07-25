@@ -235,6 +235,7 @@ onMounted(load)
         <el-descriptions-item label="供应商">{{ order.supplierName || '-' }}</el-descriptions-item>
         <el-descriptions-item label="厂家">{{ order.factoryName || order.factoryId || '-' }}</el-descriptions-item>
         <el-descriptions-item label="实付">{{ order.payAmount ?? '-' }}</el-descriptions-item>
+        <el-descriptions-item label="邮费">{{ order.freightAmount ?? 0 }}</el-descriptions-item>
         <el-descriptions-item label="买家">{{ order.buyerName || order.buyerNick || '-' }} {{ order.buyerPhone || '' }}</el-descriptions-item>
         <el-descriptions-item label="地址" :span="2">{{ order.address?.fullText || order.address?.address || '-' }}</el-descriptions-item>
         <el-descriptions-item label="买家备注">{{ order.remark || '-' }}</el-descriptions-item>
@@ -259,14 +260,11 @@ onMounted(load)
         </el-table-column>
         <el-table-column prop="productName" label="商品" min-width="200" />
         <el-table-column prop="skuSpecs" label="规格" width="140" />
-        <el-table-column prop="skuId" label="SKU ID" width="100">
-          <template #default="{ row }">{{ row.skuId || '—' }}</template>
+        <el-table-column prop="platformSkuId" label="平台SKU" width="130" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.platformSkuId || '—' }}</template>
         </el-table-column>
         <el-table-column prop="skuCode" label="商家编码" width="140">
           <template #default="{ row }">{{ row.skuCode || '—' }}</template>
-        </el-table-column>
-        <el-table-column prop="platformSkuId" label="平台SKU" width="130" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.platformSkuId || '—' }}</template>
         </el-table-column>
         <el-table-column prop="quantity" label="数量" width="80" />
         <el-table-column prop="price" label="单价" width="90" />

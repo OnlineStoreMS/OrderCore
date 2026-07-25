@@ -82,6 +82,12 @@ type AllocateRequest struct {
 	Remark          string `json:"remark"`
 }
 
+type BatchDropshipRequest struct {
+	OrderIDs     []uint64 `json:"orderIds" binding:"required,min=1"`
+	SupplierID   uint64   `json:"supplierId" binding:"required"`
+	SupplierName string   `json:"supplierName"`
+}
+
 type ShipRequest struct {
 	ExpressCompany string `json:"expressCompany"`
 	ExpressNo      string `json:"expressNo"`

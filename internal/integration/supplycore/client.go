@@ -43,8 +43,13 @@ type PurchaseOrderItemInput struct {
 	SkuID           uint64  `json:"skuId,omitempty"`
 	OfferID         uint64  `json:"offerId,omitempty"`
 	ProductName     string  `json:"productName,omitempty"`
+	SkuCode         string  `json:"skuCode,omitempty"`
+	SkuSpecs        string  `json:"skuSpecs,omitempty"`
+	PicURL          string  `json:"picUrl,omitempty"`
 	SupplierSkuCode string  `json:"supplierSkuCode,omitempty"`
 	Qty             int     `json:"qty"`
+	SaleUnitPrice   float64 `json:"saleUnitPrice,omitempty"`
+	SaleAmount      float64 `json:"saleAmount,omitempty"`
 	UnitPrice       float64 `json:"unitPrice"`
 	Remark          string  `json:"remark,omitempty"`
 }
@@ -54,6 +59,7 @@ type PurchaseOrderInput struct {
 	FulfillmentType string                    `json:"fulfillmentType"`
 	RefSoID         uint64                    `json:"refSoId,omitempty"`
 	RefTraceID      string                    `json:"refTraceId,omitempty"`
+	SaleAmount      float64                   `json:"saleAmount,omitempty"`
 	Remark          string                    `json:"remark,omitempty"`
 	Items           []PurchaseOrderItemInput  `json:"items"`
 }
@@ -202,6 +208,10 @@ func (c *Client) CreatePurchaseOrder(ctx context.Context, bearerToken string, in
 }
 
 func (c *Client) ListPurchaseOrders(ctx context.Context, bearerToken string, refSoID uint64, fulfillmentType string, page, pageSize int) ([]PurchaseOrderListItem, int64, error) {
+	return c.ListPurchaseOrdersEx(ctx, bearerToken, refSoID, fulfillmentType, "", page, pageSize)
+}
+
+func (c *Client) ListPurchaseOrdersEx(ctx context.Context, bearerToken string, refSoID uint64, fulfillmentType, keyword string, page, pageSize int) ([]PurchaseOrderListItem, int64, error) {
 	if page <= 0 {
 		page = 1
 	}
@@ -214,6 +224,9 @@ func (c *Client) ListPurchaseOrders(ctx context.Context, bearerToken string, ref
 	}
 	if fulfillmentType != "" {
 		q.Set("fulfillmentType", fulfillmentType)
+	}
+	if keyword != "" {
+		q.Set("keyword", keyword)
 	}
 	q.Set("page", strconv.Itoa(page))
 	q.Set("pageSize", strconv.Itoa(pageSize))

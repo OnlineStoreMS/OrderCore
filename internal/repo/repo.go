@@ -290,6 +290,20 @@ func (r *Repos) NextShipmentNo(tenantID uint64) (string, error) {
 	return fmt.Sprintf("SH%s%04d", prefix, count+1), nil
 }
 
+func (r *Repos) CountByPurchaseOrderID(tenantID uint64, poNo string, excludeOrderID uint64) (int64, error) {
+	poNo = strings.TrimSpace(poNo)
+	if poNo == "" {
+		return 0, nil
+	}
+	q := r.db.Model(&model.Order{}).Where("tenant_id = ? AND purchase_order_id = ?", tenantID, poNo)
+	if excludeOrderID > 0 {
+		q = q.Where("id <> ?", excludeOrderID)
+	}
+	var n int64
+	err := q.Count(&n).Error
+	return n, err
+}
+
 func (r *Repos) CountByStatus(tenantID uint64) (map[string]int64, error) {
 	type row struct {
 		Status string

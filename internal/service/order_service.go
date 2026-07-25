@@ -483,16 +483,21 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 		return nil, fmt.Errorf("无效的分配类型")
 	}
 
-	// 代发：先建 SupplyCore 草稿代发单，再推 KDZS；失败则回滚草稿
+	// 代发：先建 SupplyCore 草稿代发单，再推 KDZS；失败则回滚草稿。
+	// 若请求已带 purchaseOrderId（批量合并代发），则复用该单号不再新建。
 	var createdPOID uint64
 	if allocType == model.AllocDropship {
-		poNo, poID, created, err := s.ensureDropshipPurchaseOrder(ctx, o, supplierID, supplierName, bearerToken)
-		if err != nil {
-			return nil, err
-		}
-		purchaseOrderID = poNo
-		if created {
-			createdPOID = poID
+		if purchaseOrderID != "" {
+			// 外部已建合并代发单
+		} else {
+			poNo, poID, created, err := s.ensureDropshipPurchaseOrder(ctx, o, supplierID, supplierName, bearerToken)
+			if err != nil {
+				return nil, err
+			}
+			purchaseOrderID = poNo
+			if created {
+				createdPOID = poID
+			}
 		}
 	}
 
@@ -610,24 +615,13 @@ func (s *OrderService) ensureDropshipPurchaseOrder(ctx context.Context, o *model
 		}
 	}
 
-	items := make([]supplycore.PurchaseOrderItemInput, 0, len(o.Items))
-	for _, it := range o.Items {
-		qty := it.Quantity
-		if qty <= 0 {
-			qty = 1
-		}
-		code := strings.TrimSpace(it.SkuCode)
-		if code == "" {
-			code = strings.TrimSpace(it.PlatformSkuID)
-		}
-		items = append(items, supplycore.PurchaseOrderItemInput{
-			SkuID:           it.SkuID,
-			ProductName:     it.ProductName,
-			SupplierSkuCode: code,
-			Qty:             qty,
-			UnitPrice:       0,
-			Remark:          it.SkuSpecs,
-		})
+	items := s.mapOrderToPOLines(ctx, bearerToken, o)
+	if len(items) == 0 {
+		return "", 0, false, fmt.Errorf("订单无明细，无法创建代发采购单")
+	}
+	saleTotal := 0.0
+	for _, line := range items {
+		saleTotal += line.SaleAmount
 	}
 	remark := fmt.Sprintf("OMS代发 %s", o.OrderNo)
 	if supplierName != "" {
@@ -638,6 +632,7 @@ func (s *OrderService) ensureDropshipPurchaseOrder(ctx context.Context, o *model
 		FulfillmentType: "dropship",
 		RefSoID:         o.ID,
 		RefTraceID:      o.OrderNo,
+		SaleAmount:      roundMoney(saleTotal),
 		Remark:          remark,
 		Items:           items,
 	})
@@ -645,6 +640,190 @@ func (s *OrderService) ensureDropshipPurchaseOrder(ctx context.Context, o *model
 		return "", 0, false, fmt.Errorf("创建 SupplyCore 代发单失败: %w", err)
 	}
 	return po.PoNo, po.ID, true, nil
+}
+
+// mapOrderToPOLines 将销售单明细转为采购行；明细「订单金额」= 订单实付按行分摊。
+func (s *OrderService) mapOrderToPOLines(ctx context.Context, bearerToken string, o *model.Order) []supplycore.PurchaseOrderItemInput {
+	if o == nil || len(o.Items) == 0 {
+		return nil
+	}
+	pay := o.PayAmount
+	if pay <= 0 {
+		pay = o.TotalAmount
+	}
+	weights := make([]float64, len(o.Items))
+	var sumW float64
+	for i, it := range o.Items {
+		w := it.TotalAmount
+		if w <= 0 {
+			qty := it.Quantity
+			if qty <= 0 {
+				qty = 1
+			}
+			w = it.Price * float64(qty)
+		}
+		if w <= 0 {
+			w = 1
+		}
+		weights[i] = w
+		sumW += w
+	}
+
+	out := make([]supplycore.PurchaseOrderItemInput, 0, len(o.Items))
+	var allocated float64
+	for i, it := range o.Items {
+		qty := it.Quantity
+		if qty <= 0 {
+			qty = 1
+		}
+		skuCode := strings.TrimSpace(it.SkuCode)
+		skuID := it.SkuID
+		if skuID == 0 && skuCode != "" && s.product != nil {
+			if id, rerr := s.product.ResolveSkuIDByCode(ctx, bearerToken, skuCode); rerr == nil && id > 0 {
+				skuID = id
+			}
+		}
+		var saleAmt float64
+		if i == len(o.Items)-1 {
+			saleAmt = roundMoney(pay - allocated)
+		} else if sumW > 0 {
+			saleAmt = roundMoney(pay * weights[i] / sumW)
+			allocated += saleAmt
+		}
+		if saleAmt < 0 {
+			saleAmt = 0
+		}
+		saleUnit := 0.0
+		if qty > 0 {
+			saleUnit = roundMoney(saleAmt / float64(qty))
+		}
+		remark := ""
+		// 电商平台订单：带入买家备注、卖家备注；其它来源默认空
+		if o.SourceChannel == model.SourceKDZS || strings.TrimSpace(o.Platform) != "" {
+			parts := make([]string, 0, 2)
+			if buyer := strings.TrimSpace(o.Remark); buyer != "" {
+				parts = append(parts, "买家备注："+buyer)
+			}
+			if seller := strings.TrimSpace(o.SellerRemark); seller != "" {
+				parts = append(parts, "卖家备注："+seller)
+			}
+			remark = strings.Join(parts, "；")
+		}
+		out = append(out, supplycore.PurchaseOrderItemInput{
+			SkuID:         skuID,
+			ProductName:   it.ProductName,
+			SkuCode:       skuCode,
+			SkuSpecs:      it.SkuSpecs,
+			PicURL:        it.PicURL,
+			Qty:           qty,
+			SaleUnitPrice: saleUnit,
+			SaleAmount:    saleAmt,
+			UnitPrice:     0,
+			Remark:        remark,
+		})
+	}
+	return out
+}
+
+// BatchAllocateDropship 批量代发：同一供应商合并为一张 SupplyCore 代发采购单（多行明细），再逐单分配。
+func (s *OrderService) BatchAllocateDropship(ctx context.Context, tenantID, operatorID uint64, orderIDs []uint64, supplierID uint64, supplierName, bearerToken string) (map[string]any, error) {
+	if supplierID == 0 {
+		return nil, fmt.Errorf("请选择供应商")
+	}
+	if len(orderIDs) == 0 {
+		return nil, fmt.Errorf("请选择订单")
+	}
+	if s.supply == nil {
+		return nil, fmt.Errorf("SupplyCore 未配置")
+	}
+	if supplierName == "" {
+		if b, err := s.repos.FindBindingBySupplier(tenantID, supplierID, model.SourceKDZS); err == nil {
+			supplierName = b.SupplierName
+		}
+	}
+
+	orders := make([]*model.Order, 0, len(orderIDs))
+	seen := map[uint64]struct{}{}
+	for _, id := range orderIDs {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		o, err := s.repos.GetOrder(tenantID, id)
+		if err != nil {
+			return nil, fmt.Errorf("订单 %d 不存在", id)
+		}
+		if o.Status != model.StatusPendingAlloc && o.Status != model.StatusPendingShip {
+			return nil, fmt.Errorf("%s 当前状态不可代发分配", o.OrderNo)
+		}
+		if len(o.Items) == 0 {
+			return nil, fmt.Errorf("%s 无商品明细", o.OrderNo)
+		}
+		orders = append(orders, o)
+	}
+	if len(orders) == 0 {
+		return nil, fmt.Errorf("请选择有效订单")
+	}
+
+	items := make([]supplycore.PurchaseOrderItemInput, 0)
+	traceParts := make([]string, 0, len(orders))
+	var saleTotal float64
+	for _, o := range orders {
+		traceParts = append(traceParts, o.OrderNo)
+		lines := s.mapOrderToPOLines(ctx, bearerToken, o)
+		items = append(items, lines...)
+		for _, line := range lines {
+			saleTotal += line.SaleAmount
+		}
+	}
+
+	remark := fmt.Sprintf("OMS批量代发 %d 单 → %s", len(orders), supplierName)
+	po, err := s.supply.CreatePurchaseOrder(ctx, bearerToken, supplycore.PurchaseOrderInput{
+		SupplierID:      supplierID,
+		FulfillmentType: "dropship",
+		RefSoID:         orders[0].ID,
+		RefTraceID:      strings.Join(traceParts, ","),
+		SaleAmount:      roundMoney(saleTotal),
+		Remark:          remark,
+		Items:           items,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("创建合并代发单失败: %w", err)
+	}
+
+	ok := 0
+	errors := make([]string, 0)
+	for _, o := range orders {
+		_, aerr := s.Allocate(ctx, tenantID, operatorID, o.ID, dto.AllocateRequest{
+			AllocType:       model.AllocDropship,
+			SupplierID:      supplierID,
+			SupplierName:    supplierName,
+			PurchaseOrderID: po.PoNo,
+		}, bearerToken)
+		if aerr != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", o.OrderNo, aerr))
+			continue
+		}
+		ok++
+	}
+	if ok == 0 {
+		_ = s.rollbackDropshipPurchaseOrder(ctx, bearerToken, po.ID)
+		return nil, fmt.Errorf("批量代发全部失败: %s", strings.Join(errors, "; "))
+	}
+	return map[string]any{
+		"poNo":        po.PoNo,
+		"poId":        po.ID,
+		"saleAmount":  roundMoney(saleTotal),
+		"totalAmount": roundMoney(saleTotal),
+		"orderCount":  len(orders),
+		"lineCount":   len(items),
+		"success":     ok,
+		"failed":      len(errors),
+		"errors":      errors,
+	}, nil
 }
 
 func (s *OrderService) rollbackDropshipPurchaseOrder(ctx context.Context, bearerToken string, poID uint64) error {
@@ -659,37 +838,72 @@ func (s *OrderService) rollbackDropshipPurchaseOrder(ctx context.Context, bearer
 }
 
 // cancelLinkedDropshipPOs 撤回分配时取消关联草稿/已下单代发单；已付款则拒绝。
-func (s *OrderService) cancelLinkedDropshipPOs(ctx context.Context, orderID uint64, purchaseOrderID, bearerToken string) error {
+// 若多笔销售单共用同一采购单，仅当本单为最后关联方时才取消采购单。
+func (s *OrderService) cancelLinkedDropshipPOs(ctx context.Context, tenantID, orderID uint64, purchaseOrderID, bearerToken string) error {
 	if s.supply == nil {
 		return nil
 	}
-	list, _, err := s.supply.ListPurchaseOrders(ctx, bearerToken, orderID, "dropship", 1, 50)
-	if err != nil {
-		// 有本地采购单号时仍尝试按号提示；列表失败不阻断若无采购单
-		if strings.TrimSpace(purchaseOrderID) == "" {
+	poNo := strings.TrimSpace(purchaseOrderID)
+	if poNo != "" {
+		others, err := s.repos.CountByPurchaseOrderID(tenantID, poNo, orderID)
+		if err != nil {
+			return err
+		}
+		if others > 0 {
+			// 仍有其它销售单挂在同一代发单上，只解绑本单
 			return nil
 		}
-		return fmt.Errorf("查询关联代发单失败: %w", err)
 	}
-	for _, it := range list {
-		if it.Status == "cancelled" {
-			continue
+
+	seen := map[uint64]struct{}{}
+	list, _, err := s.supply.ListPurchaseOrders(ctx, bearerToken, orderID, "dropship", 1, 50)
+	if err != nil && poNo == "" {
+		return nil
+	}
+	if err == nil {
+		for _, it := range list {
+			seen[it.ID] = struct{}{}
+			if err := s.cancelOneDropshipPO(ctx, bearerToken, it); err != nil {
+				return err
+			}
 		}
-		if it.PayStatus == "paid" || it.Status == "paid" || it.Status == "partial_shipped" ||
-			it.Status == "in_transit" || it.Status == "partial_received" || it.Status == "completed" {
-			return fmt.Errorf("关联代发单 %s 已进入付款/履约，不可撤回分配", it.PoNo)
-		}
-		if it.Status == "draft" || it.Status == "ordered" {
-			if _, err := s.supply.CancelPurchaseOrder(ctx, bearerToken, it.ID); err != nil {
-				// 草稿优先删除
-				if it.Status == "draft" {
-					if delErr := s.supply.DeletePurchaseOrder(ctx, bearerToken, it.ID); delErr != nil {
-						return fmt.Errorf("取消代发单 %s 失败: %w", it.PoNo, err)
-					}
+	}
+	if poNo != "" {
+		byNo, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, 0, "dropship", poNo, 1, 10)
+		if err == nil {
+			for _, it := range byNo {
+				if it.PoNo != poNo {
 					continue
 				}
-				return fmt.Errorf("取消代发单 %s 失败: %w", it.PoNo, err)
+				if _, ok := seen[it.ID]; ok {
+					continue
+				}
+				if err := s.cancelOneDropshipPO(ctx, bearerToken, it); err != nil {
+					return err
+				}
 			}
+		}
+	}
+	return nil
+}
+
+func (s *OrderService) cancelOneDropshipPO(ctx context.Context, bearerToken string, it supplycore.PurchaseOrderListItem) error {
+	if it.Status == "cancelled" {
+		return nil
+	}
+	if it.PayStatus == "paid" || it.Status == "paid" || it.Status == "partial_shipped" ||
+		it.Status == "in_transit" || it.Status == "partial_received" || it.Status == "completed" {
+		return fmt.Errorf("关联代发单 %s 已进入付款/履约，不可撤回分配", it.PoNo)
+	}
+	if it.Status == "draft" || it.Status == "ordered" {
+		if _, err := s.supply.CancelPurchaseOrder(ctx, bearerToken, it.ID); err != nil {
+			if it.Status == "draft" {
+				if delErr := s.supply.DeletePurchaseOrder(ctx, bearerToken, it.ID); delErr != nil {
+					return fmt.Errorf("取消代发单 %s 失败: %w", it.PoNo, err)
+				}
+				return nil
+			}
+			return fmt.Errorf("取消代发单 %s 失败: %w", it.PoNo, err)
 		}
 	}
 	return nil
@@ -713,7 +927,7 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 
 	// 先处理关联代发采购单（已付款则禁止撤回）
 	if o.AllocType == model.AllocDropship || strings.TrimSpace(o.PurchaseOrderID) != "" {
-		if err := s.cancelLinkedDropshipPOs(ctx, o.ID, o.PurchaseOrderID, bearerToken); err != nil {
+		if err := s.cancelLinkedDropshipPOs(ctx, tenantID, o.ID, o.PurchaseOrderID, bearerToken); err != nil {
 			return nil, err
 		}
 	}
@@ -1543,6 +1757,12 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 	if kdzsText == "" {
 		kdzsText = kdzsPlatformStatusText(kdzsStatus)
 	}
+	// 实付/订单总金额=快递助手 payment（商家实收=实付价+平台优惠，含邮费）；邮费单独落 freight 备查
+	freight := t.PostFee
+	if freight < 0 {
+		freight = 0
+	}
+	orderTotal := roundMoney(t.Payment)
 	return dto.IngestOrderRequest{
 		SourceChannel:       model.SourceKDZS,
 		Platform:            t.Platform,
@@ -1561,8 +1781,9 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 		BuyerNick:           t.BuyerNick,
 		BuyerName:           t.ReceiverName,
 		BuyerPhone:          t.ReceiverMobile,
-		TotalAmount:         t.Payment,
-		PayAmount:           t.Payment,
+		TotalAmount:         orderTotal,
+		PayAmount:           orderTotal,
+		FreightAmount:       freight,
 		PayStatus:           "paid",
 		PayTime:             t.PayTime,
 		OrderTime:           t.CreateTime,
@@ -1930,6 +2151,10 @@ func coalesceStr(a, b string) string {
 		return a
 	}
 	return b
+}
+
+func roundMoney(v float64) float64 {
+	return float64(int64(v*100+0.5)) / 100
 }
 
 func mapStoreSalesToIngest(so storecore.SalesOrder) dto.IngestOrderRequest {

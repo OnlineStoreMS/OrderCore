@@ -6,20 +6,40 @@ declare global {
   }
 }
 
-/** 部署时可由 runtime-config.js + 环境变量 VITE_PORTAL_URL / PUBLIC_HOST 覆盖 */
+function trimUrl(v?: string | null): string {
+  return (v || '').trim().replace(/\/$/, '')
+}
+
+function isLocalHost(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1'
+}
+
+/** 与当前访问主机同机的 UserCore 应用中心 */
+function portalFromLocation(): string {
+  if (typeof window === 'undefined' || !window.location?.hostname) return ''
+  const { protocol, hostname } = window.location
+  if (!hostname || isLocalHost(hostname)) return ''
+  return `${protocol}//${hostname}:5174`
+}
+
+/**
+ * 门户地址优先级：
+ * 1) runtime-config.js（部署注入）
+ * 2) 当前访问主机推导（避免局域网打开订单中心却跳到 localhost）
+ * 3) 构建期 VITE_PORTAL_URL（仅非 localhost 才用，防止误写死）
+ * 4) http://localhost:5174
+ */
 export function getPortalUrl(): string {
-  const fromRuntime = window.__RUNTIME_CONFIG__?.portalUrl?.trim()
-  if (fromRuntime) return fromRuntime.replace(/\/$/, '')
+  const fromRuntime = trimUrl(window.__RUNTIME_CONFIG__?.portalUrl)
+  if (fromRuntime) return fromRuntime
 
-  const fromEnv = import.meta.env.VITE_PORTAL_URL?.trim()
-  if (fromEnv) return fromEnv.replace(/\/$/, '')
+  const fromHost = portalFromLocation()
+  if (fromHost) return fromHost
 
-  // 兜底：与当前访问主机同机的 UserCore 应用中心（避免热更新冲掉 runtime-config 后落到 localhost）
-  if (typeof window !== 'undefined' && window.location?.hostname) {
-    const { protocol, hostname } = window.location
-    if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1') {
-      return `${protocol}//${hostname}:5174`
-    }
+  const fromEnv = trimUrl(import.meta.env.VITE_PORTAL_URL)
+  if (fromEnv && !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/i.test(fromEnv)) {
+    return fromEnv
   }
+
   return 'http://localhost:5174'
 }

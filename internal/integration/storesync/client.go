@@ -66,6 +66,7 @@ type TradeOrder struct {
 	ReceiverMobile    string       `json:"receiverMobile"`
 	ReceiverAddress   string       `json:"receiverAddress"`
 	Payment           float64      `json:"payment"`
+	PostFee           float64      `json:"postFee"`
 	TradeStatus             string       `json:"tradeStatus"`
 	StatusText              string       `json:"statusText"`
 	PlatformOrderStatus     string       `json:"platformOrderStatus"`

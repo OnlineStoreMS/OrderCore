@@ -20,6 +20,20 @@ if (!useGateway) {
 }
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    {
+      name: 'runtime-config-first',
+      transformIndexHtml(html) {
+        const tag = '<script src="/runtime-config.js"></script>'
+        const cleaned = html.replace(/\s*<script src="\/runtime-config\.js"><\/script>/g, '')
+        // 保证运行时配置先于 module 执行，避免门户地址回落到构建期 localhost
+        if (cleaned.includes('<head>')) {
+          return cleaned.replace('<head>', `<head>\n    ${tag}`)
+        }
+        return `${tag}\n${cleaned}`
+      },
+    },
+  ],
   server: { port: 5182, proxy },
 })

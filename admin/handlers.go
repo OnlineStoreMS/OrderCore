@@ -154,6 +154,28 @@ func (h *Handlers) Allocate(c *gin.Context) {
 	response.OK(c, o)
 }
 
+func (h *Handlers) BatchDropship(c *gin.Context) {
+	var req dto.BatchDropshipRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	stats, err := h.orders.BatchAllocateDropship(
+		c.Request.Context(),
+		authcontext.TenantID(c),
+		authcontext.UserID(c),
+		req.OrderIDs,
+		req.SupplierID,
+		req.SupplierName,
+		authcontext.BearerToken(c),
+	)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, stats)
+}
+
 func (h *Handlers) RevokeAllocate(c *gin.Context) {
 	id, err := parseID(c.Param("id"))
 	if err != nil {
