@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"ordercore/internal/dto"
+	"ordercore/internal/integration/productcore"
 	"ordercore/internal/integration/storecore"
 	"ordercore/internal/integration/storesync"
 	"ordercore/internal/integration/supplycore"
@@ -23,11 +24,12 @@ type OrderService struct {
 	storeSync   *storesync.Client
 	storeCore   *storecore.Client
 	supply      *supplycore.Client
+	product     *productcore.Client
 	onAllocated func(tenantID, orderID uint64)
 }
 
-func NewOrderService(repos *repo.Repos, storeSync *storesync.Client, storeCore *storecore.Client, supply *supplycore.Client) *OrderService {
-	return &OrderService{repos: repos, storeSync: storeSync, storeCore: storeCore, supply: supply}
+func NewOrderService(repos *repo.Repos, storeSync *storesync.Client, storeCore *storecore.Client, supply *supplycore.Client, product *productcore.Client) *OrderService {
+	return &OrderService{repos: repos, storeSync: storeSync, storeCore: storeCore, supply: supply, product: product}
 }
 
 func (s *OrderService) SetOnAllocated(fn func(tenantID, orderID uint64)) {
@@ -149,6 +151,8 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	if channel == "" {
 		return nil, false, fmt.Errorf("sourceChannel 必填")
 	}
+	s.enrichItemsWithProductSKU(ctx, bearerToken, req.Items)
+
 	var existing *model.Order
 	var err error
 	if req.PlatformOrderID != "" {
@@ -292,6 +296,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				return err
 			}
 			items := mapItems(tenantID, existing.ID, req.Items)
+			preserveOSMSSKUFields(existing.Items, items)
 			if err := tx.ReplaceItems(tenantID, existing.ID, items); err != nil {
 				return err
 			}
@@ -1414,6 +1419,61 @@ func mapAddress(tenantID, orderID uint64, in *dto.AddressInput) *model.OrderAddr
 	}
 }
 
+// preserveOSMSSKUFields 同步更新明细时保留 OSMS 侧已维护的 skuId/商家编码（不从快递助手 outerId 覆盖）。
+func preserveOSMSSKUFields(oldItems, newItems []model.OrderItem) {
+	if len(oldItems) == 0 || len(newItems) == 0 {
+		return
+	}
+	byLine := map[int]model.OrderItem{}
+	for _, it := range oldItems {
+		byLine[it.LineNo] = it
+	}
+	for i := range newItems {
+		old, ok := byLine[newItems[i].LineNo]
+		if !ok && i < len(oldItems) {
+			old = oldItems[i]
+			ok = true
+		}
+		if !ok {
+			continue
+		}
+		if newItems[i].SkuID == 0 && old.SkuID > 0 {
+			newItems[i].SkuID = old.SkuID
+		}
+		if strings.TrimSpace(newItems[i].SkuCode) == "" && strings.TrimSpace(old.SkuCode) != "" {
+			newItems[i].SkuCode = old.SkuCode
+		}
+	}
+}
+
+// enrichItemsWithProductSKU 用商家编码匹配 ProductCore SKU；失败不阻断同步。
+func (s *OrderService) enrichItemsWithProductSKU(ctx context.Context, bearerToken string, items []dto.OrderItemInput) {
+	if s.product == nil || len(items) == 0 {
+		return
+	}
+	cache := map[string]uint64{}
+	for i := range items {
+		if items[i].SkuID > 0 {
+			continue
+		}
+		code := strings.TrimSpace(items[i].SkuCode)
+		if code == "" {
+			continue
+		}
+		if id, ok := cache[code]; ok {
+			items[i].SkuID = id
+			continue
+		}
+		id, err := s.product.ResolveSkuIDByCode(ctx, bearerToken, code)
+		if err != nil || id == 0 {
+			cache[code] = 0
+			continue
+		}
+		cache[code] = id
+		items[i].SkuID = id
+	}
+}
+
 func mapItems(tenantID, orderID uint64, items []dto.OrderItemInput) []model.OrderItem {
 	out := make([]model.OrderItem, 0, len(items))
 	for i, it := range items {
@@ -1422,17 +1482,19 @@ func mapItems(tenantID, orderID uint64, items []dto.OrderItemInput) []model.Orde
 			qty = 1
 		}
 		out = append(out, model.OrderItem{
-			TenantID:    tenantID,
-			OrderID:     orderID,
-			LineNo:      i + 1,
-			SkuID:       it.SkuID,
-			SkuCode:     it.SkuCode,
-			ProductName: it.ProductName,
-			SkuSpecs:    it.SkuSpecs,
-			PicURL:      it.PicURL,
-			Quantity:    qty,
-			Price:       it.Price,
-			TotalAmount: it.Price * float64(qty),
+			TenantID:       tenantID,
+			OrderID:        orderID,
+			LineNo:         i + 1,
+			SkuID:          it.SkuID,
+			SkuCode:        it.SkuCode,
+			PlatformSkuID:  it.PlatformSkuID,
+			PlatformItemID: it.PlatformItemID,
+			ProductName:    it.ProductName,
+			SkuSpecs:       it.SkuSpecs,
+			PicURL:         it.PicURL,
+			Quantity:       qty,
+			Price:          it.Price,
+			TotalAmount:    it.Price * float64(qty),
 		})
 	}
 	return out
@@ -1453,13 +1515,15 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 	raw, _ := json.Marshal(t)
 	items := make([]dto.OrderItemInput, 0, len(t.Goods))
 	for _, g := range t.Goods {
+		// 商家编码不从快递助手 outerId 同步，由 OSMS 侧自行填写/绑定
 		items = append(items, dto.OrderItemInput{
-			SkuCode:     g.OuterID,
-			ProductName: g.Title,
-			SkuSpecs:    g.SkuName,
-			PicURL:      g.PicURL,
-			Quantity:    g.Num,
-			Price:       g.Price,
+			PlatformSkuID:  g.SkuID,
+			PlatformItemID: g.ItemID,
+			ProductName:    g.Title,
+			SkuSpecs:       g.SkuName,
+			PicURL:         g.PicURL,
+			Quantity:       g.Num,
+			Price:          g.Price,
 		})
 	}
 	addrFull := t.FormattedReceiver

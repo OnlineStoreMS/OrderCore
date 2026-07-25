@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   allocateOrder,
   revokeAllocateOrder,
+  formatDateTime,
   getOrder,
   labelAgentType,
   labelAlloc,
@@ -258,7 +259,15 @@ onMounted(load)
         </el-table-column>
         <el-table-column prop="productName" label="商品" min-width="200" />
         <el-table-column prop="skuSpecs" label="规格" width="140" />
-        <el-table-column prop="skuCode" label="商家编码" width="140" />
+        <el-table-column prop="skuId" label="SKU ID" width="100">
+          <template #default="{ row }">{{ row.skuId || '—' }}</template>
+        </el-table-column>
+        <el-table-column prop="skuCode" label="商家编码" width="140">
+          <template #default="{ row }">{{ row.skuCode || '—' }}</template>
+        </el-table-column>
+        <el-table-column prop="platformSkuId" label="平台SKU" width="130" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.platformSkuId || '—' }}</template>
+        </el-table-column>
         <el-table-column prop="quantity" label="数量" width="80" />
         <el-table-column prop="price" label="单价" width="90" />
         <el-table-column prop="totalAmount" label="小计" width="90" />
@@ -271,12 +280,16 @@ onMounted(load)
         <el-table-column prop="expressNo" label="物流单号" min-width="160" />
         <el-table-column prop="callbackStatus" label="回传状态" width="120" />
         <el-table-column prop="callbackMessage" label="回传说明" min-width="200" show-overflow-tooltip />
-        <el-table-column prop="shippedAt" label="发货时间" width="170" />
+        <el-table-column label="发货时间" width="170">
+          <template #default="{ row }">{{ formatDateTime(row.shippedAt) }}</template>
+        </el-table-column>
       </el-table>
 
       <h3>状态流水</h3>
       <el-table :data="order.statusLogs || []" size="small">
-        <el-table-column prop="createdAt" label="时间" width="170" />
+        <el-table-column label="时间" width="170">
+          <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
+        </el-table-column>
         <el-table-column prop="action" label="动作" width="140" />
         <el-table-column label="状态" min-width="180">
           <template #default="{ row }">

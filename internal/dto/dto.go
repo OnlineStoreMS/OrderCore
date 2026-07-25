@@ -25,13 +25,15 @@ type AddressInput struct {
 }
 
 type OrderItemInput struct {
-	SkuID       uint64  `json:"skuId"`
-	SkuCode     string  `json:"skuCode"`
-	ProductName string  `json:"productName"`
-	SkuSpecs    string  `json:"skuSpecs"`
-	PicURL      string  `json:"picUrl"`
-	Quantity    int     `json:"quantity"`
-	Price       float64 `json:"price"`
+	SkuID          uint64  `json:"skuId"`
+	SkuCode        string  `json:"skuCode"`
+	PlatformSkuID  string  `json:"platformSkuId"`
+	PlatformItemID string  `json:"platformItemId"`
+	ProductName    string  `json:"productName"`
+	SkuSpecs       string  `json:"skuSpecs"`
+	PicURL         string  `json:"picUrl"`
+	Quantity       int     `json:"quantity"`
+	Price          float64 `json:"price"`
 }
 
 // IngestOrderRequest 外部模块推送/同步入库

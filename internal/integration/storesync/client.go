@@ -51,6 +51,8 @@ type TradeGoods struct {
 	PicURL  string  `json:"picUrl"`
 	Num     int     `json:"num"`
 	OuterID string  `json:"outerId"`
+	SkuID   string  `json:"skuId"`
+	ItemID  string  `json:"itemId"`
 	Price   float64 `json:"price"`
 }
 

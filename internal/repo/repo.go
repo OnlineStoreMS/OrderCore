@@ -121,7 +121,7 @@ func (r *Repos) GetOrder(tenantID, id uint64) (*model.Order, error) {
 		Preload("Items").
 		Preload("Address").
 		Preload("Shipments", func(db *gorm.DB) *gorm.DB { return db.Order("id ASC") }).
-		Preload("StatusLogs", func(db *gorm.DB) *gorm.DB { return db.Order("id ASC") }).
+		Preload("StatusLogs", func(db *gorm.DB) *gorm.DB { return db.Order("id DESC") }).
 		First(&o).Error
 	if err != nil {
 		return nil, err

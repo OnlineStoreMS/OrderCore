@@ -4,6 +4,8 @@ export interface OrderItem {
   id?: number
   skuId?: number
   skuCode?: string
+  platformSkuId?: string
+  platformItemId?: string
   productName?: string
   skuSpecs?: string
   picUrl?: string
@@ -231,8 +233,16 @@ export function labelAgentType(v?: number) {
 
 export function formatDateTime(v?: string | null) {
   if (!v) return '-'
-  const d = new Date(v)
-  if (Number.isNaN(d.getTime())) return v
+  // 兼容 "2026-07-22 03:41:21" / ISO / 带时区
+  const normalized = String(v).trim().replace(' ', 'T')
+  const d = new Date(normalized)
+  if (Number.isNaN(d.getTime())) {
+    // 后端已是本地可读串则直接展示
+    if (/^\d{4}-\d{2}-\d{2}/.test(String(v))) {
+      return String(v).replace('T', ' ').replace(/\.\d+/, '').replace(/([+-]\d{2}:\d{2}|Z)$/, '').trim()
+    }
+    return String(v)
+  }
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
