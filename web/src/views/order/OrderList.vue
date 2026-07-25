@@ -20,36 +20,41 @@ import {
   type Order,
   type OrderItem,
 } from '../../api/orders'
-import { dateShortcuts, defaultOrderedRange } from '../../utils/date'
+import { dateShortcuts, formatDateTimeLocal } from '../../utils/date'
 
 const router = useRouter()
 const route = useRoute()
 const loading = ref(false)
 const list = ref<Order[]>([])
 const total = ref(0)
-const [defaultStart, defaultEnd] = defaultOrderedRange()
+
+function last7DaysRange(): [string, string] {
+  const end = new Date()
+  const start = new Date()
+  start.setDate(start.getDate() - 6)
+  start.setHours(0, 0, 0, 0)
+  end.setHours(23, 59, 59, 0)
+  return [formatDateTimeLocal(start), formatDateTimeLocal(end)]
+}
+
+const [defaultStart, defaultEnd] = last7DaysRange()
 const shipStatusInit =
   (route.query.shipStatus as string) ||
-  (route.query.status === 'shipped' ? 'shipped' : '')
-const ecommerceWaitShipInit =
-  !shipStatusInit &&
-  (route.query.ecommerceWaitShip === '1' || route.query.ecommerceWaitShip === 'true')
-const waitShipFocus = shipStatusInit === 'wait_ship' || ecommerceWaitShipInit
+  (route.query.status === 'shipped' ? 'shipped' : '') ||
+  (route.query.ecommerceWaitShip === '1' || route.query.ecommerceWaitShip === 'true' ? 'wait_ship' : '')
+// 默认待发货；工作台带入其它发货状态时尊重 query
 const filters = reactive({
   page: 1,
   pageSize: 20,
   sourceChannel: (route.query.sourceChannel as string) || '',
-  status: waitShipFocus || shipStatusInit === 'shipped'
+  status: shipStatusInit === 'shipped'
     ? ''
     : normalizeFulfillmentStatus((route.query.status as string) || ''),
-  shipStatus: shipStatusInit || (ecommerceWaitShipInit ? 'wait_ship' : ''),
+  shipStatus: shipStatusInit || 'wait_ship',
   platform: '',
   allocType: '',
   keyword: '',
-  orderedRange:
-    waitShipFocus || shipStatusInit === 'shipped'
-      ? null
-      : ([defaultStart, defaultEnd] as [string, string] | null),
+  orderedRange: [defaultStart, defaultEnd] as [string, string] | null,
   payRange: null as [string, string] | null,
 })
 
@@ -203,6 +208,18 @@ onMounted(load)
           >
             <el-option label="待发货" value="wait_ship" />
             <el-option label="已发货" value="shipped" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="分配类型">
+          <el-select
+            v-model="filters.allocType"
+            clearable
+            style="width: 130px"
+            @change="onFilterChange"
+          >
+            <el-option label="自营发货" value="self_ship" />
+            <el-option label="代发发货" value="dropship" />
+            <el-option label="采购发货" value="purchase_then_ship" />
           </el-select>
         </el-form-item>
         <el-form-item label="下单时间">

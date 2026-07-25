@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  allocateOrder,
   formatAddress,
   formatDateTime,
   formatRemark,
@@ -14,33 +15,65 @@ import {
   labelPlatform,
   labelShipStatus,
   labelStatus,
+  listBindings,
   listOrders,
+  listSuppliers,
+  revokeAllocateOrder,
   type Order,
   type OrderItem,
+  type SupplierBinding,
+  type SupplierItem,
 } from '../../api/orders'
-import { dateShortcuts, defaultOrderedRange } from '../../utils/date'
+import { dateShortcuts, formatDateTimeLocal } from '../../utils/date'
 
 const router = useRouter()
 const route = useRoute()
 const loading = ref(false)
+const batching = ref(false)
 const list = ref<Order[]>([])
 const total = ref(0)
-const [defaultStart, defaultEnd] = defaultOrderedRange()
+const selected = ref<Order[]>([])
+
+function last7DaysRange(): [string, string] {
+  const end = new Date()
+  const start = new Date()
+  start.setDate(start.getDate() - 6)
+  start.setHours(0, 0, 0, 0)
+  end.setHours(23, 59, 59, 0)
+  return [formatDateTimeLocal(start), formatDateTimeLocal(end)]
+}
+
+const [defaultStart, defaultEnd] = last7DaysRange()
 const statusFromQuery = typeof route.query.status === 'string' ? route.query.status : ''
 const shipStatusFromQuery = typeof route.query.shipStatus === 'string' ? route.query.shipStatus : ''
 const normalizedStatus =
   statusFromQuery === 'pending_ship' ? 'pending_alloc' : statusFromQuery || 'pending_alloc'
+
 const filters = reactive({
   page: 1,
   pageSize: 20,
   status: normalizedStatus,
   shipStatus: shipStatusFromQuery || '',
+  allocType: '',
   keyword: '',
-  // 从工作台带入状态时不限默认时间窗，与卡片数量对齐
-  orderedRange: statusFromQuery || shipStatusFromQuery
-    ? null
-    : ([defaultStart, defaultEnd] as [string, string] | null),
+  orderedRange: [defaultStart, defaultEnd] as [string, string] | null,
 })
+
+const dropshipVisible = ref(false)
+const suppliers = ref<SupplierItem[]>([])
+const bindings = ref<SupplierBinding[]>([])
+const dropshipForm = reactive({
+  supplierId: undefined as number | undefined,
+  supplierName: '',
+})
+
+const selectedCount = computed(() => selected.value.length)
+const canBatchAllocate = computed(() =>
+  selected.value.some((o) => o.status === 'pending_alloc' || o.status === 'pending_ship'),
+)
+const canBatchRevoke = computed(() =>
+  selected.value.some((o) => o.status === 'allocated' || o.status === 'purchasing'),
+)
 
 async function load() {
   loading.value = true
@@ -50,6 +83,7 @@ async function load() {
       pageSize: filters.pageSize,
       status: filters.status || undefined,
       shipStatus: filters.shipStatus || undefined,
+      allocType: filters.allocType || undefined,
       keyword: filters.keyword || undefined,
     }
     if (filters.orderedRange?.length === 2) {
@@ -59,6 +93,7 @@ async function load() {
     const data = await listOrders(params)
     list.value = data.list || []
     total.value = data.total || 0
+    selected.value = []
   } catch (e: any) {
     ElMessage.error(e.message || '加载失败')
   } finally {
@@ -71,52 +106,199 @@ function onFilterChange() {
   load()
 }
 
+function onSelectionChange(rows: Order[]) {
+  selected.value = rows
+}
+
+async function ensureSuppliers() {
+  if (suppliers.value.length) return
+  try {
+    const [b, s] = await Promise.all([
+      listBindings(),
+      listSuppliers({ page: 1, pageSize: 200 }),
+    ])
+    bindings.value = b || []
+    suppliers.value = s.list || []
+  } catch {
+    bindings.value = []
+    suppliers.value = []
+  }
+}
+
+function onSupplierPick(sid: number) {
+  const s = suppliers.value.find((x) => x.id === sid)
+  if (s) {
+    dropshipForm.supplierName = s.name
+    return
+  }
+  const b = bindings.value.find((x) => x.supplierId === sid)
+  if (b) dropshipForm.supplierName = b.supplierName
+}
+
+async function runBatch(
+  rows: Order[],
+  label: string,
+  fn: (o: Order) => Promise<void>,
+) {
+  if (!rows.length) {
+    ElMessage.warning('请先勾选订单')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(`确认对选中的 ${rows.length} 笔订单执行「${label}」？`, '批量操作', {
+      type: 'warning',
+      confirmButtonText: '执行',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  batching.value = true
+  let ok = 0
+  const errors: string[] = []
+  try {
+    for (const o of rows) {
+      try {
+        await fn(o)
+        ok++
+      } catch (e: any) {
+        errors.push(`${o.orderNo || o.id}: ${e.message || '失败'}`)
+      }
+    }
+  } finally {
+    batching.value = false
+  }
+  if (errors.length) {
+    ElMessage.warning(`${label}完成：成功 ${ok}，失败 ${errors.length}。${errors[0]}`)
+  } else {
+    ElMessage.success(`${label}成功 ${ok} 笔`)
+  }
+  await load()
+}
+
+async function batchSelfShip() {
+  const rows = selected.value.filter((o) => o.status === 'pending_alloc' || o.status === 'pending_ship')
+  await runBatch(rows, '批量自营发货', async (o) => {
+    await allocateOrder(o.id, { allocType: 'self_ship' })
+  })
+}
+
+async function openBatchDropship() {
+  const rows = selected.value.filter((o) => o.status === 'pending_alloc' || o.status === 'pending_ship')
+  if (!rows.length) {
+    ElMessage.warning('请勾选待分配订单')
+    return
+  }
+  dropshipForm.supplierId = undefined
+  dropshipForm.supplierName = ''
+  await ensureSuppliers()
+  dropshipVisible.value = true
+}
+
+async function submitBatchDropship() {
+  if (!dropshipForm.supplierId) {
+    ElMessage.warning('请选择供应商')
+    return
+  }
+  const rows = selected.value.filter((o) => o.status === 'pending_alloc' || o.status === 'pending_ship')
+  dropshipVisible.value = false
+  await runBatch(rows, '批量代发', async (o) => {
+    await allocateOrder(o.id, {
+      allocType: 'dropship',
+      supplierId: dropshipForm.supplierId,
+      supplierName: dropshipForm.supplierName,
+    })
+  })
+}
+
+async function batchRevoke() {
+  const rows = selected.value.filter((o) => o.status === 'allocated' || o.status === 'purchasing')
+  await runBatch(rows, '批量撤回分配', async (o) => {
+    await revokeAllocateOrder(o.id)
+  })
+}
+
 onMounted(load)
 </script>
 
 <template>
   <div class="page">
     <div class="toolbar">
-      <el-radio-group v-model="filters.status" @change="onFilterChange">
-        <el-radio-button value="pending_alloc">待分配</el-radio-button>
-        <el-radio-button value="allocated">已分配</el-radio-button>
-        <el-radio-button value="purchasing">采购中</el-radio-button>
-        <el-radio-button value="">全部</el-radio-button>
-      </el-radio-group>
-      <el-select
-        v-model="filters.shipStatus"
-        clearable
-        placeholder="发货状态"
-        style="width: 120px"
-        @change="onFilterChange"
-      >
-        <el-option label="待发货" value="wait_ship" />
-        <el-option label="已发货" value="shipped" />
-      </el-select>
-      <el-date-picker
-        v-model="filters.orderedRange"
-        type="datetimerange"
-        range-separator="至"
-        start-placeholder="下单开始"
-        end-placeholder="下单结束"
-        value-format="YYYY-MM-DD HH:mm:ss"
-        :shortcuts="dateShortcuts"
-        clearable
-        style="width: 360px"
-        @change="onFilterChange"
-      />
-      <el-input v-model="filters.keyword" clearable placeholder="搜索单号/买家" style="width: 220px" @keyup.enter="onFilterChange" />
+      <div class="filters">
+        <el-radio-group v-model="filters.status" @change="onFilterChange">
+          <el-radio-button value="pending_alloc">待分配</el-radio-button>
+          <el-radio-button value="allocated">已分配</el-radio-button>
+          <el-radio-button value="purchasing">采购中</el-radio-button>
+          <el-radio-button value="">全部</el-radio-button>
+        </el-radio-group>
+        <el-select
+          v-model="filters.shipStatus"
+          clearable
+          placeholder="发货状态"
+          style="width: 120px"
+          @change="onFilterChange"
+        >
+          <el-option label="待发货" value="wait_ship" />
+          <el-option label="已发货" value="shipped" />
+        </el-select>
+        <el-select
+          v-model="filters.allocType"
+          clearable
+          placeholder="分配类型"
+          style="width: 130px"
+          @change="onFilterChange"
+        >
+          <el-option label="自营发货" value="self_ship" />
+          <el-option label="代发发货" value="dropship" />
+          <el-option label="采购发货" value="purchase_then_ship" />
+        </el-select>
+        <div class="date-field">
+          <span class="date-label">下单时间</span>
+          <el-date-picker
+            v-model="filters.orderedRange"
+            type="datetimerange"
+            range-separator="至"
+            start-placeholder="开始"
+            end-placeholder="结束"
+            value-format="YYYY-MM-DD HH:mm:ss"
+            :shortcuts="dateShortcuts"
+            clearable
+            style="width: 360px"
+            @change="onFilterChange"
+          />
+        </div>
+        <el-input
+          v-model="filters.keyword"
+          clearable
+          placeholder="搜索单号/买家"
+          style="width: 200px"
+          @keyup.enter="onFilterChange"
+        />
+      </div>
+      <div class="batch-actions">
+        <span v-if="selectedCount" class="muted">已选 {{ selectedCount }}</span>
+        <el-button :disabled="!canBatchAllocate" :loading="batching" @click="batchSelfShip">批量自营</el-button>
+        <el-button type="primary" :disabled="!canBatchAllocate" :loading="batching" @click="openBatchDropship">批量代发</el-button>
+        <el-button type="warning" plain :disabled="!canBatchRevoke" :loading="batching" @click="batchRevoke">批量撤回</el-button>
+      </div>
     </div>
 
     <el-alert
       type="info"
       :closable="false"
       title="分配说明"
-      description="自营发货：本仓发货后填单号回传；代发发货：快递助手厂家代发（推送即可）或 OSMS 供应商代发（线下沟通后填单号）；采购发货：先采购到货再自营发出。"
+      description="自营发货：本仓发货后填单号回传；代发发货：快递助手厂家代发（推送即可）或 OSMS 供应商代发（线下沟通后填单号）；采购发货：先采购到货再自营发出。可勾选多单批量操作。"
       show-icon
     />
 
-    <el-table v-loading="loading" :data="list" stripe>
+    <el-table
+      v-loading="loading"
+      :data="list"
+      stripe
+      row-key="id"
+      @selection-change="onSelectionChange"
+    >
+      <el-table-column type="selection" width="48" fixed="left" />
       <el-table-column label="平台" width="90">
         <template #default="{ row }">{{ labelPlatform(row.platform) }}</template>
       </el-table-column>
@@ -225,12 +407,59 @@ onMounted(load)
         @current-change="load"
       />
     </div>
+
+    <el-dialog v-model="dropshipVisible" title="批量代发" width="480px">
+      <el-form label-width="110px">
+        <el-form-item label="OSMS供应商" required>
+          <el-select
+            v-model="dropshipForm.supplierId"
+            filterable
+            style="width: 100%"
+            placeholder="选择供应商"
+            @change="onSupplierPick"
+          >
+            <el-option-group v-if="bindings.length" label="已绑定厂家">
+              <el-option
+                v-for="b in bindings"
+                :key="`b-${b.supplierId}`"
+                :label="`${b.supplierName} → ${b.externalFactoryName || b.externalFactoryId}`"
+                :value="b.supplierId"
+              />
+            </el-option-group>
+            <el-option-group label="全部供应商">
+              <el-option
+                v-for="s in suppliers"
+                :key="s.id"
+                :label="`${s.name}${s.code ? ` (${s.code})` : ''}`"
+                :value="s.id"
+              />
+            </el-option-group>
+          </el-select>
+        </el-form-item>
+        <p class="alloc-tip">有厂家绑定会自动推快递助手厂家；无绑定则线下代发。</p>
+      </el-form>
+      <template #footer>
+        <el-button @click="dropshipVisible = false">取消</el-button>
+        <el-button type="primary" :loading="batching" @click="submitBatchDropship">确认代发</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
 .page { display: flex; flex-direction: column; gap: 12px; }
-.toolbar { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.batch-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.date-field { display: inline-flex; align-items: center; gap: 8px; }
+.date-label { color: #606266; font-size: 14px; white-space: nowrap; }
+.muted { color: #909399; font-size: 13px; margin-right: 4px; }
 .pager { display: flex; justify-content: flex-end; }
 .goods-list { display: flex; flex-direction: column; gap: 8px; }
 .goods-row { display: flex; gap: 8px; align-items: flex-start; }
@@ -249,13 +478,8 @@ onMounted(load)
   -webkit-box-orient: vertical;
 }
 .goods-meta { font-size: 12px; color: #909399; }
-.goods-meta span + span::before { content: ' · '; }
-.kdzs-meta { margin-top: 4px; font-size: 12px; color: #909399; }
-.lock-tip { font-size: 11px; color: #e6a23c; margin-top: 2px; }
-.platform-oid {
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
-  word-break: keep-all;
-}
+.kdzs-meta { font-size: 12px; color: #909399; margin-top: 2px; }
+.lock-tip { font-size: 12px; color: #e6a23c; }
+.platform-oid { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+.alloc-tip { margin: 0; color: #909399; font-size: 13px; line-height: 1.5; }
 </style>
