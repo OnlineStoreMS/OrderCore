@@ -19,6 +19,8 @@ interface DashCards {
   shipped?: number
   todayOrders?: number
   todayAmount?: number
+  todayShipped?: number
+  todayShippedAmount?: number
   weekOrders?: number
   weekAmount?: number
   monthOrders?: number
@@ -99,7 +101,7 @@ const workCards = computed(() => [
     tip: '含厂家代发锁定',
     value: cards.value.allocated || 0,
     color: '#67c23a',
-    go: () => router.push({ path: '/allocate', query: { status: 'allocated' } }),
+    go: () => router.push({ path: '/allocate', query: { status: 'allocated', shipStatus: 'wait_ship' } }),
   },
   {
     key: 'purchasing',
@@ -130,9 +132,15 @@ const typeCards = computed(() =>
 )
 
 const metricCards = computed(() => [
-  { label: '今日订单', value: cards.value.todayOrders || 0, sub: `¥${fmtMoney(cards.value.todayAmount)}` },
-  { label: '近7日订单', value: cards.value.weekOrders || 0, sub: `¥${fmtMoney(cards.value.weekAmount)}` },
-  { label: '本月订单', value: cards.value.monthOrders || 0, sub: `¥${fmtMoney(cards.value.monthAmount)}` },
+  {
+    label: '今日已发货',
+    value: cards.value.todayShipped || 0,
+    sub: `¥${fmtMoney(cards.value.todayShippedAmount)}`,
+    tip: '今日发货订单 · 实际成交额',
+  },
+  { label: '今日订单', value: cards.value.todayOrders || 0, sub: `¥${fmtMoney(cards.value.todayAmount)}`, tip: '今日下单' },
+  { label: '近7日订单', value: cards.value.weekOrders || 0, sub: `¥${fmtMoney(cards.value.weekAmount)}`, tip: '近7日下单' },
+  { label: '本月订单', value: cards.value.monthOrders || 0, sub: `¥${fmtMoney(cards.value.monthAmount)}`, tip: '本月下单' },
 ])
 
 const rangeSummaryCards = computed(() => [
@@ -421,10 +429,11 @@ onUnmounted(() => {
     </div>
 
     <div class="metric-row">
-      <div v-for="m in metricCards" :key="m.label" class="metric-card">
+      <div v-for="m in metricCards" :key="m.label" class="metric-card" :class="{ highlight: m.label === '今日已发货' }">
         <div class="metric-label">{{ m.label }}</div>
         <div class="metric-value">{{ m.value }}</div>
         <div class="metric-sub">实际成交额 {{ m.sub }}</div>
+        <div v-if="m.tip" class="metric-tip">{{ m.tip }}</div>
       </div>
     </div>
 
@@ -519,7 +528,7 @@ onUnmounted(() => {
 
 .metric-row {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 .metric-card {
@@ -528,9 +537,14 @@ onUnmounted(() => {
   border-radius: 10px;
   padding: 14px 16px;
 }
+.metric-card.highlight {
+  border-color: #99f6e4;
+  background: linear-gradient(180deg, #f0fdfa 0%, #fff 60%);
+}
 .metric-label { font-size: 13px; color: #64748b; }
 .metric-value { margin-top: 4px; font-size: 24px; font-weight: 700; color: #0f172a; }
 .metric-sub { margin-top: 4px; font-size: 13px; color: #0f766e; }
+.metric-tip { margin-top: 4px; font-size: 12px; color: #94a3b8; }
 
 .channel-sales-row {
   display: grid;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
@@ -15,18 +15,33 @@ import {
   labelSource,
   labelStatus,
   listOrders,
-  syncKDZS,
-  syncStore,
   type Order,
   type OrderItem,
 } from '../../api/orders'
 import { dateShortcuts, formatDateTimeLocal } from '../../utils/date'
+import { bindTableShiftWheel, useTableFillHeight } from '../../composables/useTableFillHeight'
 
 const router = useRouter()
 const route = useRoute()
 const loading = ref(false)
 const list = ref<Order[]>([])
 const total = ref(0)
+
+const pageRef = ref<HTMLElement | null>(null)
+const toolbarRef = ref<HTMLElement | null>(null)
+const pagerRef = ref<HTMLElement | null>(null)
+const tableRef = ref<{ $el?: HTMLElement } | null>(null)
+const { tableHeight, updateTableHeight } = useTableFillHeight(pageRef, [toolbarRef, pagerRef])
+
+let unbindWheel: (() => void) | undefined
+onUnmounted(() => unbindWheel?.())
+
+async function rebindWheel() {
+  await nextTick()
+  unbindWheel?.()
+  unbindWheel = bindTableShiftWheel(tableRef.value?.$el ?? null)
+  updateTableHeight()
+}
 
 function last7DaysRange(): [string, string] {
   const end = new Date()
@@ -37,31 +52,53 @@ function last7DaysRange(): [string, string] {
   return [formatDateTimeLocal(start), formatDateTimeLocal(end)]
 }
 
-const [defaultStart, defaultEnd] = last7DaysRange()
-const shipStatusInit =
-  (route.query.shipStatus as string) ||
-  (route.query.status === 'shipped' ? 'shipped' : '') ||
-  (route.query.ecommerceWaitShip === '1' || route.query.ecommerceWaitShip === 'true' ? 'wait_ship' : '')
-// 默认待发货；工作台带入其它发货状态时尊重 query
-const filters = reactive({
-  page: 1,
-  pageSize: 20,
-  sourceChannel: (route.query.sourceChannel as string) || '',
-  status: shipStatusInit === 'shipped'
-    ? ''
-    : normalizeFulfillmentStatus((route.query.status as string) || ''),
-  shipStatus: shipStatusInit || 'wait_ship',
-  platform: '',
-  allocType: '',
-  keyword: '',
-  orderedRange: [defaultStart, defaultEnd] as [string, string] | null,
-  payRange: null as [string, string] | null,
-})
-
 function normalizeFulfillmentStatus(s: string) {
   if (s === 'pending_ship') return 'pending_alloc'
   if (s === 'shipped') return '' // 已发货改用发货状态筛选
   return s
+}
+
+function isMenuEntry(q = route.query) {
+  return q.entry === 'menu'
+}
+
+function shipStatusFromQuery(q = route.query) {
+  if (typeof q.shipStatus === 'string' && q.shipStatus) return q.shipStatus
+  if (q.status === 'shipped') return 'shipped'
+  if (q.ecommerceWaitShip === '1' || q.ecommerceWaitShip === 'true') return 'wait_ship'
+  return ''
+}
+
+const filters = reactive({
+  page: 1,
+  pageSize: 20,
+  sourceChannel: '',
+  status: '',
+  shipStatus: '',
+  platform: '',
+  allocType: '',
+  keyword: '',
+  orderedRange: null as [string, string] | null,
+  payRange: null as [string, string] | null,
+})
+
+function applyFiltersFromRoute() {
+  const q = route.query
+  const menu = isMenuEntry(q)
+  const shipInit = shipStatusFromQuery(q)
+  filters.page = 1
+  filters.sourceChannel = typeof q.sourceChannel === 'string' ? q.sourceChannel : ''
+  filters.status =
+    shipInit === 'shipped'
+      ? ''
+      : normalizeFulfillmentStatus(typeof q.status === 'string' ? q.status : '')
+  // 仅左侧菜单进入时默认「待发货 + 最近7天」；其它跳转只吃 query，不擅自加默认
+  filters.shipStatus = menu ? (shipInit || 'wait_ship') : shipInit
+  filters.platform = typeof q.platform === 'string' ? q.platform : ''
+  filters.allocType = typeof q.allocType === 'string' ? q.allocType : ''
+  filters.keyword = typeof q.keyword === 'string' ? q.keyword : ''
+  filters.orderedRange = menu ? last7DaysRange() : null
+  filters.payRange = null
 }
 
 const manualVisible = ref(false)
@@ -99,6 +136,7 @@ async function load() {
     const data = await listOrders(params)
     list.value = data.list || []
     total.value = data.total || 0
+    await rebindWheel()
   } catch (e: any) {
     ElMessage.error(e.message || '加载失败')
   } finally {
@@ -111,33 +149,15 @@ function onFilterChange() {
   load()
 }
 
-async function onSyncKDZS() {
-  try {
-    const body: Record<string, unknown> = {
-      pageSize: 50,
-      tradeStatuses: ['all'],
-    }
-    if (filters.orderedRange?.length === 2) {
-      body.startTime = filters.orderedRange[0]
-      body.endTime = filters.orderedRange[1]
-    }
-    const stats = await syncKDZS(body) as Record<string, number>
-    ElMessage.success(`同步完成（全平台全部状态）：合计 ${stats.total || 0}，拉取 ${stats.fetched || 0}，新增 ${stats.created || 0}，更新 ${stats.updated || 0}`)
-    await load()
-  } catch (e: any) {
-    ElMessage.error(e.message || '同步失败')
-  }
-}
-
-async function onSyncStore() {
-  try {
-    const stats = await syncStore({ pageSize: 50 }) as Record<string, number>
-    ElMessage.success(`同步完成：新增 ${stats.created || 0}，更新 ${stats.updated || 0}`)
-    await load()
-  } catch (e: any) {
-    ElMessage.error(e.message || '同步失败')
-  }
-}
+watch(
+  () => route.fullPath,
+  () => {
+    if (route.name !== 'Orders') return
+    applyFiltersFromRoute()
+    void load()
+  },
+  { immediate: true },
+)
 
 async function submitManual() {
   if (!manualForm.productName) {
@@ -159,13 +179,11 @@ async function submitManual() {
     ElMessage.error(e.message || '创建失败')
   }
 }
-
-onMounted(load)
 </script>
 
 <template>
-  <div class="page">
-    <div class="toolbar">
+  <div ref="pageRef" class="page">
+    <div ref="toolbarRef" class="toolbar">
       <el-form inline @submit.prevent>
         <el-form-item label="订单类型">
           <el-select v-model="filters.sourceChannel" clearable style="width: 140px" @change="onFilterChange">
@@ -255,16 +273,19 @@ onMounted(load)
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="onFilterChange">查询</el-button>
+          <el-button type="primary" plain @click="manualVisible = true">手工建单</el-button>
         </el-form-item>
       </el-form>
-      <div class="right">
-        <el-button @click="onSyncKDZS">同步电商</el-button>
-        <el-button @click="onSyncStore">同步门店</el-button>
-        <el-button type="primary" @click="manualVisible = true">手工建单</el-button>
-      </div>
     </div>
 
-    <el-table v-loading="loading" :data="list" stripe @row-click="(row: Order) => router.push(`/orders/${row.id}`)">
+    <el-table
+      ref="tableRef"
+      v-loading="loading"
+      :data="list"
+      :height="tableHeight"
+      stripe
+      @row-click="(row: Order) => router.push(`/orders/${row.id}`)"
+    >
       <el-table-column label="订单类型" width="88">
         <template #default="{ row }">{{ labelSource(row.sourceChannel) }}</template>
       </el-table-column>
@@ -355,7 +376,7 @@ onMounted(load)
       </el-table-column>
     </el-table>
 
-    <div class="pager">
+    <div ref="pagerRef" class="pager">
       <el-pagination
         v-model:current-page="filters.page"
         v-model:page-size="filters.pageSize"
@@ -384,10 +405,20 @@ onMounted(load)
 </template>
 
 <style scoped>
-.page { display: flex; flex-direction: column; gap: 12px; }
-.toolbar { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: flex-start; }
-.right { display: flex; gap: 8px; }
-.pager { display: flex; justify-content: flex-end; }
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: calc(100vh - 56px - 32px);
+  min-height: 0;
+  overflow: hidden;
+}
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+.pager { display: flex; justify-content: flex-end; flex-shrink: 0; }
 :deep(.el-table__row) { cursor: pointer; }
 .goods-list { display: flex; flex-direction: column; gap: 8px; }
 .goods-row { display: flex; gap: 8px; align-items: flex-start; }

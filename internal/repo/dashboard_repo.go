@@ -18,6 +18,8 @@ type DashboardCards struct {
 	Shipped           int64   `json:"shipped"`
 	TodayOrders       int64   `json:"todayOrders"`
 	TodayAmount       float64 `json:"todayAmount"`
+	TodayShipped      int64   `json:"todayShipped"`
+	TodayShippedAmt   float64 `json:"todayShippedAmount"`
 	WeekOrders        int64   `json:"weekOrders"`
 	WeekAmount        float64 `json:"weekAmount"`
 	MonthOrders       int64   `json:"monthOrders"`
@@ -187,6 +189,20 @@ func (r *Repos) DashboardCards(tenantID uint64, rangeStart, rangeEnd time.Time) 
 	var err error
 	if out.TodayOrders, out.TodayAmount, err = sumFrom(dayStart); err != nil {
 		return nil, err
+	}
+	{
+		var row sumRow
+		tx := r.db.Model(&model.Order{}).
+			Select("count(*) as cnt, COALESCE(SUM("+sqlAmt+"),0) as amt").
+			Where("tenant_id = ?", tenantID).
+			Where("ship_status = ?", model.ShipShipped).
+			Where("COALESCE(shipped_at, updated_at) >= ?", dayStart)
+		tx = scopeValidSales(tx)
+		if err := tx.Scan(&row).Error; err != nil {
+			return nil, err
+		}
+		out.TodayShipped = row.Cnt
+		out.TodayShippedAmt = row.Amt
 	}
 	if out.WeekOrders, out.WeekAmount, err = sumFrom(weekStart); err != nil {
 		return nil, err

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -26,6 +26,7 @@ import {
   type SupplierItem,
 } from '../../api/orders'
 import { dateShortcuts, formatDateTimeLocal } from '../../utils/date'
+import { bindTableShiftWheel, useTableFillHeight } from '../../composables/useTableFillHeight'
 
 const router = useRouter()
 const route = useRoute()
@@ -34,6 +35,25 @@ const batching = ref(false)
 const list = ref<Order[]>([])
 const total = ref(0)
 const selected = ref<Order[]>([])
+
+const pageRef = ref<HTMLElement | null>(null)
+const toolbarRef = ref<HTMLElement | null>(null)
+const alertRef = ref<HTMLElement | null>(null)
+const pagerRef = ref<HTMLElement | null>(null)
+const tableRef = ref<{ $el?: HTMLElement } | null>(null)
+const { tableHeight, updateTableHeight } = useTableFillHeight(pageRef, [toolbarRef, alertRef, pagerRef], {
+  min: 280,
+})
+
+let unbindWheel: (() => void) | undefined
+onUnmounted(() => unbindWheel?.())
+
+async function rebindWheel() {
+  await nextTick()
+  unbindWheel?.()
+  unbindWheel = bindTableShiftWheel(tableRef.value?.$el ?? null)
+  updateTableHeight()
+}
 
 function last7DaysRange(): [string, string] {
   const end = new Date()
@@ -44,17 +64,28 @@ function last7DaysRange(): [string, string] {
   return [formatDateTimeLocal(start), formatDateTimeLocal(end)]
 }
 
+function normalizeStatus(raw: string) {
+  if (raw === 'pending_ship') return 'pending_alloc'
+  return raw
+}
+
+function applyAllocatedDefaults(forceDate = true) {
+  filters.shipStatus = 'wait_ship'
+  if (forceDate) {
+    filters.orderedRange = last7DaysRange()
+  }
+}
+
 const [defaultStart, defaultEnd] = last7DaysRange()
 const statusFromQuery = typeof route.query.status === 'string' ? route.query.status : ''
 const shipStatusFromQuery = typeof route.query.shipStatus === 'string' ? route.query.shipStatus : ''
-const normalizedStatus =
-  statusFromQuery === 'pending_ship' ? 'pending_alloc' : statusFromQuery || 'pending_alloc'
+const normalizedStatus = normalizeStatus(statusFromQuery) || 'pending_alloc'
 
 const filters = reactive({
   page: 1,
   pageSize: 20,
   status: normalizedStatus,
-  // 已分配默认待发货；其它状态尊重 URL 或留空
+  // 已分配默认：待发货 + 最近7天
   shipStatus:
     shipStatusFromQuery ||
     (normalizedStatus === 'allocated' ? 'wait_ship' : ''),
@@ -98,6 +129,7 @@ async function load() {
     list.value = data.list || []
     total.value = data.total || 0
     selected.value = []
+    await rebindWheel()
   } catch (e: any) {
     ElMessage.error(e.message || '加载失败')
   } finally {
@@ -111,12 +143,26 @@ function onFilterChange() {
 }
 
 function onStatusTabChange() {
-  // 切到「已分配」时默认待发货
+  // 切到「已分配」时默认：待发货 + 最近7天
   if (filters.status === 'allocated') {
-    filters.shipStatus = 'wait_ship'
+    applyAllocatedDefaults(true)
   }
   onFilterChange()
 }
+
+watch(
+  () => route.query.status,
+  (raw) => {
+    const next = normalizeStatus(typeof raw === 'string' ? raw : '') || 'pending_alloc'
+    if (filters.status === next) return
+    filters.status = next
+    if (next === 'allocated') {
+      applyAllocatedDefaults(true)
+    }
+    filters.page = 1
+    void load()
+  },
+)
 
 function onSelectionChange(rows: Order[]) {
   selected.value = rows
@@ -260,8 +306,8 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="page">
-    <div class="toolbar">
+  <div ref="pageRef" class="page">
+    <div ref="toolbarRef" class="toolbar">
       <div class="filters">
         <el-radio-group v-model="filters.status" @change="onStatusTabChange">
           <el-radio-button value="pending_alloc">待分配</el-radio-button>
@@ -321,17 +367,21 @@ onMounted(load)
       </div>
     </div>
 
-    <el-alert
-      type="info"
-      :closable="false"
-      title="分配说明"
-      description="自营发货：本仓发货后填单号回传；代发发货：快递助手厂家代发（推送即可）或 OSMS 供应商代发（线下沟通后填单号）；采购发货：先采购到货再自营发出。可勾选多单批量操作。"
-      show-icon
-    />
+    <div ref="alertRef">
+      <el-alert
+        type="info"
+        :closable="false"
+        title="分配说明"
+        description="自营发货：本仓发货后填单号回传；代发发货：快递助手厂家代发（推送即可）或 OSMS 供应商代发（线下沟通后填单号）；采购发货：先采购到货再自营发出。可勾选多单批量操作。"
+        show-icon
+      />
+    </div>
 
     <el-table
+      ref="tableRef"
       v-loading="loading"
       :data="list"
+      :height="tableHeight"
       stripe
       row-key="id"
       @selection-change="onSelectionChange"
@@ -436,7 +486,7 @@ onMounted(load)
       </el-table-column>
     </el-table>
 
-    <div class="pager">
+    <div ref="pagerRef" class="pager">
       <el-pagination
         v-model:current-page="filters.page"
         :page-size="filters.pageSize"
@@ -485,20 +535,28 @@ onMounted(load)
 </template>
 
 <style scoped>
-.page { display: flex; flex-direction: column; gap: 12px; }
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: calc(100vh - 56px - 32px);
+  min-height: 0;
+  overflow: hidden;
+}
 .toolbar {
   display: flex;
   justify-content: space-between;
   gap: 12px;
   align-items: flex-start;
   flex-wrap: wrap;
+  flex-shrink: 0;
 }
 .filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .batch-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .date-field { display: inline-flex; align-items: center; gap: 8px; }
 .date-label { color: #606266; font-size: 14px; white-space: nowrap; }
 .muted { color: #909399; font-size: 13px; margin-right: 4px; }
-.pager { display: flex; justify-content: flex-end; }
+.pager { display: flex; justify-content: flex-end; flex-shrink: 0; }
 .goods-list { display: flex; flex-direction: column; gap: 8px; }
 .goods-row { display: flex; gap: 8px; align-items: flex-start; }
 .goods-pic { width: 48px; height: 48px; border-radius: 4px; flex-shrink: 0; background: #f5f5f5; }

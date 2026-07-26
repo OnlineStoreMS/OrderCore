@@ -14,6 +14,10 @@ const activeMenu = computed(() => {
 const logoText = computed(() => (collapsed.value ? 'OC' : '订单中心'))
 
 function navigate(path: string) {
+  if (path === '/orders') {
+    router.push({ path: '/orders', query: { entry: 'menu' } })
+    return
+  }
   router.push(path)
 }
 </script>
