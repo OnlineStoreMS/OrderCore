@@ -66,9 +66,22 @@ type IngestOrderRequest struct {
 	SellerRemark         string           `json:"sellerRemark"`
 	FactoryID            string           `json:"factoryId"`
 	FactoryName          string           `json:"factoryName"`
+	ExpressCompany       string           `json:"expressCompany"`
+	ExpressCode          string           `json:"expressCode"`
+	ExpressNo            string           `json:"expressNo"`
+	ShippedAt            string           `json:"shippedAt"` // 平台真实发货时间
+	Logistics            []LogisticsInput `json:"logistics"`
 	RawPayload           string           `json:"rawPayload"`
 	Address              *AddressInput    `json:"address"`
 	Items                []OrderItemInput `json:"items"`
+}
+
+// LogisticsInput 同步入库的物流包裹
+type LogisticsInput struct {
+	ExpressCompany string `json:"expressCompany"`
+	ExpressCode    string `json:"expressCode"`
+	ExpressNo      string `json:"expressNo"`
+	ShippedAt      string `json:"shippedAt"`
 }
 
 type AllocateRequest struct {

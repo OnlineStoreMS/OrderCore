@@ -225,6 +225,16 @@ func (r *Repos) UpdateShipment(s *model.OrderShipment) error {
 	return r.db.Save(s).Error
 }
 
+func (r *Repos) FindShipmentByExpressNo(tenantID, orderID uint64, expressNo string) (*model.OrderShipment, error) {
+	var s model.OrderShipment
+	err := r.db.Where("tenant_id = ? AND order_id = ? AND express_no = ?", tenantID, orderID, strings.TrimSpace(expressNo)).
+		First(&s).Error
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
 func (r *Repos) ListBindings(tenantID uint64) ([]model.SupplierSourceBinding, error) {
 	var list []model.SupplierSourceBinding
 	err := r.db.Where("tenant_id = ?", tenantID).Order("id DESC").Find(&list).Error

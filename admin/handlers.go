@@ -43,7 +43,7 @@ func (h *Handlers) Dashboard(c *gin.Context) {
 		}
 		end = t
 	}
-	data, err := h.orders.Dashboard(authcontext.TenantID(c), start, end)
+	data, err := h.orders.Dashboard(authcontext.TenantID(c), start, end, c.Query("timeType"))
 	if err != nil {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return

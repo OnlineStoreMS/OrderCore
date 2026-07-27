@@ -65,6 +65,8 @@ const byStatus = ref<Record<string, number>>({})
 const bySource = ref<Record<string, number>>({})
 const trend = ref<TrendPoint[]>([])
 const dateRange = ref<[DateModelType, DateModelType] | null>(defaultRange())
+/** 趋势分析时间维度：下单时间（默认）/ 发货时间 */
+const timeType = ref<'ordered' | 'shipped'>('ordered')
 
 const orderChartEl = ref<HTMLDivElement | null>(null)
 const channelChartEl = ref<HTMLDivElement | null>(null)
@@ -77,6 +79,8 @@ const rangeLabel = computed(() => {
   if (!s || !e) return ''
   return s === e ? s : `${s} ~ ${e}`
 })
+
+const timeTypeLabel = computed(() => (timeType.value === 'shipped' ? '发货日' : '下单日'))
 
 const workCards = computed(() => [
   {
@@ -146,25 +150,25 @@ const metricCards = computed(() => [
 const rangeSummaryCards = computed(() => [
   {
     label: '区间订单量',
-    tip: rangeLabel.value || '当前筛选',
+    tip: `${rangeLabel.value || '当前筛选'} · 按${timeTypeLabel.value}`,
     value: String(cards.value.rangeOrders || 0),
     color: '#1677ff',
   },
   {
     label: '区间销售额',
-    tip: '排除关闭/退款',
+    tip: `排除关闭/退款 · 按${timeTypeLabel.value}`,
     value: `¥${fmtMoney(cards.value.rangeAmount)}`,
     color: '#13c2c2',
   },
   {
     label: '自营销售额',
-    tip: '自营发货 / 未推厂家',
+    tip: `自营发货 / 未推厂家 · 按${timeTypeLabel.value}`,
     value: `¥${fmtMoney(cards.value.rangeSelfAmount)}`,
     color: '#1677ff',
   },
   {
     label: '代发销售额',
-    tip: '厂家代发 / OSMS 代发',
+    tip: `厂家代发 / OSMS 代发 · 按${timeTypeLabel.value}`,
     value: `¥${fmtMoney(cards.value.rangeDropshipAmount)}`,
     color: '#722ed1',
   },
@@ -244,7 +248,7 @@ async function load() {
   const [startDate, endDate] = dateRange.value.map(String)
   loading.value = true
   try {
-    const data = await fetchDashboard({ startDate, endDate }) as {
+    const data = await fetchDashboard({ startDate, endDate, timeType: timeType.value }) as {
       cards?: DashCards
       byStatus?: Record<string, number>
       bySource?: Record<string, number>
@@ -440,6 +444,10 @@ onUnmounted(() => {
     <div class="section-head row-between">
       <span>趋势分析</span>
       <div class="range-tools">
+        <el-radio-group v-model="timeType" size="small" @change="load">
+          <el-radio-button value="ordered">下单时间</el-radio-button>
+          <el-radio-button value="shipped">发货时间</el-radio-button>
+        </el-radio-group>
         <el-date-picker
           v-model="dateRange"
           type="daterange"
@@ -471,12 +479,12 @@ onUnmounted(() => {
     <div class="charts">
       <section>
         <h3>订单量 / 销售额</h3>
-        <p class="chart-tip">按下单日；排除关闭与退款完成；销售额优先实付</p>
+        <p class="chart-tip">按{{ timeTypeLabel }}；排除关闭与退款完成；销售额优先实付</p>
         <div ref="orderChartEl" class="chart" />
       </section>
       <section>
         <h3>自营 / 代发销售额</h3>
-        <p class="chart-tip">代发=厂家代发或 OSMS 供应商代发；其余计自营</p>
+        <p class="chart-tip">按{{ timeTypeLabel }}；代发=厂家代发或 OSMS 供应商代发；其余计自营</p>
         <div ref="channelChartEl" class="chart" />
       </section>
     </div>

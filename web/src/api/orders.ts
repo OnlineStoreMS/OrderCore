@@ -269,7 +269,11 @@ export function formatRemark(order: Pick<Order, 'remark' | 'sellerRemark'>) {
   return parts.length ? parts.join(' / ') : '-'
 }
 
-export async function fetchDashboard(params: { startDate?: string; endDate?: string } = {}) {
+export async function fetchDashboard(params: {
+  startDate?: string
+  endDate?: string
+  timeType?: 'ordered' | 'shipped'
+} = {}) {
   return unwrap(await client.get('/dashboard', { params }))
 }
 

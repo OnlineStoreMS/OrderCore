@@ -84,6 +84,19 @@ type TradeOrder struct {
 	FactoryID               string       `json:"factoryId"`
 	FactoryName             string       `json:"factoryName"`
 	FormattedReceiver       string       `json:"formattedReceiver"`
+	ExpressCompany          string       `json:"expressCompany"`
+	ExpressCode             string       `json:"expressCode"`
+	ExpressNo               string       `json:"expressNo"`
+	ShippedAt               string       `json:"shippedAt"`
+	Logistics               []TradeLogistics `json:"logistics"`
+}
+
+// TradeLogistics 快递助手包裹物流
+type TradeLogistics struct {
+	Company     string `json:"company"`
+	CompanyName string `json:"companyName"`
+	TrackingNo  string `json:"trackingNo"`
+	ShipTime    string `json:"shipTime"`
 }
 
 type OrderListResult struct {

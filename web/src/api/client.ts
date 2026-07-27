@@ -1,6 +1,6 @@
 import axios from 'axios'
 import type { AxiosInstance } from 'axios'
-import { getToken, redirectToPortal, clearToken } from '../utils/auth'
+import { getToken, redirectToPortal, clearToken, tryRefreshAccessToken } from '../utils/auth'
 
 export interface ApiResponse<T = unknown> {
   code: number
@@ -37,8 +37,19 @@ client.interceptors.response.use(
     }
     return res
   },
-  (err) => {
-    if (err.response?.status === 401) {
+  async (err) => {
+    const cfg = err.config as { _retry?: boolean; headers?: Record<string, string> } | undefined
+    if (err.response?.status === 401 && cfg && !cfg._retry) {
+      const ok = await tryRefreshAccessToken()
+      if (ok) {
+        cfg._retry = true
+        const token = getToken()
+        if (token && cfg.headers) cfg.headers.Authorization = `Bearer ${token}`
+        return client.request(cfg as any)
+      }
+      clearToken()
+      redirectToPortal()
+    } else if (err.response?.status === 401) {
       clearToken()
       redirectToPortal()
     }

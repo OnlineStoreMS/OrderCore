@@ -1,8 +1,15 @@
-import { clearToken, getToken, resetSessionVerification, saveToken, type SessionInfo } from '../utils/auth'
+import {
+  clearToken,
+  getToken,
+  resetSessionVerification,
+  saveAuthTokens,
+  startTokenKeepAlive,
+  type SessionInfo,
+} from '../utils/auth'
 
 const IAM_API =
-  import.meta.env.VITE_IAM_API_URL
-  || (import.meta.env.VITE_API_GATEWAY ? '/api/v1' : '/iam')
+  import.meta.env.VITE_IAM_API_URL ||
+  (import.meta.env.VITE_API_GATEWAY ? '/api/v1' : '/iam')
 
 export type { SessionInfo }
 
@@ -21,6 +28,7 @@ export async function fetchSession(): Promise<SessionInfo | null> {
       tenants: body.data.tenants?.length ? body.data.tenants : [body.data.tenant],
     }
     saveSessionCache(info)
+    startTokenKeepAlive()
     return info
   } catch {
     return null
@@ -67,7 +75,7 @@ export async function switchTenant(tenantId: number): Promise<SessionInfo> {
   if (body.code !== 200 || !body.data?.accessToken) {
     throw new Error(body.message || '切换租户失败')
   }
-  saveToken(body.data.accessToken)
+  saveAuthTokens(body.data.accessToken, body.data.refreshToken, body.data.expiresAt)
   resetSessionVerification()
   const info: SessionInfo = {
     user: body.data.user,
@@ -75,5 +83,6 @@ export async function switchTenant(tenantId: number): Promise<SessionInfo> {
     tenants: body.data.tenants?.length ? body.data.tenants : [body.data.tenant],
   }
   saveSessionCache(info)
+  startTokenKeepAlive()
   return info
 }

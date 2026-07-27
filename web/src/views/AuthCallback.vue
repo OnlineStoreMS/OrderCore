@@ -2,7 +2,7 @@
 import { onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { fetchSession } from '../api/session'
-import { redirectToPortal, saveToken, trustFreshToken } from '../utils/auth'
+import { redirectToPortal, saveAuthTokens, startTokenKeepAlive, trustFreshToken } from '../utils/auth'
 
 const route = useRoute()
 const router = useRouter()
@@ -13,8 +13,10 @@ onMounted(async () => {
     redirectToPortal()
     return
   }
-  saveToken(token)
+  const refresh = route.query.refresh as string | undefined
+  saveAuthTokens(token, refresh)
   trustFreshToken()
+  startTokenKeepAlive()
   await fetchSession()
   router.replace('/dashboard')
 })

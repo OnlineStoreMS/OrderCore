@@ -36,12 +36,13 @@ func (s *OrderService) SetOnAllocated(fn func(tenantID, orderID uint64)) {
 	s.onAllocated = fn
 }
 
-func (s *OrderService) Dashboard(tenantID uint64, start, end time.Time) (map[string]any, error) {
+func (s *OrderService) Dashboard(tenantID uint64, start, end time.Time, timeType string) (map[string]any, error) {
 	start, end, err := repo.NormalizeDashboardRange(start, end)
 	if err != nil {
 		return nil, err
 	}
-	cards, err := s.repos.DashboardCards(tenantID, start, end)
+	timeType = repo.NormalizeTrendTimeType(timeType)
+	cards, err := s.repos.DashboardCards(tenantID, start, end, timeType)
 	if err != nil {
 		return nil, err
 	}
@@ -53,7 +54,7 @@ func (s *OrderService) Dashboard(tenantID uint64, start, end time.Time) (map[str
 	if err != nil {
 		return nil, err
 	}
-	trend, err := s.repos.DailyOrderTrend(tenantID, start, end)
+	trend, err := s.repos.DailyOrderTrend(tenantID, start, end, timeType)
 	if err != nil {
 		return nil, err
 	}
@@ -62,6 +63,7 @@ func (s *OrderService) Dashboard(tenantID uint64, start, end time.Time) (map[str
 		"byStatus": byStatus,
 		"bySource": bySource,
 		"trend":    trend,
+		"timeType": timeType,
 	}, nil
 }
 
@@ -286,9 +288,13 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			closingNow := status == model.StatusClosed
 			if shipStatus != "" && existing.Status != model.StatusClosed && !closingNow {
 				fields["ship_status"] = shipStatus
-				if shipStatus == model.ShipShipped && existing.ShippedAt == nil {
-					now := time.Now()
-					fields["shipped_at"] = &now
+				if shipStatus == model.ShipShipped {
+					if t := parseTime(req.ShippedAt); t != nil {
+						fields["shipped_at"] = t
+					} else if existing.ShippedAt == nil {
+						now := time.Now()
+						fields["shipped_at"] = &now
+					}
 				}
 			}
 
@@ -305,6 +311,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				if err := tx.UpsertAddress(addr); err != nil {
 					return err
 				}
+			}
+			if err := syncIngestLogistics(tx, tenantID, existing.ID, req); err != nil {
+				return err
 			}
 			if statusChanged {
 				return tx.AddStatusLog(&model.OrderStatusLog{
@@ -377,7 +386,12 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	if hint.ApplySyncAlloc {
 		now := time.Now()
 		o.AllocatedAt = &now
-		if shipStatus == model.ShipShipped || status == model.StatusCompleted {
+	}
+	if shipStatus == model.ShipShipped || status == model.StatusCompleted {
+		if t := parseTime(req.ShippedAt); t != nil {
+			o.ShippedAt = t
+		} else {
+			now := time.Now()
 			o.ShippedAt = &now
 		}
 	}
@@ -393,6 +407,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	}
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
 		if err := tx.CreateOrder(o); err != nil {
+			return err
+		}
+		if err := syncIngestLogistics(tx, tenantID, o.ID, req); err != nil {
 			return err
 		}
 		return tx.AddStatusLog(&model.OrderStatusLog{
@@ -1763,6 +1780,19 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 		freight = 0
 	}
 	orderTotal := roundMoney(t.Payment)
+	logistics := make([]dto.LogisticsInput, 0, len(t.Logistics))
+	for _, lg := range t.Logistics {
+		no := strings.TrimSpace(lg.TrackingNo)
+		if no == "" {
+			continue
+		}
+		logistics = append(logistics, dto.LogisticsInput{
+			ExpressCompany: firstNonEmpty(lg.CompanyName, lg.Company),
+			ExpressCode:    lg.Company,
+			ExpressNo:      no,
+			ShippedAt:      firstNonEmpty(lg.ShipTime, t.ShippedAt),
+		})
+	}
 	return dto.IngestOrderRequest{
 		SourceChannel:       model.SourceKDZS,
 		Platform:            t.Platform,
@@ -1791,6 +1821,11 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 		SellerRemark:        t.SellerMemo,
 		FactoryID:           t.FactoryID,
 		FactoryName:         t.FactoryName,
+		ExpressCompany:      t.ExpressCompany,
+		ExpressCode:         t.ExpressCode,
+		ExpressNo:           t.ExpressNo,
+		ShippedAt:           t.ShippedAt,
+		Logistics:           logistics,
 		RawPayload:          string(raw),
 		Address: &dto.AddressInput{
 			Name:     t.ReceiverName,
@@ -2151,6 +2186,87 @@ func coalesceStr(a, b string) string {
 		return a
 	}
 	return b
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// syncIngestLogistics 把快递助手物流写入 order_shipments（按单号幂等）。
+func syncIngestLogistics(tx *repo.Repos, tenantID, orderID uint64, req dto.IngestOrderRequest) error {
+	pkgs := req.Logistics
+	if len(pkgs) == 0 {
+		no := strings.TrimSpace(req.ExpressNo)
+		if no == "" {
+			return nil
+		}
+		pkgs = []dto.LogisticsInput{{
+			ExpressCompany: req.ExpressCompany,
+			ExpressCode:    req.ExpressCode,
+			ExpressNo:      no,
+			ShippedAt:      req.ShippedAt,
+		}}
+	}
+	for _, p := range pkgs {
+		no := strings.TrimSpace(p.ExpressNo)
+		if no == "" {
+			continue
+		}
+		company := firstNonEmpty(p.ExpressCompany, p.ExpressCode)
+		shipAt := parseTime(p.ShippedAt)
+		if shipAt == nil {
+			shipAt = parseTime(req.ShippedAt)
+		}
+		existing, err := tx.FindShipmentByExpressNo(tenantID, orderID, no)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		if existing != nil {
+			changed := false
+			if company != "" && existing.ExpressCompany != company {
+				existing.ExpressCompany = company
+				changed = true
+			}
+			if shipAt != nil && (existing.ShippedAt == nil || !existing.ShippedAt.Equal(*shipAt)) {
+				existing.ShippedAt = shipAt
+				changed = true
+			}
+			if changed {
+				if err := tx.UpdateShipment(existing); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		shipNo, err := tx.NextShipmentNo(tenantID)
+		if err != nil {
+			return err
+		}
+		if shipAt == nil {
+			now := time.Now()
+			shipAt = &now
+		}
+		sh := &model.OrderShipment{
+			TenantID:       tenantID,
+			OrderID:        orderID,
+			ShipmentNo:     shipNo,
+			ExpressCompany: company,
+			ExpressNo:      no,
+			NeedTracking:   true,
+			CallbackStatus: model.CallbackSkipped,
+			CallbackMessage: "快递助手同步",
+			ShippedAt:      shipAt,
+		}
+		if err := tx.CreateShipment(sh); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func roundMoney(v float64) float64 {

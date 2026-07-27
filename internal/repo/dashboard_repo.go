@@ -50,6 +50,33 @@ const sqlIsDropship = `(
 	OR COALESCE(dropship_mode, '') IN ('kdzs_factory', 'osms_supplier')
 )`
 
+const sqlOrderedAt = `COALESCE(ordered_at, created_at)`
+const sqlShippedAt = `COALESCE(shipped_at, updated_at)`
+
+// NormalizeTrendTimeType ordered=下单时间（默认）；shipped=发货时间
+func NormalizeTrendTimeType(timeType string) string {
+	if timeType == "shipped" {
+		return "shipped"
+	}
+	return "ordered"
+}
+
+func trendDateExpr(timeType string) string {
+	if NormalizeTrendTimeType(timeType) == "shipped" {
+		return sqlShippedAt
+	}
+	return sqlOrderedAt
+}
+
+func scopeTrendTime(tx *gorm.DB, timeType string, start, endEx time.Time) *gorm.DB {
+	expr := trendDateExpr(timeType)
+	tx = tx.Where(expr+" >= ? AND "+expr+" < ?", start, endEx)
+	if NormalizeTrendTimeType(timeType) == "shipped" {
+		tx = tx.Where("ship_status = ?", model.ShipShipped)
+	}
+	return tx
+}
+
 func scopeValidSales(tx *gorm.DB) *gorm.DB {
 	return tx.
 		Where("status <> ?", model.StatusClosed).
@@ -112,10 +139,11 @@ func NormalizeDashboardRange(start, end time.Time) (time.Time, time.Time, error)
 	return start, end, nil
 }
 
-func (r *Repos) DashboardCards(tenantID uint64, rangeStart, rangeEnd time.Time) (*DashboardCards, error) {
+func (r *Repos) DashboardCards(tenantID uint64, rangeStart, rangeEnd time.Time, timeType string) (*DashboardCards, error) {
 	out := &DashboardCards{}
 	out.RangeStart = rangeStart.Format("2006-01-02")
 	out.RangeEnd = rangeEnd.Format("2006-01-02")
+	timeType = NormalizeTrendTimeType(timeType)
 
 	if err := r.db.Model(&model.Order{}).Where("tenant_id = ? AND status = ?", tenantID, model.StatusPendingAlloc).
 		Count(&out.PendingAlloc).Error; err != nil {
@@ -151,12 +179,13 @@ func (r *Repos) DashboardCards(tenantID uint64, rangeStart, rangeEnd time.Time) 
 		Cnt int64
 		Amt float64
 	}
-	sumFrom := func(start time.Time) (int64, float64, error) {
+	// 今日/近7日/本月固定按下单时间，不受趋势时间维度影响
+	sumFromOrdered := func(start time.Time) (int64, float64, error) {
 		var row sumRow
 		tx := r.db.Model(&model.Order{}).
 			Select("count(*) as cnt, COALESCE(SUM("+sqlAmt+"),0) as amt").
 			Where("tenant_id = ?", tenantID).
-			Where("COALESCE(ordered_at, created_at) >= ?", start)
+			Where(sqlOrderedAt+" >= ?", start)
 		tx = scopeValidSales(tx)
 		err := tx.Scan(&row).Error
 		return row.Cnt, row.Amt, err
@@ -165,8 +194,8 @@ func (r *Repos) DashboardCards(tenantID uint64, rangeStart, rangeEnd time.Time) 
 		var row sumRow
 		tx := r.db.Model(&model.Order{}).
 			Select("count(*) as cnt, COALESCE(SUM("+sqlAmt+"),0) as amt").
-			Where("tenant_id = ?", tenantID).
-			Where("COALESCE(ordered_at, created_at) >= ? AND COALESCE(ordered_at, created_at) < ?", start, endEx)
+			Where("tenant_id = ?", tenantID)
+		tx = scopeTrendTime(tx, timeType, start, endEx)
 		tx = scopeValidSales(tx)
 		err := tx.Scan(&row).Error
 		return row.Cnt, row.Amt, err
@@ -175,8 +204,8 @@ func (r *Repos) DashboardCards(tenantID uint64, rangeStart, rangeEnd time.Time) 
 		var amt float64
 		tx := r.db.Model(&model.Order{}).
 			Select("COALESCE(SUM("+sqlAmt+"),0)").
-			Where("tenant_id = ?", tenantID).
-			Where("COALESCE(ordered_at, created_at) >= ? AND COALESCE(ordered_at, created_at) < ?", start, endEx)
+			Where("tenant_id = ?", tenantID)
+		tx = scopeTrendTime(tx, timeType, start, endEx)
 		tx = scopeValidSales(tx)
 		if dropship {
 			tx = tx.Where(sqlIsDropship)
@@ -187,7 +216,7 @@ func (r *Repos) DashboardCards(tenantID uint64, rangeStart, rangeEnd time.Time) 
 	}
 
 	var err error
-	if out.TodayOrders, out.TodayAmount, err = sumFrom(dayStart); err != nil {
+	if out.TodayOrders, out.TodayAmount, err = sumFromOrdered(dayStart); err != nil {
 		return nil, err
 	}
 	{
@@ -196,7 +225,7 @@ func (r *Repos) DashboardCards(tenantID uint64, rangeStart, rangeEnd time.Time) 
 			Select("count(*) as cnt, COALESCE(SUM("+sqlAmt+"),0) as amt").
 			Where("tenant_id = ?", tenantID).
 			Where("ship_status = ?", model.ShipShipped).
-			Where("COALESCE(shipped_at, updated_at) >= ?", dayStart)
+			Where(sqlShippedAt+" >= ?", dayStart)
 		tx = scopeValidSales(tx)
 		if err := tx.Scan(&row).Error; err != nil {
 			return nil, err
@@ -204,10 +233,10 @@ func (r *Repos) DashboardCards(tenantID uint64, rangeStart, rangeEnd time.Time) 
 		out.TodayShipped = row.Cnt
 		out.TodayShippedAmt = row.Amt
 	}
-	if out.WeekOrders, out.WeekAmount, err = sumFrom(weekStart); err != nil {
+	if out.WeekOrders, out.WeekAmount, err = sumFromOrdered(weekStart); err != nil {
 		return nil, err
 	}
-	if out.MonthOrders, out.MonthAmount, err = sumFrom(monthStart); err != nil {
+	if out.MonthOrders, out.MonthAmount, err = sumFromOrdered(monthStart); err != nil {
 		return nil, err
 	}
 	if out.RangeOrders, out.RangeAmount, err = sumBetween(rangeStart, rangeEndExclusive); err != nil {
@@ -222,12 +251,14 @@ func (r *Repos) DashboardCards(tenantID uint64, rangeStart, rangeEnd time.Time) 
 	return out, nil
 }
 
-// DailyOrderTrend 按日趋势（含起止日，闭区间）
-func (r *Repos) DailyOrderTrend(tenantID uint64, start, end time.Time) ([]DailyTrendPoint, error) {
+// DailyOrderTrend 按日趋势（含起止日，闭区间）；timeType=ordered|shipped
+func (r *Repos) DailyOrderTrend(tenantID uint64, start, end time.Time, timeType string) ([]DailyTrendPoint, error) {
 	start, end, err := NormalizeDashboardRange(start, end)
 	if err != nil {
 		return nil, err
 	}
+	timeType = NormalizeTrendTimeType(timeType)
+	dateExpr := trendDateExpr(timeType)
 	endExclusive := end.AddDate(0, 0, 1)
 	days := int(end.Sub(start).Hours()/24) + 1
 
@@ -240,13 +271,13 @@ func (r *Repos) DailyOrderTrend(tenantID uint64, start, end time.Time) ([]DailyT
 	}
 	var rows []row
 	tx := r.db.Model(&model.Order{}).
-		Select(`to_char(date_trunc('day', COALESCE(ordered_at, created_at)), 'YYYY-MM-DD') as day,
+		Select(`to_char(date_trunc('day', `+dateExpr+`), 'YYYY-MM-DD') as day,
 			count(*) as cnt,
 			COALESCE(SUM(`+sqlAmt+`),0) as amt,
 			COALESCE(SUM(CASE WHEN NOT `+sqlIsDropship+` THEN `+sqlAmt+` ELSE 0 END),0) as self_amount,
 			COALESCE(SUM(CASE WHEN `+sqlIsDropship+` THEN `+sqlAmt+` ELSE 0 END),0) as dropship_amount`).
-		Where("tenant_id = ?", tenantID).
-		Where("COALESCE(ordered_at, created_at) >= ? AND COALESCE(ordered_at, created_at) < ?", start, endExclusive)
+		Where("tenant_id = ?", tenantID)
+	tx = scopeTrendTime(tx, timeType, start, endExclusive)
 	tx = scopeValidSales(tx)
 	if err := tx.Group("day").Order("day ASC").Scan(&rows).Error; err != nil {
 		return nil, err
