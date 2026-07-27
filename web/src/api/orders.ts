@@ -1,4 +1,5 @@
 import client, { unwrap, type PageData } from './client'
+import { formatOrderCopyDateTime } from '../utils/date'
 
 export interface OrderItem {
   id?: number
@@ -262,6 +263,37 @@ export function formatAddress(addr?: OrderAddress | null) {
   if (addr.fullText) return addr.fullText
   const parts = [addr.name, addr.phone, addr.province, addr.city, addr.district, addr.address].filter(Boolean)
   return parts.join(' ') || '-'
+}
+
+/** 是否仍为脱敏地址（含 *） */
+export function isMaskedReceiver(order: Pick<Order, 'buyerName' | 'buyerPhone' | 'address'>) {
+  const text = [order.buyerName, order.buyerPhone, formatAddress(order.address)].join(' ')
+  return /[*＊]/.test(text)
+}
+
+export function formatOrderCopyGoodsLines(items?: OrderItem[]) {
+  return (items || [])
+    .map((it) => {
+      const spec = (it.skuSpecs || it.productName || it.skuCode || '').trim()
+      if (!spec) return ''
+      const num = it.quantity && it.quantity > 0 ? it.quantity : 1
+      return `${spec} x${num}`
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
+/** 与 StoreSyncAgent 一致：时间 + 空行 + 收件信息 + --- + 规格行 */
+export function buildOrderCopyText(order: Order, now = new Date()) {
+  const address = formatAddress(order.address)
+  const goodsBlock = formatOrderCopyGoodsLines(order.items)
+  const lines = [formatOrderCopyDateTime(now), '', address === '-' ? '' : address, '---']
+  if (goodsBlock) lines.push(goodsBlock)
+  return lines.join('\n')
+}
+
+export async function decryptOrders(orderIds: number[]) {
+  return unwrap<{ items: Order[]; success: number }>(await client.post('/orders/decrypt', { orderIds }))
 }
 
 export function formatRemark(order: Pick<Order, 'remark' | 'sellerRemark'>) {

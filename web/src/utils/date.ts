@@ -6,6 +6,11 @@ export function formatDateTimeLocal(d: Date) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+/** 订单解密复制用：2026 07/11 12:42 */
+export function formatOrderCopyDateTime(d: Date): string {
+  return `${d.getFullYear()} ${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
 export function defaultOrderedRange(): [string, string] {
   const end = new Date()
   const start = new Date()

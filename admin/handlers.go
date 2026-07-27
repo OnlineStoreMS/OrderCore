@@ -180,6 +180,20 @@ func (h *Handlers) BatchDropship(c *gin.Context) {
 	response.OK(c, stats)
 }
 
+func (h *Handlers) DecryptOrders(c *gin.Context) {
+	var req dto.DecryptOrdersRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	list, err := h.orders.DecryptOrders(c.Request.Context(), authcontext.TenantID(c), req.OrderIDs, authcontext.BearerToken(c))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"items": list, "success": len(list)})
+}
+
 func (h *Handlers) RevokeAllocate(c *gin.Context) {
 	id, err := parseID(c.Param("id"))
 	if err != nil {

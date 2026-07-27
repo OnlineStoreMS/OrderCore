@@ -152,3 +152,8 @@ type SyncStoreRequest struct {
 	Page   int    `json:"page"`
 	Size   int    `json:"pageSize"`
 }
+
+// DecryptOrdersRequest 解密电商订单收件信息（经 StoreSyncAgent）
+type DecryptOrdersRequest struct {
+	OrderIDs []uint64 `json:"orderIds" binding:"required,min=1"`
+}

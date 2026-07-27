@@ -257,6 +257,39 @@ func (c *Client) CancelOrderPush(ctx context.Context, token string, req CancelPu
 	return c.post(ctx, token, c.baseURL+"/api/v1/admin/orders/cancel-push", req, nil)
 }
 
+type DecryptOrdersRequest struct {
+	Platform    string   `json:"platform"`
+	TradeStatus string   `json:"tradeStatus"`
+	SysTids     []string `json:"sysTids"`
+}
+
+type DecryptOrderItem struct {
+	Platform          string   `json:"platform"`
+	SysTids           []string `json:"sysTids"`
+	Tids              []string `json:"tids"`
+	ReceiverName      string   `json:"receiverName"`
+	ReceiverMobile    string   `json:"receiverMobile"`
+	ReceiverAddress   string   `json:"receiverAddress"`
+	FormattedReceiver string   `json:"formattedReceiver"`
+	Decrypted         bool     `json:"decrypted"`
+	ShopID            string   `json:"shopId"`
+}
+
+type DecryptOrdersResult struct {
+	Items []DecryptOrderItem `json:"items"`
+}
+
+func (c *Client) DecryptOrders(ctx context.Context, token string, req DecryptOrdersRequest) (*DecryptOrdersResult, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("storesyncagent url not configured")
+	}
+	var result DecryptOrdersResult
+	if err := c.post(ctx, token, c.baseURL+"/api/v1/admin/orders/decrypt", req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 type ShipCallbackRequest struct {
 	Platform       string `json:"platform"`
 	ShopID         string `json:"shopId"`

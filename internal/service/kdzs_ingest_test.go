@@ -54,6 +54,26 @@ func TestDeriveKDZSWaitAuditSelf(t *testing.T) {
 	}
 }
 
+func TestDeriveKDZSWaitAuditAfterFactoryRevoke(t *testing.T) {
+	// 撤单回待推单后，快递助手仍可能挂厂家；履约侧必须清分配
+	h := deriveKDZSIngest(model.SourceKDZS, dto.IngestOrderRequest{
+		PlatformStatus:     "wait_audit",
+		PlatformStatusText: "待推单",
+		AgentType:          2,
+		FactoryID:          "903134",
+		FactoryName:        "13817054118",
+	})
+	if h.Status != model.StatusPendingAlloc || !h.ClearAlloc || h.ApplySyncAlloc {
+		t.Fatalf("wait_audit after revoke should clear alloc, hint=%+v", h)
+	}
+	if h.AgentType != model.AgentTypeSelf {
+		t.Fatalf("wait_audit should reset agentType to self for re-alloc, got %d", h.AgentType)
+	}
+	if h.AllocType != "" || h.DropshipMode != "" {
+		t.Fatalf("alloc should be empty, hint=%+v", h)
+	}
+}
+
 func TestDeriveKDZSShippedSelf(t *testing.T) {
 	h := deriveKDZSIngest(model.SourceKDZS, dto.IngestOrderRequest{
 		PlatformStatus:     "shipped",

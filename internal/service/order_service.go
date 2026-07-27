@@ -263,14 +263,15 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				// 快递助手回到待推单（撤单等）：清空订单中心分配，恢复待分配
 				fields["alloc_type"] = ""
 				fields["dropship_mode"] = ""
-				fields["factory_id"] = req.FactoryID
-				fields["factory_name"] = req.FactoryName
+				fields["factory_id"] = ""
+				fields["factory_name"] = ""
 				fields["supplier_id"] = 0
 				fields["supplier_name"] = ""
 				fields["purchase_order_id"] = ""
 				fields["alloc_remark"] = ""
 				fields["allocated_at"] = nil
 				fields["skip_auto_alloc"] = false
+				fields["agent_type"] = hint.AgentType
 				fields["status"] = status
 				statusChanged = fromStatus != status
 			} else if !terminal && existing.AllocType == "" {
@@ -1561,6 +1562,148 @@ func (s *OrderService) ListKDZSFactories(ctx context.Context, token, platform st
 	return s.storeSync.ListFactories(ctx, token, platform, pageNo, pageSize)
 }
 
+// DecryptOrders 调用 StoreSyncAgent 解密收件信息，并回写订单地址。
+func (s *OrderService) DecryptOrders(ctx context.Context, tenantID uint64, orderIDs []uint64, token string) ([]model.Order, error) {
+	if s.storeSync == nil {
+		return nil, fmt.Errorf("StoreSyncAgent 未配置")
+	}
+	if len(orderIDs) == 0 {
+		return nil, fmt.Errorf("orderIds 必填")
+	}
+	seen := map[uint64]struct{}{}
+	out := make([]model.Order, 0, len(orderIDs))
+	var firstErr error
+	for _, id := range orderIDs {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		o, err := s.decryptOneOrder(ctx, tenantID, id, token)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("订单 %d: %w", id, err)
+			}
+			continue
+		}
+		out = append(out, *o)
+	}
+	if len(out) == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, fmt.Errorf("没有可解密的电商订单")
+	}
+	return out, nil
+}
+
+func (s *OrderService) decryptOneOrder(ctx context.Context, tenantID, orderID uint64, token string) (*model.Order, error) {
+	o, err := s.repos.GetOrder(tenantID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if o.SourceChannel != model.SourceKDZS {
+		return nil, fmt.Errorf("仅支持电商（快递助手）订单")
+	}
+	platform := strings.TrimSpace(o.Platform)
+	sysTid := strings.TrimSpace(o.PlatformSysTid)
+	if platform == "" || sysTid == "" {
+		return nil, fmt.Errorf("缺少平台或系统单号")
+	}
+
+	item, err := s.decryptKDZSReceiver(ctx, token, platform, o.PlatformStatus, sysTid)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(item.ReceiverName)
+	mobile := strings.TrimSpace(item.ReceiverMobile)
+	addrDetail := strings.TrimSpace(item.ReceiverAddress)
+	full := strings.TrimSpace(item.FormattedReceiver)
+	if full == "" {
+		full = strings.TrimSpace(strings.Join([]string{name, mobile, addrDetail}, " "))
+	}
+	if full == "" {
+		return nil, fmt.Errorf("解密结果为空")
+	}
+
+	err = s.repos.Transaction(func(tx *repo.Repos) error {
+		if err := tx.UpdateOrderFields(tenantID, orderID, map[string]any{
+			"buyer_name":  name,
+			"buyer_phone": mobile,
+		}); err != nil {
+			return err
+		}
+		return tx.UpsertAddress(&model.OrderAddress{
+			TenantID: tenantID,
+			OrderID:  orderID,
+			Name:     name,
+			Phone:    mobile,
+			Address:  addrDetail,
+			FullText: full,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.repos.GetOrder(tenantID, orderID)
+}
+
+func (s *OrderService) decryptKDZSReceiver(ctx context.Context, token, platform, preferredStatus, sysTid string) (*storesync.DecryptOrderItem, error) {
+	var lastErr error
+	for _, st := range decryptTradeStatuses(preferredStatus) {
+		res, err := s.storeSync.DecryptOrders(ctx, token, storesync.DecryptOrdersRequest{
+			Platform:    platform,
+			TradeStatus: st,
+			SysTids:     []string{sysTid},
+		})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if res == nil || len(res.Items) == 0 {
+			lastErr = fmt.Errorf("解密无结果")
+			continue
+		}
+		item := res.Items[0]
+		if strings.TrimSpace(item.FormattedReceiver) == "" &&
+			strings.TrimSpace(item.ReceiverName) == "" &&
+			strings.TrimSpace(item.ReceiverMobile) == "" {
+			lastErr = fmt.Errorf("解密结果为空")
+			continue
+		}
+		return &item, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("解密失败")
+}
+
+func decryptTradeStatuses(preferred string) []string {
+	pref := strings.ToLower(strings.TrimSpace(preferred))
+	base := []string{"wait_send", "wait_audit", "shipped", "completed"}
+	out := make([]string, 0, len(base)+1)
+	seen := map[string]struct{}{}
+	add := func(s string) {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" {
+			return
+		}
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	add(pref)
+	for _, s := range base {
+		add(s)
+	}
+	return out
+}
+
 // ---- bindings ----
 
 func (s *OrderService) ListBindings(tenantID uint64) ([]model.SupplierSourceBinding, error) {
@@ -1983,23 +2126,19 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 		}
 		h.LogRemark = "同步交易完成→已完成+已发货"
 	case model.KDZSWaitAudit:
+		// 待推单（含撤单/退审回退）：履约侧一律恢复待分配。
+		// 快递助手撤单后常仍挂厂家(agentType=2/factory*)，不能再视为「已分配」。
 		h.ShipStatus = model.ShipWaitShip
-		if isFactory {
-			// 待推单但快递助手侧已标厂家代发：视为已分配，无需再干预
-			h.Status = model.StatusAllocated
-			h.AllocType = model.AllocDropship
-			h.DropshipMode = model.DropshipKDZSFactory
-			h.ApplySyncAlloc = true
-			h.ShipEntryLocked = true
-			h.ShipLockReason = "快递助手已推厂家代发，无需干预"
-			h.LogRemark = "同步待推单代发单→已分配"
-		} else {
-			h.Status = model.StatusPendingAlloc
-			h.ClearAlloc = true
-			h.ShipEntryLocked = true
-			h.ShipLockReason = "快递助手待推单，请先分配；仅自营待发货可填单号"
-			h.LogRemark = "同步待推单→清空分配，恢复待分配"
-		}
+		h.Status = model.StatusPendingAlloc
+		h.AllocType = ""
+		h.DropshipMode = ""
+		h.ApplySyncAlloc = false
+		h.ClearAlloc = true
+		h.AgentType = model.AgentTypeSelf
+		h.ShipEntryLocked = true
+		h.ShipLockReason = "快递助手待推单，请先分配；仅自营待发货可填单号"
+		h.LogRemark = "同步待推单→清空分配，恢复待分配"
+		_ = isFactory
 	default:
 		h.ShipStatus = model.ShipWaitShip
 		if isFactory {

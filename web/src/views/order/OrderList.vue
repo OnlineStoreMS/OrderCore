@@ -3,11 +3,14 @@ import { nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
+  buildOrderCopyText,
   createManualOrder,
+  decryptOrders,
   formatAddress,
   formatDateTime,
   formatPlatformShop,
   formatRemark,
+  isMaskedReceiver,
   labelAgentType,
   labelEcommerceStatus,
   labelKDZSStatus,
@@ -19,6 +22,7 @@ import {
   type OrderItem,
 } from '../../api/orders'
 import { dateShortcuts, formatDateTimeLocal } from '../../utils/date'
+import { copyToClipboard } from '../../utils/clipboard'
 import { bindTableShiftWheel, useTableFillHeight } from '../../composables/useTableFillHeight'
 
 const router = useRouter()
@@ -197,6 +201,67 @@ async function submitManual() {
     ElMessage.error(e.message || '创建失败')
   }
 }
+
+const decrypting = ref(false)
+const decryptRow = reactive<Record<number, boolean>>({})
+
+function canDecrypt(order: Order) {
+  return order.sourceChannel === 'kdzs' && !!order.platformSysTid
+}
+
+function applyDecryptedOrders(items: Order[]) {
+  const byId = new Map(items.map((o) => [o.id, o]))
+  list.value = list.value.map((o) => byId.get(o.id) || o)
+}
+
+async function decryptOne(order: Order, ev?: Event) {
+  ev?.stopPropagation()
+  if (!canDecrypt(order)) {
+    ElMessage.warning('仅电商订单可解密')
+    return
+  }
+  decryptRow[order.id] = true
+  try {
+    const data = await decryptOrders([order.id])
+    applyDecryptedOrders(data.items || [])
+    ElMessage.success('解密成功')
+  } catch (e: any) {
+    ElMessage.error(e.message || '解密失败')
+  } finally {
+    decryptRow[order.id] = false
+  }
+}
+
+async function decryptPage() {
+  const ids = list.value.filter(canDecrypt).map((o) => o.id)
+  if (!ids.length) {
+    ElMessage.warning('当前页没有可解密的电商订单')
+    return
+  }
+  decrypting.value = true
+  try {
+    const data = await decryptOrders(ids)
+    applyDecryptedOrders(data.items || [])
+    ElMessage.success(`已解密 ${data.success || data.items?.length || 0} 条`)
+  } catch (e: any) {
+    ElMessage.error(e.message || '批量解密失败')
+  } finally {
+    decrypting.value = false
+  }
+}
+
+async function copyOrderText(order: Order, ev?: Event) {
+  ev?.stopPropagation()
+  const text = buildOrderCopyText(order)
+  const addr = formatAddress(order.address)
+  if (!addr || addr === '-') {
+    ElMessage.warning('暂无收件信息，请先解密')
+    return
+  }
+  const ok = await copyToClipboard(text)
+  if (ok) ElMessage.success('已复制')
+  else ElMessage.error('复制失败')
+}
 </script>
 
 <template>
@@ -305,6 +370,7 @@ async function submitManual() {
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="onFilterChange">查询</el-button>
+          <el-button type="warning" plain :loading="decrypting" :disabled="!list.length" @click="decryptPage">本页解密</el-button>
           <el-button type="primary" plain @click="manualVisible = true">手工建单</el-button>
         </el-form-item>
       </el-form>
@@ -362,8 +428,37 @@ async function submitManual() {
       <el-table-column label="留言备注" min-width="140" show-overflow-tooltip>
         <template #default="{ row }">{{ formatRemark(row) }}</template>
       </el-table-column>
-      <el-table-column label="收件信息" min-width="200" show-overflow-tooltip>
-        <template #default="{ row }">{{ formatAddress(row.address) }}</template>
+      <el-table-column label="收件信息" min-width="240">
+        <template #default="{ row }">
+          <div class="addr-cell" @click.stop>
+            <div class="addr-text">{{ formatAddress(row.address) }}</div>
+            <div v-if="canDecrypt(row)" class="addr-actions">
+              <el-button
+                v-if="isMaskedReceiver(row)"
+                link
+                type="warning"
+                size="small"
+                :loading="decryptRow[row.id]"
+                @click="decryptOne(row, $event)"
+              >解密</el-button>
+              <el-button
+                v-else
+                link
+                type="primary"
+                size="small"
+                @click="copyOrderText(row, $event)"
+              >复制</el-button>
+              <el-button
+                v-if="!isMaskedReceiver(row)"
+                link
+                type="warning"
+                size="small"
+                :loading="decryptRow[row.id]"
+                @click="decryptOne(row, $event)"
+              >重新解密</el-button>
+            </div>
+          </div>
+        </template>
       </el-table-column>
       <el-table-column label="金额" width="90">
         <template #default="{ row }">{{ Number(row.payAmount ?? row.totalAmount ?? 0).toFixed(2) }}</template>
@@ -471,6 +566,13 @@ async function submitManual() {
 .goods-meta { font-size: 12px; color: #909399; }
 .goods-meta span + span::before { content: ' · '; }
 .kdzs-meta { margin-top: 4px; font-size: 12px; color: #909399; }
+.addr-cell { line-height: 1.4; }
+.addr-text {
+  font-size: 13px;
+  white-space: normal;
+  word-break: break-all;
+}
+.addr-actions { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
 .platform-oid {
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;

@@ -4,9 +4,13 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   allocateOrder,
+  buildOrderCopyText,
+  decryptOrders,
+  formatAddress,
   revokeAllocateOrder,
   formatDateTime,
   getOrder,
+  isMaskedReceiver,
   labelAgentType,
   labelAlloc,
   labelDropship,
@@ -22,6 +26,7 @@ import {
   type SupplierBinding,
   type SupplierItem,
 } from '../../api/orders'
+import { copyToClipboard } from '../../utils/clipboard'
 import { pushOrder } from '../../api/settings'
 
 const route = useRoute()
@@ -29,6 +34,38 @@ const router = useRouter()
 const id = Number(route.params.id)
 const loading = ref(false)
 const order = ref<Order | null>(null)
+const decrypting = ref(false)
+
+const canDecrypt = computed(() => {
+  const o = order.value
+  return !!o && o.sourceChannel === 'kdzs' && !!o.platformSysTid
+})
+
+async function onDecrypt() {
+  if (!order.value || !canDecrypt.value) return
+  decrypting.value = true
+  try {
+    const data = await decryptOrders([order.value.id])
+    if (data.items?.[0]) order.value = data.items[0]
+    ElMessage.success('解密成功')
+  } catch (e: any) {
+    ElMessage.error(e.message || '解密失败')
+  } finally {
+    decrypting.value = false
+  }
+}
+
+async function onCopyReceiver() {
+  if (!order.value) return
+  const addr = formatAddress(order.value.address)
+  if (!addr || addr === '-') {
+    ElMessage.warning('暂无收件信息，请先解密')
+    return
+  }
+  const ok = await copyToClipboard(buildOrderCopyText(order.value))
+  if (ok) ElMessage.success('已复制')
+  else ElMessage.error('复制失败')
+}
 
 const allocVisible = ref(false)
 const shipVisible = ref(false)
@@ -200,6 +237,10 @@ onMounted(load)
         <h2>{{ order?.orderNo || '订单详情' }}</h2>
       </div>
       <div class="actions">
+        <el-button v-if="canDecrypt" type="warning" plain :loading="decrypting" @click="onDecrypt">
+          {{ order && isMaskedReceiver(order) ? '解密地址' : '重新解密' }}
+        </el-button>
+        <el-button v-if="order && formatAddress(order.address) !== '-'" @click="onCopyReceiver">复制地址规格</el-button>
         <el-button v-if="canAllocate" type="primary" @click="openAllocate">分配</el-button>
         <el-button v-if="canRevokeAllocate" @click="onRevokeAllocate">撤回分配</el-button>
         <el-tooltip v-if="order?.shipEntryLocked" :content="order.shipLockReason || '已锁定填单号发货'" placement="top">
@@ -237,7 +278,13 @@ onMounted(load)
         <el-descriptions-item label="实付">{{ order.payAmount ?? '-' }}</el-descriptions-item>
         <el-descriptions-item label="邮费">{{ order.freightAmount ?? 0 }}</el-descriptions-item>
         <el-descriptions-item label="买家">{{ order.buyerName || order.buyerNick || '-' }} {{ order.buyerPhone || '' }}</el-descriptions-item>
-        <el-descriptions-item label="地址" :span="2">{{ order.address?.fullText || order.address?.address || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="地址" :span="2">
+          <div>{{ order.address?.fullText || order.address?.address || '-' }}</div>
+          <div v-if="canDecrypt || (order.address?.fullText || order.address?.address)" class="addr-actions">
+            <el-button v-if="canDecrypt && isMaskedReceiver(order)" link type="warning" size="small" :loading="decrypting" @click="onDecrypt">解密</el-button>
+            <el-button v-if="formatAddress(order.address) !== '-'" link type="primary" size="small" @click="onCopyReceiver">复制</el-button>
+          </div>
+        </el-descriptions-item>
         <el-descriptions-item label="买家备注">{{ order.remark || '-' }}</el-descriptions-item>
         <el-descriptions-item label="卖家备注">{{ order.sellerRemark || '-' }}</el-descriptions-item>
         <el-descriptions-item label="分配备注">{{ order.allocRemark || '-' }}</el-descriptions-item>
@@ -360,9 +407,10 @@ onMounted(load)
 .page { display: flex; flex-direction: column; gap: 16px; }
 .head { display: flex; justify-content: space-between; align-items: flex-start; }
 .head h2 { margin: 4px 0 0; }
-.actions { display: flex; gap: 8px; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
 h3 { margin: 8px 0 0; font-size: 15px; color: #334155; }
 .hint { margin-left: 10px; color: #94a3b8; font-size: 12px; }
 .muted { color: #94a3b8; font-size: 12px; }
+.addr-actions { margin-top: 6px; display: flex; gap: 8px; }
 .alloc-tip { margin: 0 0 12px 110px; color: #64748b; font-size: 12px; line-height: 1.5; }
 </style>
