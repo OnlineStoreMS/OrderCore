@@ -62,9 +62,12 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 		AllocType:         c.Query("allocType"),
 		Keyword:           keyword,
 		Platform:          c.Query("platform"),
+		SalesChannel:      c.Query("salesChannel"),
 		EcommerceWaitShip: c.Query("ecommerceWaitShip") == "1" || c.Query("ecommerceWaitShip") == "true",
 		OrderedAtStart:    parseQueryTime(c.Query("orderedAtStart")),
 		OrderedAtEnd:      parseQueryTime(c.Query("orderedAtEnd")),
+		ShippedAtStart:    parseQueryTime(c.Query("shippedAtStart")),
+		ShippedAtEnd:      parseQueryTime(c.Query("shippedAtEnd")),
 		PayTimeStart:      parseQueryTime(c.Query("payTimeStart")),
 		PayTimeEnd:        parseQueryTime(c.Query("payTimeEnd")),
 		Page:              page,
@@ -73,6 +76,7 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 	// 按单号搜索时放宽时间窗，避免日期筛选把补拉订单挡住
 	if keyword != "" {
 		q.OrderedAtStart, q.OrderedAtEnd = nil, nil
+		q.ShippedAtStart, q.ShippedAtEnd = nil, nil
 		q.PayTimeStart, q.PayTimeEnd = nil, nil
 	}
 	list, total, err := h.orders.List(authcontext.TenantID(c), q)

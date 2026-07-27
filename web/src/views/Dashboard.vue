@@ -82,6 +82,39 @@ const rangeLabel = computed(() => {
 
 const timeTypeLabel = computed(() => (timeType.value === 'shipped' ? '发货日' : '下单日'))
 
+function dayBounds(d = new Date()): { start: string; end: string } {
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0)
+  const end = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59)
+  return { start: fmtDateTime(start), end: fmtDateTime(end) }
+}
+
+function fmtDateTime(d: Date) {
+  return `${fmtDate(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+function goOrders(query: Record<string, string>) {
+  router.push({ path: '/orders', query })
+}
+
+function rangeQuery(extra: Record<string, string> = {}) {
+  const start = cards.value.rangeStart || String(dateRange.value?.[0] || '')
+  const end = cards.value.rangeEnd || String(dateRange.value?.[1] || '')
+  if (!start || !end) return { ...extra }
+  if (timeType.value === 'shipped') {
+    return {
+      shipStatus: 'shipped',
+      shippedAtStart: start,
+      shippedAtEnd: end,
+      ...extra,
+    }
+  }
+  return {
+    orderedAtStart: start,
+    orderedAtEnd: end,
+    ...extra,
+  }
+}
+
 const workCards = computed(() => [
   {
     key: 'pendingAlloc',
@@ -135,17 +168,52 @@ const typeCards = computed(() =>
   })),
 )
 
-const metricCards = computed(() => [
-  {
-    label: '今日已发货',
-    value: cards.value.todayShipped || 0,
-    sub: `¥${fmtMoney(cards.value.todayShippedAmount)}`,
-    tip: '今日发货订单 · 实际成交额',
-  },
-  { label: '今日订单', value: cards.value.todayOrders || 0, sub: `¥${fmtMoney(cards.value.todayAmount)}`, tip: '今日下单' },
-  { label: '近7日订单', value: cards.value.weekOrders || 0, sub: `¥${fmtMoney(cards.value.weekAmount)}`, tip: '近7日下单' },
-  { label: '本月订单', value: cards.value.monthOrders || 0, sub: `¥${fmtMoney(cards.value.monthAmount)}`, tip: '本月下单' },
-])
+const metricCards = computed(() => {
+  const today = dayBounds()
+  const now = new Date()
+  const weekStart = startOfDay()
+  weekStart.setDate(weekStart.getDate() - 6)
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0)
+  return [
+    {
+      label: '今日已发货',
+      value: cards.value.todayShipped || 0,
+      sub: `¥${fmtMoney(cards.value.todayShippedAmount)}`,
+      tip: '今日发货订单 · 实际成交额',
+      go: () =>
+        goOrders({
+          shipStatus: 'shipped',
+          shippedAtStart: today.start,
+          shippedAtEnd: today.end,
+        }),
+    },
+    {
+      label: '今日订单',
+      value: cards.value.todayOrders || 0,
+      sub: `¥${fmtMoney(cards.value.todayAmount)}`,
+      tip: '今日下单',
+      go: () => goOrders({ orderedAtStart: today.start, orderedAtEnd: today.end }),
+    },
+    {
+      label: '近7日订单',
+      value: cards.value.weekOrders || 0,
+      sub: `¥${fmtMoney(cards.value.weekAmount)}`,
+      tip: '近7日下单',
+      go: () =>
+        goOrders({
+          orderedAtStart: fmtDateTime(new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate(), 0, 0, 0)),
+          orderedAtEnd: today.end,
+        }),
+    },
+    {
+      label: '本月订单',
+      value: cards.value.monthOrders || 0,
+      sub: `¥${fmtMoney(cards.value.monthAmount)}`,
+      tip: '本月下单',
+      go: () => goOrders({ orderedAtStart: fmtDateTime(monthStart), orderedAtEnd: today.end }),
+    },
+  ]
+})
 
 const rangeSummaryCards = computed(() => [
   {
@@ -153,24 +221,28 @@ const rangeSummaryCards = computed(() => [
     tip: `${rangeLabel.value || '当前筛选'} · 按${timeTypeLabel.value}`,
     value: String(cards.value.rangeOrders || 0),
     color: '#1677ff',
+    go: () => goOrders(rangeQuery()),
   },
   {
     label: '区间销售额',
     tip: `排除关闭/退款 · 按${timeTypeLabel.value}`,
     value: `¥${fmtMoney(cards.value.rangeAmount)}`,
     color: '#13c2c2',
+    go: () => goOrders(rangeQuery()),
   },
   {
     label: '自营销售额',
     tip: `自营发货 / 未推厂家 · 按${timeTypeLabel.value}`,
     value: `¥${fmtMoney(cards.value.rangeSelfAmount)}`,
     color: '#1677ff',
+    go: () => goOrders(rangeQuery({ salesChannel: 'self' })),
   },
   {
     label: '代发销售额',
     tip: `厂家代发 / OSMS 代发 · 按${timeTypeLabel.value}`,
     value: `¥${fmtMoney(cards.value.rangeDropshipAmount)}`,
     color: '#722ed1',
+    go: () => goOrders(rangeQuery({ salesChannel: 'dropship' })),
   },
 ])
 
@@ -433,12 +505,19 @@ onUnmounted(() => {
     </div>
 
     <div class="metric-row">
-      <div v-for="m in metricCards" :key="m.label" class="metric-card" :class="{ highlight: m.label === '今日已发货' }">
+      <button
+        v-for="m in metricCards"
+        :key="m.label"
+        type="button"
+        class="metric-card"
+        :class="{ highlight: m.label === '今日已发货' }"
+        @click="m.go()"
+      >
         <div class="metric-label">{{ m.label }}</div>
         <div class="metric-value">{{ m.value }}</div>
         <div class="metric-sub">实际成交额 {{ m.sub }}</div>
         <div v-if="m.tip" class="metric-tip">{{ m.tip }}</div>
-      </div>
+      </button>
     </div>
 
     <div class="section-head row-between">
@@ -464,16 +543,18 @@ onUnmounted(() => {
     </div>
 
     <div class="channel-sales-row">
-      <div
+      <button
         v-for="m in rangeSummaryCards"
         :key="m.label"
+        type="button"
         class="channel-sales-card"
         :style="{ '--accent': m.color }"
+        @click="m.go()"
       >
         <div class="metric-label">{{ m.label }}</div>
         <div class="channel-sales-value">{{ m.value }}</div>
         <div class="metric-sub">{{ m.tip }}</div>
-      </div>
+      </button>
     </div>
 
     <div class="charts">
@@ -540,11 +621,15 @@ onUnmounted(() => {
   gap: 12px;
 }
 .metric-card {
+  text-align: left;
   background: #fff;
   border: 1px solid #eef0f3;
   border-radius: 10px;
   padding: 14px 16px;
+  cursor: pointer;
+  transition: box-shadow .15s, border-color .15s;
 }
+.metric-card:hover { box-shadow: 0 4px 14px rgba(15, 39, 68, 0.08); }
 .metric-card.highlight {
   border-color: #99f6e4;
   background: linear-gradient(180deg, #f0fdfa 0%, #fff 60%);
@@ -560,12 +645,16 @@ onUnmounted(() => {
   gap: 12px;
 }
 .channel-sales-card {
+  text-align: left;
   background: #fff;
   border: 1px solid #eef0f3;
   border-radius: 10px;
   padding: 14px 16px;
   border-top: 3px solid var(--accent, #1677ff);
+  cursor: pointer;
+  transition: box-shadow .15s, border-color .15s;
 }
+.channel-sales-card:hover { box-shadow: 0 4px 14px rgba(15, 39, 68, 0.08); }
 .channel-sales-value {
   margin-top: 6px;
   font-size: 22px;

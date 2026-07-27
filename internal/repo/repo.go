@@ -40,8 +40,11 @@ type OrderListQuery struct {
 	Keyword           string
 	Platform          string
 	EcommerceWaitShip bool // 兼容：按电商订单「待发货」筛选
+	SalesChannel      string // self | dropship，与工作台自营/代发口径一致
 	OrderedAtStart    *time.Time
 	OrderedAtEnd      *time.Time
+	ShippedAtStart    *time.Time
+	ShippedAtEnd      *time.Time
 	PayTimeStart      *time.Time
 	PayTimeEnd        *time.Time
 	Page              int
@@ -75,6 +78,14 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	if q.Platform != "" {
 		tx = tx.Where("platform = ?", q.Platform)
 	}
+	switch strings.ToLower(strings.TrimSpace(q.SalesChannel)) {
+	case "self":
+		tx = tx.Where("NOT " + sqlIsDropship)
+		tx = scopeValidSales(tx)
+	case "dropship":
+		tx = tx.Where(sqlIsDropship)
+		tx = scopeValidSales(tx)
+	}
 	if q.EcommerceWaitShip {
 		tx = tx.Where("ship_status = ?", model.ShipWaitShip).
 			Where("status NOT IN ?", []string{model.StatusClosed, model.StatusCompleted}).
@@ -89,6 +100,12 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	}
 	if q.OrderedAtEnd != nil {
 		tx = tx.Where("COALESCE(ordered_at, created_at) <= ?", q.OrderedAtEnd)
+	}
+	if q.ShippedAtStart != nil {
+		tx = tx.Where("COALESCE(shipped_at, updated_at) >= ?", q.ShippedAtStart)
+	}
+	if q.ShippedAtEnd != nil {
+		tx = tx.Where("COALESCE(shipped_at, updated_at) <= ?", q.ShippedAtEnd)
 	}
 	if q.PayTimeStart != nil {
 		tx = tx.Where("pay_time >= ?", q.PayTimeStart)

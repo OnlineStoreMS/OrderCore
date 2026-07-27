@@ -52,6 +52,13 @@ function last7DaysRange(): [string, string] {
   return [formatDateTimeLocal(start), formatDateTimeLocal(end)]
 }
 
+function rangeFromQueryDates(startRaw?: unknown, endRaw?: unknown): [string, string] | null {
+  if (typeof startRaw !== 'string' || typeof endRaw !== 'string' || !startRaw || !endRaw) return null
+  const start = startRaw.length <= 10 ? `${startRaw} 00:00:00` : startRaw
+  const end = endRaw.length <= 10 ? `${endRaw} 23:59:59` : endRaw
+  return [start, end]
+}
+
 function normalizeFulfillmentStatus(s: string) {
   if (s === 'pending_ship') return 'pending_alloc'
   if (s === 'shipped') return '' // 已发货改用发货状态筛选
@@ -77,8 +84,10 @@ const filters = reactive({
   shipStatus: '',
   platform: '',
   allocType: '',
+  salesChannel: '',
   keyword: '',
   orderedRange: null as [string, string] | null,
+  shippedRange: null as [string, string] | null,
   payRange: null as [string, string] | null,
 })
 
@@ -96,8 +105,12 @@ function applyFiltersFromRoute() {
   filters.shipStatus = menu ? (shipInit || 'wait_ship') : shipInit
   filters.platform = typeof q.platform === 'string' ? q.platform : ''
   filters.allocType = typeof q.allocType === 'string' ? q.allocType : ''
+  filters.salesChannel = typeof q.salesChannel === 'string' ? q.salesChannel : ''
   filters.keyword = typeof q.keyword === 'string' ? q.keyword : ''
-  filters.orderedRange = menu ? last7DaysRange() : null
+  const orderedFromQuery = rangeFromQueryDates(q.orderedAtStart, q.orderedAtEnd)
+  const shippedFromQuery = rangeFromQueryDates(q.shippedAtStart, q.shippedAtEnd)
+  filters.orderedRange = orderedFromQuery || (menu ? last7DaysRange() : null)
+  filters.shippedRange = shippedFromQuery
   filters.payRange = null
 }
 
@@ -123,11 +136,16 @@ async function load() {
       shipStatus: filters.shipStatus || undefined,
       platform: filters.platform || undefined,
       allocType: filters.allocType || undefined,
+      salesChannel: filters.salesChannel || undefined,
       keyword: filters.keyword || undefined,
     }
     if (filters.orderedRange?.length === 2) {
       params.orderedAtStart = filters.orderedRange[0]
       params.orderedAtEnd = filters.orderedRange[1]
+    }
+    if (filters.shippedRange?.length === 2) {
+      params.shippedAtStart = filters.shippedRange[0]
+      params.shippedAtEnd = filters.shippedRange[1]
     }
     if (filters.payRange?.length === 2) {
       params.payTimeStart = filters.payRange[0]
@@ -243,6 +261,20 @@ async function submitManual() {
         <el-form-item label="下单时间">
           <el-date-picker
             v-model="filters.orderedRange"
+            type="datetimerange"
+            range-separator="至"
+            start-placeholder="开始"
+            end-placeholder="结束"
+            value-format="YYYY-MM-DD HH:mm:ss"
+            :shortcuts="dateShortcuts"
+            clearable
+            style="width: 360px"
+            @change="onFilterChange"
+          />
+        </el-form-item>
+        <el-form-item label="发货时间">
+          <el-date-picker
+            v-model="filters.shippedRange"
             type="datetimerange"
             range-separator="至"
             start-placeholder="开始"
