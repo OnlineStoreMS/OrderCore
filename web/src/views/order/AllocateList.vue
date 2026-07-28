@@ -9,7 +9,7 @@ import {
   decryptOrders,
   formatAddress,
   formatDateTime,
-  formatRemark,
+  formatRemarkLines,
   isMaskedReceiver,
   labelAgentType,
   labelAlloc,
@@ -430,6 +430,9 @@ onMounted(load)
       @selection-change="onSelectionChange"
     >
       <el-table-column type="selection" width="48" fixed="left" />
+      <el-table-column label="供应商" min-width="120" show-overflow-tooltip>
+        <template #default="{ row }">{{ row.supplierName || '-' }}</template>
+      </el-table-column>
       <el-table-column label="平台" width="90">
         <template #default="{ row }">{{ labelPlatform(row.platform) }}</template>
       </el-table-column>
@@ -468,8 +471,13 @@ onMounted(load)
           <span v-else>-</span>
         </template>
       </el-table-column>
-      <el-table-column label="留言备注" min-width="140" show-overflow-tooltip>
-        <template #default="{ row }">{{ formatRemark(row) }}</template>
+      <el-table-column label="留言备注" min-width="180">
+        <template #default="{ row }">
+          <div v-if="formatRemarkLines(row).length" class="remark-lines">
+            <div v-for="(line, idx) in formatRemarkLines(row)" :key="idx" class="remark-line">{{ line }}</div>
+          </div>
+          <span v-else class="muted">-</span>
+        </template>
       </el-table-column>
       <el-table-column label="收件信息" min-width="240">
         <template #default="{ row }">
@@ -645,4 +653,6 @@ onMounted(load)
 .lock-tip { font-size: 12px; color: #e6a23c; }
 .platform-oid { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
 .alloc-tip { margin: 0; color: #909399; font-size: 13px; line-height: 1.5; }
+.remark-lines { display: flex; flex-direction: column; gap: 2px; line-height: 1.4; }
+.remark-line { font-size: 12px; color: #606266; word-break: break-all; }
 </style>

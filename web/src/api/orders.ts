@@ -74,6 +74,8 @@ export interface Order {
   skipAutoAlloc?: boolean
   remark?: string
   sellerRemark?: string
+  fenFaRemark?: string
+  printerRemark?: string
   allocRemark?: string
   allocatedAt?: string
   shippedAt?: string
@@ -296,9 +298,22 @@ export async function decryptOrders(orderIds: number[]) {
   return unwrap<{ items: Order[]; success: number }>(await client.post('/orders/decrypt', { orderIds }))
 }
 
-export function formatRemark(order: Pick<Order, 'remark' | 'sellerRemark'>) {
-  const parts = [order.remark, order.sellerRemark].map((s) => (s || '').trim()).filter(Boolean)
+export function formatRemark(order: Pick<Order, 'remark' | 'sellerRemark' | 'fenFaRemark' | 'printerRemark'>) {
+  const parts: string[] = []
+  if (order.remark?.trim()) parts.push(`买家留言：${order.remark.trim()}`)
+  if (order.sellerRemark?.trim()) parts.push(`卖家备注：${order.sellerRemark.trim()}`)
+  if (order.fenFaRemark?.trim()) parts.push(`分发备注：${order.fenFaRemark.trim()}`)
+  if (order.printerRemark?.trim()) parts.push(`打单备注：${order.printerRemark.trim()}`)
   return parts.length ? parts.join(' / ') : '-'
+}
+
+export function formatRemarkLines(order: Pick<Order, 'remark' | 'sellerRemark' | 'fenFaRemark' | 'printerRemark'>) {
+  const parts: string[] = []
+  if (order.remark?.trim()) parts.push(`买家留言：${order.remark.trim()}`)
+  if (order.sellerRemark?.trim()) parts.push(`卖家备注：${order.sellerRemark.trim()}`)
+  if (order.fenFaRemark?.trim()) parts.push(`分发备注：${order.fenFaRemark.trim()}`)
+  if (order.printerRemark?.trim()) parts.push(`打单备注：${order.printerRemark.trim()}`)
+  return parts
 }
 
 export async function fetchDashboard(params: {
@@ -345,6 +360,15 @@ export async function batchDropshipOrders(body: {
 
 export async function revokeAllocateOrder(id: number) {
   return unwrap<Order>(await client.post(`/orders/${id}/revoke-allocate`))
+}
+
+export async function updateOrderRemarks(id: number, body: {
+  sellerRemark?: string
+  fenFaRemark?: string
+  printerRemark?: string
+  allocRemark?: string
+}) {
+  return unwrap<Order>(await client.put(`/orders/${id}/remarks`, body))
 }
 
 export async function shipOrder(id: number, body: Record<string, unknown>) {

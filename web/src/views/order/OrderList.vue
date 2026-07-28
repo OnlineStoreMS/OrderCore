@@ -9,7 +9,7 @@ import {
   formatAddress,
   formatDateTime,
   formatPlatformShop,
-  formatRemark,
+  formatRemarkLines,
   isMaskedReceiver,
   labelAgentType,
   labelEcommerceStatus,
@@ -108,8 +108,17 @@ function applyFiltersFromRoute() {
   // 仅左侧菜单进入时默认「待发货 + 最近7天」；其它跳转只吃 query，不擅自加默认
   filters.shipStatus = menu ? (shipInit || 'wait_ship') : shipInit
   filters.platform = typeof q.platform === 'string' ? q.platform : ''
-  filters.allocType = typeof q.allocType === 'string' ? q.allocType : ''
   filters.salesChannel = typeof q.salesChannel === 'string' ? q.salesChannel : ''
+  // 趋势卡会同时带 salesChannel + allocType；仅有 salesChannel 时也回填分配类型便于看见筛选
+  if (typeof q.allocType === 'string' && q.allocType) {
+    filters.allocType = q.allocType
+  } else if (filters.salesChannel === 'self') {
+    filters.allocType = 'self_ship'
+  } else if (filters.salesChannel === 'dropship') {
+    filters.allocType = 'dropship'
+  } else {
+    filters.allocType = ''
+  }
   filters.keyword = typeof q.keyword === 'string' ? q.keyword : ''
   const orderedFromQuery = rangeFromQueryDates(q.orderedAtStart, q.orderedAtEnd)
   const shippedFromQuery = rangeFromQueryDates(q.shippedAtStart, q.shippedAtEnd)
@@ -139,7 +148,8 @@ async function load() {
       status: filters.status || undefined,
       shipStatus: filters.shipStatus || undefined,
       platform: filters.platform || undefined,
-      allocType: filters.allocType || undefined,
+      // 有销售渠道（工作台趋势口径）时优先用它，避免与分配类型 AND 过严
+      allocType: filters.salesChannel ? undefined : filters.allocType || undefined,
       salesChannel: filters.salesChannel || undefined,
       keyword: filters.keyword || undefined,
     }
@@ -169,6 +179,12 @@ async function load() {
 function onFilterChange() {
   filters.page = 1
   load()
+}
+
+function onAllocTypeChange() {
+  // 用户改分配类型后，不再沿用工作台销售渠道口径
+  filters.salesChannel = ''
+  onFilterChange()
 }
 
 watch(
@@ -316,7 +332,7 @@ async function copyOrderText(order: Order, ev?: Event) {
             v-model="filters.allocType"
             clearable
             style="width: 130px"
-            @change="onFilterChange"
+            @change="onAllocTypeChange"
           >
             <el-option label="自营发货" value="self_ship" />
             <el-option label="代发发货" value="dropship" />
@@ -425,8 +441,13 @@ async function copyOrderText(order: Order, ev?: Event) {
           <span v-else>-</span>
         </template>
       </el-table-column>
-      <el-table-column label="留言备注" min-width="140" show-overflow-tooltip>
-        <template #default="{ row }">{{ formatRemark(row) }}</template>
+      <el-table-column label="留言备注" min-width="180">
+        <template #default="{ row }">
+          <div v-if="formatRemarkLines(row).length" class="remark-lines">
+            <div v-for="(line, idx) in formatRemarkLines(row)" :key="idx" class="remark-line">{{ line }}</div>
+          </div>
+          <span v-else class="muted">-</span>
+        </template>
       </el-table-column>
       <el-table-column label="收件信息" min-width="240">
         <template #default="{ row }">
@@ -579,4 +600,7 @@ async function copyOrderText(order: Order, ev?: Event) {
   white-space: nowrap;
   word-break: keep-all;
 }
+.remark-lines { display: flex; flex-direction: column; gap: 2px; line-height: 1.4; }
+.remark-line { font-size: 12px; color: #606266; word-break: break-all; }
+.muted { color: #c0c4cc; }
 </style>

@@ -277,6 +277,16 @@ func (r *Repos) FindBindingByFactory(tenantID uint64, channel, factoryID string)
 	return &b, nil
 }
 
+func (r *Repos) FindBindingByFactoryName(tenantID uint64, channel, factoryName string) (*model.SupplierSourceBinding, error) {
+	var b model.SupplierSourceBinding
+	err := r.db.Where("tenant_id = ? AND source_channel = ? AND external_factory_name = ? AND status = 1", tenantID, channel, factoryName).
+		First(&b).Error
+	if err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
 func (r *Repos) FindBindingBySupplier(tenantID, supplierID uint64, channel string) (*model.SupplierSourceBinding, error) {
 	var b model.SupplierSourceBinding
 	err := r.db.Where("tenant_id = ? AND supplier_id = ? AND source_channel = ? AND status = 1", tenantID, supplierID, channel).
@@ -329,6 +339,52 @@ func (r *Repos) CountByPurchaseOrderID(tenantID uint64, poNo string, excludeOrde
 	var n int64
 	err := q.Count(&n).Error
 	return n, err
+}
+
+// ListDropshipOrdersMissingPO 已代发分配且绑定供应商、尚未关联 SupplyCore 代发单的销售单。
+func (r *Repos) ListDropshipOrdersMissingPO(tenantID uint64, limit int) ([]model.Order, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	var list []model.Order
+	err := r.db.Preload("Items").
+		Where(
+			"tenant_id = ? AND alloc_type = ? AND supplier_id > 0 AND status <> ? AND (purchase_order_id IS NULL OR purchase_order_id = '')",
+			tenantID, model.AllocDropship, model.StatusClosed,
+		).
+		Order("supplier_id ASC, id ASC").
+		Limit(limit).
+		Find(&list).Error
+	return list, err
+}
+
+// RelinkPurchaseOrderIDs 将销售单上的代发采购单号从 fromPoNos 批量改为 toPoNo。
+// toPoNo 为空时表示清空关联（删除代发单后解绑）。
+func (r *Repos) RelinkPurchaseOrderIDs(tenantID uint64, fromPoNos []string, toPoNo string) (int64, error) {
+	toPoNo = strings.TrimSpace(toPoNo)
+	if len(fromPoNos) == 0 {
+		return 0, nil
+	}
+	cleaned := make([]string, 0, len(fromPoNos))
+	seen := map[string]struct{}{}
+	for _, n := range fromPoNos {
+		n = strings.TrimSpace(n)
+		if n == "" || n == toPoNo {
+			continue
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		cleaned = append(cleaned, n)
+	}
+	if len(cleaned) == 0 {
+		return 0, nil
+	}
+	res := r.db.Model(&model.Order{}).
+		Where("tenant_id = ? AND purchase_order_id IN ?", tenantID, cleaned).
+		Update("purchase_order_id", toPoNo)
+	return res.RowsAffected, res.Error
 }
 
 func (r *Repos) CountByStatus(tenantID uint64) (map[string]int64, error) {

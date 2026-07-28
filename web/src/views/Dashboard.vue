@@ -100,17 +100,19 @@ function rangeQuery(extra: Record<string, string> = {}) {
   const start = cards.value.rangeStart || String(dateRange.value?.[0] || '')
   const end = cards.value.rangeEnd || String(dateRange.value?.[1] || '')
   if (!start || !end) return { ...extra }
+  const startAt = start.length <= 10 ? `${start} 00:00:00` : start
+  const endAt = end.length <= 10 ? `${end} 23:59:59` : end
   if (timeType.value === 'shipped') {
     return {
       shipStatus: 'shipped',
-      shippedAtStart: start,
-      shippedAtEnd: end,
+      shippedAtStart: startAt,
+      shippedAtEnd: endAt,
       ...extra,
     }
   }
   return {
-    orderedAtStart: start,
-    orderedAtEnd: end,
+    orderedAtStart: startAt,
+    orderedAtEnd: endAt,
     ...extra,
   }
 }
@@ -235,14 +237,14 @@ const rangeSummaryCards = computed(() => [
     tip: `自营发货 / 未推厂家 · 按${timeTypeLabel.value}`,
     value: `¥${fmtMoney(cards.value.rangeSelfAmount)}`,
     color: '#1677ff',
-    go: () => goOrders(rangeQuery({ salesChannel: 'self' })),
+    go: () => goOrders(rangeQuery({ salesChannel: 'self', allocType: 'self_ship' })),
   },
   {
     label: '代发销售额',
     tip: `厂家代发 / OSMS 代发 · 按${timeTypeLabel.value}`,
     value: `¥${fmtMoney(cards.value.rangeDropshipAmount)}`,
     color: '#722ed1',
-    go: () => goOrders(rangeQuery({ salesChannel: 'dropship' })),
+    go: () => goOrders(rangeQuery({ salesChannel: 'dropship', allocType: 'dropship' })),
   },
 ])
 

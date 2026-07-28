@@ -64,6 +64,8 @@ type IngestOrderRequest struct {
 	AgentType            int              `json:"agentType"`
 	Remark               string           `json:"remark"`
 	SellerRemark         string           `json:"sellerRemark"`
+	FenFaRemark          string           `json:"fenFaRemark"`
+	PrinterRemark        string           `json:"printerRemark"`
 	FactoryID            string           `json:"factoryId"`
 	FactoryName          string           `json:"factoryName"`
 	ExpressCompany       string           `json:"expressCompany"`
@@ -101,12 +103,27 @@ type BatchDropshipRequest struct {
 	SupplierName string   `json:"supplierName"`
 }
 
+// RelinkPurchaseOrderRequest 代发单合并后，把销售单上的采购单号批量改到目标单。
+// toPoNo 为空表示清空关联（删除代发单后解绑）。
+type RelinkPurchaseOrderRequest struct {
+	FromPoNos []string `json:"fromPoNos" binding:"required,min=1"`
+	ToPoNo    string   `json:"toPoNo"`
+}
+
 type ShipRequest struct {
 	ExpressCompany string `json:"expressCompany"`
 	ExpressNo      string `json:"expressNo"`
 	Remark         string `json:"remark"`
 	// 是否回传来源平台（电商→StoreSyncAgent 等）
 	Callback bool `json:"callback"`
+}
+
+// UpdateRemarksRequest 订单详情手工维护备注。
+type UpdateRemarksRequest struct {
+	SellerRemark  string `json:"sellerRemark"`
+	FenFaRemark   string `json:"fenFaRemark"`
+	PrinterRemark string `json:"printerRemark"`
+	AllocRemark   string `json:"allocRemark"`
 }
 
 type BindingRequest struct {

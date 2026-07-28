@@ -80,6 +80,8 @@ type TradeOrder struct {
 	Goods                   []TradeGoods `json:"goods"`
 	BuyerMemo               string       `json:"buyerMemo"`
 	SellerMemo              string       `json:"sellerMemo"`
+	FenFaMemo               string       `json:"fenFaMemo"`
+	PrinterMemo             string       `json:"printerMemo"`
 	AgentType               int          `json:"agentType"`
 	FactoryID               string       `json:"factoryId"`
 	FactoryName             string       `json:"factoryName"`
@@ -255,6 +257,18 @@ type CancelPushRequest struct {
 
 func (c *Client) CancelOrderPush(ctx context.Context, token string, req CancelPushRequest) error {
 	return c.post(ctx, token, c.baseURL+"/api/v1/admin/orders/cancel-push", req, nil)
+}
+
+type UpdateTradeRemarkRequest struct {
+	Platform    string   `json:"platform"`
+	TradeStatus string   `json:"tradeStatus"`
+	SysTids     []string `json:"sysTids"`
+	MemoType    string   `json:"memoType"` // sellerMemo | printerMemo | fenFaMemo
+	Remark      string   `json:"remark"`
+}
+
+func (c *Client) UpdateTradeRemark(ctx context.Context, token string, req UpdateTradeRemarkRequest) error {
+	return c.post(ctx, token, c.baseURL+"/api/v1/admin/orders/update-remark", req, nil)
 }
 
 type DecryptOrdersRequest struct {

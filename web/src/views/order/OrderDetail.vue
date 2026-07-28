@@ -22,12 +22,14 @@ import {
   listBindings,
   listSuppliers,
   shipOrder,
+  updateOrderRemarks,
   type Order,
   type SupplierBinding,
   type SupplierItem,
 } from '../../api/orders'
 import { copyToClipboard } from '../../utils/clipboard'
 import { pushOrder } from '../../api/settings'
+import { EXPRESS_COMPANIES, findExpressCompany } from '../../constants/expressCompanies'
 
 const route = useRoute()
 const router = useRouter()
@@ -71,6 +73,20 @@ const allocVisible = ref(false)
 const shipVisible = ref(false)
 const bindings = ref<SupplierBinding[]>([])
 const suppliers = ref<SupplierItem[]>([])
+const savingRemarks = ref(false)
+const remarkForm = reactive({
+  sellerRemark: '',
+  fenFaRemark: '',
+  printerRemark: '',
+  allocRemark: '',
+})
+
+function syncRemarkForm(o: Order | null) {
+  remarkForm.sellerRemark = o?.sellerRemark || ''
+  remarkForm.fenFaRemark = o?.fenFaRemark || ''
+  remarkForm.printerRemark = o?.printerRemark || ''
+  remarkForm.allocRemark = o?.allocRemark || ''
+}
 
 const allocForm = reactive({
   allocType: 'self_ship',
@@ -82,10 +98,17 @@ const allocForm = reactive({
 
 const shipForm = reactive({
   expressCompany: '',
+  expressCode: '',
   expressNo: '',
   remark: '',
   callback: true,
 })
+
+function onShipCompanyChange(code: string) {
+  const hit = findExpressCompany(code)
+  shipForm.expressCode = hit?.code || code || ''
+  shipForm.expressCompany = hit?.name || code || ''
+}
 
 function hasBlockingEcommerce(o: Order) {
   const text = `${o.ecommerceStatusText || ''} ${o.afterSaleStatusText || ''} ${o.ecommerceStatus || ''} ${o.afterSaleStatus || ''}`
@@ -139,10 +162,41 @@ async function load() {
   loading.value = true
   try {
     order.value = await getOrder(id)
+    syncRemarkForm(order.value)
   } catch (e: any) {
     ElMessage.error(e.message || '加载失败')
   } finally {
     loading.value = false
+  }
+}
+
+async function saveRemarks() {
+  if (!order.value || savingRemarks.value) return
+  const same =
+    (remarkForm.sellerRemark || '') === (order.value.sellerRemark || '') &&
+    (remarkForm.fenFaRemark || '') === (order.value.fenFaRemark || '') &&
+    (remarkForm.printerRemark || '') === (order.value.printerRemark || '') &&
+    (remarkForm.allocRemark || '') === (order.value.allocRemark || '')
+  if (same) return
+  const writeBackKDZS =
+    order.value.sourceChannel === 'kdzs' &&
+    ((remarkForm.sellerRemark || '') !== (order.value.sellerRemark || '') ||
+      (remarkForm.printerRemark || '') !== (order.value.printerRemark || ''))
+  savingRemarks.value = true
+  try {
+    order.value = await updateOrderRemarks(id, {
+      sellerRemark: remarkForm.sellerRemark,
+      fenFaRemark: remarkForm.fenFaRemark,
+      printerRemark: remarkForm.printerRemark,
+      allocRemark: remarkForm.allocRemark,
+    })
+    syncRemarkForm(order.value)
+    ElMessage.success(writeBackKDZS ? '备注已保存并写回快递助手' : '备注已保存')
+  } catch (e: any) {
+    ElMessage.error(e.message || '保存失败')
+    syncRemarkForm(order.value)
+  } finally {
+    savingRemarks.value = false
   }
 }
 
@@ -180,6 +234,7 @@ async function submitAllocate() {
       purchaseOrderId: allocForm.purchaseOrderId,
       remark: allocForm.remark,
     })
+    syncRemarkForm(order.value)
     const poTip = order.value?.purchaseOrderId ? `，已生成供应商代发单 ${order.value.purchaseOrderId}` : ''
     ElMessage.success(`分配成功${poTip}`)
     allocVisible.value = false
@@ -200,6 +255,7 @@ async function onRevokeAllocate() {
       },
     )
     order.value = await revokeAllocateOrder(id)
+    syncRemarkForm(order.value)
     ElMessage.success('已撤回分配（快递助手已同步）')
   } catch (e: any) {
     if (e === 'cancel' || e === 'close') return
@@ -208,8 +264,24 @@ async function onRevokeAllocate() {
 }
 
 async function submitShip() {
+  if (!shipForm.expressCompany?.trim() && shipForm.expressCode) {
+    onShipCompanyChange(shipForm.expressCode)
+  }
+  if (!shipForm.expressCompany?.trim()) {
+    ElMessage.warning('请选择快递公司')
+    return
+  }
+  if (!shipForm.expressNo?.trim()) {
+    ElMessage.warning('请填写物流单号')
+    return
+  }
   try {
-    order.value = await shipOrder(id, { ...shipForm })
+    order.value = await shipOrder(id, {
+      expressCompany: shipForm.expressCompany,
+      expressNo: shipForm.expressNo,
+      remark: shipForm.remark,
+      callback: shipForm.callback,
+    })
     ElMessage.success('发货已记录')
     shipVisible.value = false
   } catch (e: any) {
@@ -285,9 +357,47 @@ onMounted(load)
             <el-button v-if="formatAddress(order.address) !== '-'" link type="primary" size="small" @click="onCopyReceiver">复制</el-button>
           </div>
         </el-descriptions-item>
-        <el-descriptions-item label="买家备注">{{ order.remark || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="卖家备注">{{ order.sellerRemark || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="分配备注">{{ order.allocRemark || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="买家留言">{{ order.remark || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="卖家备注">
+          <el-input
+            v-model="remarkForm.sellerRemark"
+            class="remark-input"
+            size="small"
+            :placeholder="order.sourceChannel === 'kdzs' ? '保存后写回快递助手' : '点击填写'"
+            clearable
+            @change="saveRemarks"
+          />
+        </el-descriptions-item>
+        <el-descriptions-item label="分发备注">
+          <el-input
+            v-model="remarkForm.fenFaRemark"
+            class="remark-input"
+            size="small"
+            placeholder="点击填写"
+            clearable
+            @change="saveRemarks"
+          />
+        </el-descriptions-item>
+        <el-descriptions-item label="打单备注">
+          <el-input
+            v-model="remarkForm.printerRemark"
+            class="remark-input"
+            size="small"
+            :placeholder="order.sourceChannel === 'kdzs' ? '保存后写回快递助手' : '点击填写'"
+            clearable
+            @change="saveRemarks"
+          />
+        </el-descriptions-item>
+        <el-descriptions-item label="分配备注" :span="1">
+          <el-input
+            v-model="remarkForm.allocRemark"
+            class="remark-input"
+            size="small"
+            placeholder="点击填写"
+            clearable
+            @change="saveRemarks"
+          />
+        </el-descriptions-item>
       </el-descriptions>
 
       <h3>商品明细</h3>
@@ -387,8 +497,26 @@ onMounted(load)
 
     <el-dialog v-model="shipVisible" title="填写物流单号" width="480px">
       <el-form label-width="100px">
-        <el-form-item label="快递公司"><el-input v-model="shipForm.expressCompany" /></el-form-item>
-        <el-form-item label="物流单号"><el-input v-model="shipForm.expressNo" /></el-form-item>
+        <el-form-item label="快递公司" required>
+          <el-select
+            v-model="shipForm.expressCode"
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            placeholder="选择或搜索快递公司"
+            style="width: 100%"
+            @change="onShipCompanyChange"
+          >
+            <el-option
+              v-for="c in EXPRESS_COMPANIES"
+              :key="c.code"
+              :label="c.name"
+              :value="c.code"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="物流单号" required><el-input v-model="shipForm.expressNo" placeholder="运单号" /></el-form-item>
         <el-form-item label="回传来源">
           <el-switch v-model="shipForm.callback" />
           <span class="hint">电商订单将回传 StoreSyncAgent</span>
@@ -413,4 +541,5 @@ h3 { margin: 8px 0 0; font-size: 15px; color: #334155; }
 .muted { color: #94a3b8; font-size: 12px; }
 .addr-actions { margin-top: 6px; display: flex; gap: 8px; }
 .alloc-tip { margin: 0 0 12px 110px; color: #64748b; font-size: 12px; line-height: 1.5; }
+.remark-input { width: 100%; max-width: 220px; }
 </style>

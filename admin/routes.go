@@ -9,10 +9,12 @@ func RegisterRoutes(g *gin.RouterGroup, h *Handlers, sh *SettingsHandlers) {
 	g.POST("/orders/manual", h.CreateManual)
 	g.POST("/orders/ingest", h.Ingest)
 	g.POST("/orders/batch-dropship", h.BatchDropship)
+	g.POST("/orders/relink-purchase-order", h.RelinkPurchaseOrder)
 	g.POST("/orders/decrypt", h.DecryptOrders)
 	g.GET("/orders/:id", h.GetOrder)
 	g.POST("/orders/:id/allocate", h.Allocate)
 	g.POST("/orders/:id/revoke-allocate", h.RevokeAllocate)
+	g.PUT("/orders/:id/remarks", h.UpdateRemarks)
 	g.POST("/orders/:id/ship", h.Ship)
 	g.POST("/orders/:id/push", sh.PushOrder)
 

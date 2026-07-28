@@ -28,15 +28,18 @@ func NewClient(baseURL string) *Client {
 }
 
 type SupplierItem struct {
-	ID          uint64 `json:"id"`
-	Code        string `json:"code"`
-	Name        string `json:"name"`
-	ShortName   string `json:"shortName"`
-	Status      int8   `json:"status"`
-	ContactName string `json:"contactName"`
-	Phone       string `json:"phone"`
-	Email       string `json:"email"`
-	Remark      string `json:"remark"`
+	ID                    uint64 `json:"id"`
+	Code                  string `json:"code"`
+	Name                  string `json:"name"`
+	ShortName             string `json:"shortName"`
+	Status                int8   `json:"status"`
+	ContactName           string `json:"contactName"`
+	Phone                 string `json:"phone"`
+	Email                 string `json:"email"`
+	Remark                string `json:"remark"`
+	SettlementCycle       string `json:"settlementCycle"`
+	AutoCreateDropshipPO  bool   `json:"autoCreateDropshipPO"`
+	SyncPurchasePriceFrom string `json:"syncPurchasePriceFrom"`
 }
 
 type PurchaseOrderItemInput struct {
@@ -51,6 +54,8 @@ type PurchaseOrderItemInput struct {
 	SaleUnitPrice   float64 `json:"saleUnitPrice,omitempty"`
 	SaleAmount      float64 `json:"saleAmount,omitempty"`
 	UnitPrice       float64 `json:"unitPrice"`
+	RefSoID         uint64  `json:"refSoId,omitempty"`
+	RefOrderNo      string  `json:"refOrderNo,omitempty"`
 	Remark          string  `json:"remark,omitempty"`
 }
 
@@ -198,6 +203,18 @@ func (c *Client) ListSuppliers(ctx context.Context, bearerToken, keyword string,
 	return pageData.List, pageData.Total, nil
 }
 
+func (c *Client) GetSupplier(ctx context.Context, bearerToken string, id uint64) (*SupplierItem, error) {
+	if id == 0 {
+		return nil, fmt.Errorf("supplier id required")
+	}
+	reqURL := c.baseURL + "/api/v1/admin/suppliers/" + strconv.FormatUint(id, 10)
+	var out SupplierItem
+	if err := c.doJSON(ctx, http.MethodGet, reqURL, bearerToken, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) CreatePurchaseOrder(ctx context.Context, bearerToken string, in PurchaseOrderInput) (*PurchaseOrderDetail, error) {
 	reqURL := c.baseURL + "/api/v1/admin/purchase-orders"
 	var out PurchaseOrderDetail
@@ -259,7 +276,44 @@ func (c *Client) CancelPurchaseOrder(ctx context.Context, bearerToken string, id
 	return &out, nil
 }
 
+func (c *Client) SubmitPurchaseOrder(ctx context.Context, bearerToken string, id uint64) (*PurchaseOrderDetail, error) {
+	reqURL := c.baseURL + "/api/v1/admin/purchase-orders/" + strconv.FormatUint(id, 10) + "/submit"
+	var out PurchaseOrderDetail
+	if err := c.doJSON(ctx, http.MethodPost, reqURL, bearerToken, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (c *Client) DetachSalesOrder(ctx context.Context, bearerToken, poNo, orderNo string, soID uint64, reason string) (*PurchaseOrderDetail, error) {
+	reqURL := c.baseURL + "/api/v1/admin/purchase-orders/detach-sales-order"
+	var out PurchaseOrderDetail
+	if err := c.doJSON(ctx, http.MethodPost, reqURL, bearerToken, map[string]any{
+		"poNo":    poNo,
+		"orderNo": orderNo,
+		"soId":    soID,
+		"reason":  reason,
+	}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *Client) DeletePurchaseOrder(ctx context.Context, bearerToken string, id uint64) error {
 	reqURL := c.baseURL + "/api/v1/admin/purchase-orders/" + strconv.FormatUint(id, 10)
 	return c.doJSON(ctx, http.MethodDelete, reqURL, bearerToken, nil, nil)
+}
+
+// SyncShipmentsFromOrders 触发 SupplyCore 从订单中心拉取物流写入代发单。
+// refSoID>0 时仅同步该销售单对应明细。
+func (c *Client) SyncShipmentsFromOrders(ctx context.Context, bearerToken string, poID, refSoID uint64) error {
+	if poID == 0 {
+		return fmt.Errorf("po id required")
+	}
+	reqURL := c.baseURL + "/api/v1/admin/purchase-orders/" + strconv.FormatUint(poID, 10) + "/shipments/sync-from-orders"
+	body := map[string]any{}
+	if refSoID > 0 {
+		body["refSoId"] = refSoID
+	}
+	return c.doJSON(ctx, http.MethodPost, reqURL, bearerToken, body, nil)
 }

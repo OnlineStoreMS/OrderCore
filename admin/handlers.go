@@ -180,6 +180,20 @@ func (h *Handlers) BatchDropship(c *gin.Context) {
 	response.OK(c, stats)
 }
 
+func (h *Handlers) RelinkPurchaseOrder(c *gin.Context) {
+	var req dto.RelinkPurchaseOrderRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	n, err := h.orders.RelinkPurchaseOrder(c.Request.Context(), authcontext.TenantID(c), req.FromPoNos, req.ToPoNo)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"updated": n, "toPoNo": strings.TrimSpace(req.ToPoNo)})
+}
+
 func (h *Handlers) DecryptOrders(c *gin.Context) {
 	var req dto.DecryptOrdersRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -201,6 +215,25 @@ func (h *Handlers) RevokeAllocate(c *gin.Context) {
 		return
 	}
 	o, err := h.orders.RevokeAllocate(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), id, authcontext.BearerToken(c))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, o)
+}
+
+func (h *Handlers) UpdateRemarks(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, "无效 ID")
+		return
+	}
+	var req dto.UpdateRemarksRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	o, err := h.orders.UpdateRemarks(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), id, req, authcontext.BearerToken(c))
 	if err != nil {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return

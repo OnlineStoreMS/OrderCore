@@ -115,8 +115,10 @@ type Order struct {
 	ShipEntryLocked    bool       `gorm:"default:false" json:"shipEntryLocked"`  // 锁定填单号发货入口
 	ShipLockReason     string     `gorm:"size:256" json:"shipLockReason"`        // 锁定原因说明
 	SkipAutoAlloc      bool       `gorm:"default:false" json:"skipAutoAlloc"`    // 撤回分配后跳过自营自动分配
-	Remark             string     `gorm:"size:512" json:"remark"`
-	SellerRemark       string     `gorm:"size:512" json:"sellerRemark"`
+	Remark             string     `gorm:"type:text" json:"remark"`
+	SellerRemark       string     `gorm:"type:text" json:"sellerRemark"`
+	FenFaRemark        string     `gorm:"type:text" json:"fenFaRemark"`     // 快递助手分发备注
+	PrinterRemark      string     `gorm:"type:text" json:"printerRemark"`   // 快递助手打单备注
 	AllocRemark        string     `gorm:"size:512" json:"allocRemark"`
 	AllocatedAt        *time.Time `json:"allocatedAt,omitempty"`
 	ShippedAt          *time.Time `json:"shippedAt,omitempty"`
