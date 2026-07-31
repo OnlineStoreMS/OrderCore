@@ -304,6 +304,14 @@ func (c *Client) DeletePurchaseOrder(ctx context.Context, bearerToken string, id
 	return c.doJSON(ctx, http.MethodDelete, reqURL, bearerToken, nil, nil)
 }
 
+func (c *Client) SyncPurchasePrices(ctx context.Context, bearerToken string, poID uint64) error {
+	if poID == 0 {
+		return fmt.Errorf("po id required")
+	}
+	reqURL := c.baseURL + "/api/v1/admin/purchase-orders/" + strconv.FormatUint(poID, 10) + "/sync-purchase-prices"
+	return c.doJSON(ctx, http.MethodPost, reqURL, bearerToken, map[string]any{}, nil)
+}
+
 // SyncShipmentsFromOrders 触发 SupplyCore 从订单中心拉取物流写入代发单。
 // refSoID>0 时仅同步该销售单对应明细。
 func (c *Client) SyncShipmentsFromOrders(ctx context.Context, bearerToken string, poID, refSoID uint64) error {

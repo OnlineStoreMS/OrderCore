@@ -447,6 +447,14 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			o, _ = s.repos.GetOrder(tenantID, existing.ID)
 		}
 		s.autoSyncDropshipLogistics(ctx, o, req, bearerToken)
+		// 分发备注等从快递助手同步后，补写未付款代发采购小计
+		if o != nil && strings.TrimSpace(o.PurchaseOrderID) != "" {
+			newFen := strings.TrimSpace(req.FenFaRemark)
+			oldFen := strings.TrimSpace(existing.FenFaRemark)
+			if newFen != "" && newFen != oldFen {
+				s.syncLinkedPOPurchasePrices(ctx, o, bearerToken)
+			}
+		}
 		return o, false, nil
 	}
 
@@ -1293,6 +1301,12 @@ func (s *OrderService) createMergedDropshipPO(ctx context.Context, orders []*mod
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("创建合并代发单失败: %w", err)
 	}
+	// 建单后再拉一次备注同步（分发备注可能刚写入 / 建单时 flags 偶发未读到）
+	if syncFrom != "" && po != nil && po.ID > 0 {
+		if serr := s.supply.SyncPurchasePrices(ctx, bearerToken, po.ID); serr != nil {
+			log.Printf("[ordercore] sync purchase prices after create po=%s: %v", po.PoNo, serr)
+		}
+	}
 	return po, saleTotal, len(items), nil
 }
 
@@ -1629,7 +1643,59 @@ func (s *OrderService) UpdateRemarks(ctx context.Context, tenantID, operatorID, 
 	if err != nil {
 		return nil, err
 	}
-	return s.repos.GetOrder(tenantID, orderID)
+	out, gerr := s.repos.GetOrder(tenantID, orderID)
+	if gerr != nil {
+		return nil, gerr
+	}
+	if s.supply != nil && strings.TrimSpace(bearerToken) != "" && out != nil {
+		s.syncLinkedPOPurchasePrices(ctx, out, bearerToken)
+	}
+	return out, nil
+}
+
+func (s *OrderService) syncLinkedPOPurchasePrices(ctx context.Context, o *model.Order, bearerToken string) {
+	if s.supply == nil || o == nil || strings.TrimSpace(bearerToken) == "" {
+		return
+	}
+	poNo := strings.TrimSpace(o.PurchaseOrderID)
+	seen := map[uint64]struct{}{}
+	collect := func(list []supplycore.PurchaseOrderListItem) {
+		for _, it := range list {
+			if it.ID == 0 {
+				continue
+			}
+			if it.Status == "cancelled" || it.Status == "completed" {
+				continue
+			}
+			if it.PayStatus == "paid" || it.PayStatus == "partial" {
+				continue
+			}
+			if _, ok := seen[it.ID]; ok {
+				continue
+			}
+			seen[it.ID] = struct{}{}
+			if serr := s.supply.SyncPurchasePrices(ctx, bearerToken, it.ID); serr != nil {
+				log.Printf("[ordercore] sync purchase prices po=%s order=%s: %v", it.PoNo, o.OrderNo, serr)
+			}
+		}
+	}
+	// 合并代发单时单头 refSoId 只挂首单，优先按采购单号；再按本销售单 id 兜底
+	if poNo != "" {
+		list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, 0, "dropship", poNo, 1, 20)
+		if err != nil {
+			log.Printf("[ordercore] list PO by no for price sync order=%s po=%s: %v", o.OrderNo, poNo, err)
+		} else {
+			collect(list)
+		}
+	}
+	if o.ID > 0 {
+		list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, o.ID, "dropship", "", 1, 20)
+		if err != nil {
+			log.Printf("[ordercore] list PO by so for price sync order=%s: %v", o.OrderNo, err)
+		} else {
+			collect(list)
+		}
+	}
 }
 
 func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID uint64, req dto.ShipRequest, bearerToken string) (*model.Order, error) {
