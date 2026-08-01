@@ -458,95 +458,107 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		return o, false, nil
 	}
 
-	orderNo, err := s.repos.NextOrderNo(tenantID)
-	if err != nil {
-		return nil, false, err
-	}
 	if shipStatus == "" {
 		shipStatus = model.ShipWaitShip
 	}
-	o := &model.Order{
-		TenantID:           tenantID,
-		OrderNo:            orderNo,
-		SourceChannel:      channel,
-		Platform:           req.Platform,
-		PlatformOrderID:    req.PlatformOrderID,
-		PlatformSysTid:     req.PlatformSysTid,
-		ShopID:             req.ShopID,
-		ShopName:           req.ShopName,
-		ExternalRefID:      req.ExternalRefID,
-		Status:             status,
-		ShipStatus:         shipStatus,
-		AllocType:          hint.AllocType,
-		DropshipMode:       hint.DropshipMode,
-		BuyerNick:          req.BuyerNick,
-		BuyerName:          req.BuyerName,
-		BuyerPhone:         req.BuyerPhone,
-		TotalAmount:        req.TotalAmount,
-		PayAmount:          req.PayAmount,
-		FreightAmount:      req.FreightAmount,
-		PayStatus:          req.PayStatus,
-		PlatformStatus:      platformStatus,
-		PlatformStatusText:  platformStatusText,
-		EcommerceStatus:     req.EcommerceStatus,
-		EcommerceStatusText: req.EcommerceStatusText,
-		AfterSaleStatus:     req.AfterSaleStatus,
-		AfterSaleStatusText: req.AfterSaleStatusText,
-		AgentType:           hint.AgentType,
-		ShipEntryLocked:     hint.ShipEntryLocked,
-		ShipLockReason:      hint.ShipLockReason,
-		Remark:              req.Remark,
-		SellerRemark:       req.SellerRemark,
-		FenFaRemark:        req.FenFaRemark,
-		PrinterRemark:      req.PrinterRemark,
-		FactoryID:          req.FactoryID,
-		FactoryName:        req.FactoryName,
-		RawPayload:         req.RawPayload,
-	}
-	if hint.ApplySyncAlloc {
-		now := time.Now()
-		o.AllocatedAt = &now
-		if hint.AllocType == model.AllocDropship && hint.DropshipMode == model.DropshipKDZSFactory {
-			if sid, sname := s.resolveBoundSupplier(tenantID, req.FactoryID, req.FactoryName); sid > 0 {
-				o.SupplierID = sid
-				o.SupplierName = sname
+	var o *model.Order
+	for attempt := 0; attempt < 5; attempt++ {
+		orderNo, nerr := s.repos.NextOrderNo(tenantID)
+		if nerr != nil {
+			return nil, false, nerr
+		}
+		o = &model.Order{
+			TenantID:            tenantID,
+			OrderNo:             orderNo,
+			SourceChannel:       channel,
+			Platform:            req.Platform,
+			PlatformOrderID:     req.PlatformOrderID,
+			PlatformSysTid:      req.PlatformSysTid,
+			ShopID:              req.ShopID,
+			ShopName:            req.ShopName,
+			ExternalRefID:       req.ExternalRefID,
+			Status:              status,
+			ShipStatus:          shipStatus,
+			AllocType:           hint.AllocType,
+			DropshipMode:        hint.DropshipMode,
+			BuyerNick:           req.BuyerNick,
+			BuyerName:           req.BuyerName,
+			BuyerPhone:          req.BuyerPhone,
+			TotalAmount:         req.TotalAmount,
+			PayAmount:           req.PayAmount,
+			FreightAmount:       req.FreightAmount,
+			PayStatus:           req.PayStatus,
+			PlatformStatus:      platformStatus,
+			PlatformStatusText:  platformStatusText,
+			EcommerceStatus:     req.EcommerceStatus,
+			EcommerceStatusText: req.EcommerceStatusText,
+			AfterSaleStatus:     req.AfterSaleStatus,
+			AfterSaleStatusText: req.AfterSaleStatusText,
+			AgentType:           hint.AgentType,
+			ShipEntryLocked:     hint.ShipEntryLocked,
+			ShipLockReason:      hint.ShipLockReason,
+			Remark:              req.Remark,
+			SellerRemark:        req.SellerRemark,
+			FenFaRemark:         req.FenFaRemark,
+			PrinterRemark:       req.PrinterRemark,
+			FactoryID:           req.FactoryID,
+			FactoryName:         req.FactoryName,
+			RawPayload:          req.RawPayload,
+		}
+		if hint.ApplySyncAlloc {
+			now := time.Now()
+			o.AllocatedAt = &now
+			if hint.AllocType == model.AllocDropship && hint.DropshipMode == model.DropshipKDZSFactory {
+				if sid, sname := s.resolveBoundSupplier(tenantID, req.FactoryID, req.FactoryName); sid > 0 {
+					o.SupplierID = sid
+					o.SupplierName = sname
+				}
 			}
 		}
-	}
-	if shipStatus == model.ShipShipped || status == model.StatusCompleted {
-		if t := parseTime(req.ShippedAt); t != nil {
-			o.ShippedAt = t
-		} else {
-			now := time.Now()
-			o.ShippedAt = &now
+		if shipStatus == model.ShipShipped || status == model.StatusCompleted {
+			if t := parseTime(req.ShippedAt); t != nil {
+				o.ShippedAt = t
+			} else {
+				now := time.Now()
+				o.ShippedAt = &now
+			}
 		}
-	}
-	if t := parseTime(req.PayTime); t != nil {
-		o.PayTime = t
-	}
-	if t := parseTime(req.OrderTime); t != nil {
-		o.OrderedAt = t
-	}
-	o.Items = mapItems(tenantID, 0, req.Items)
-	if req.Address != nil {
-		o.Address = mapAddress(tenantID, 0, req.Address)
-	}
-	err = s.repos.Transaction(func(tx *repo.Repos) error {
-		if err := tx.CreateOrder(o); err != nil {
-			return err
+		if t := parseTime(req.PayTime); t != nil {
+			o.PayTime = t
 		}
-		if err := syncIngestLogistics(tx, tenantID, o.ID, req); err != nil {
-			return err
+		if t := parseTime(req.OrderTime); t != nil {
+			o.OrderedAt = t
 		}
-		return tx.AddStatusLog(&model.OrderStatusLog{
-			TenantID:   tenantID,
-			OrderID:    o.ID,
-			ToStatus:   o.Status,
-			Action:     "ingest",
-			Remark:     hint.LogRemark,
-			OperatorID: operatorID,
+		o.Items = mapItems(tenantID, 0, req.Items)
+		if req.Address != nil {
+			o.Address = mapAddress(tenantID, 0, req.Address)
+		}
+		err = s.repos.Transaction(func(tx *repo.Repos) error {
+			if err := tx.CreateOrder(o); err != nil {
+				return err
+			}
+			if err := syncIngestLogistics(tx, tenantID, o.ID, req); err != nil {
+				return err
+			}
+			return tx.AddStatusLog(&model.OrderStatusLog{
+				TenantID:   tenantID,
+				OrderID:    o.ID,
+				ToStatus:   o.Status,
+				Action:     "ingest",
+				Remark:     hint.LogRemark,
+				OperatorID: operatorID,
+			})
 		})
-	})
+		if err == nil {
+			break
+		}
+		// 并发发号偶发撞号：换下一个序号重试
+		if isUniqueViolation(err) && attempt < 4 {
+			log.Printf("[ordercore] ingest order_no conflict %s, retry %d", orderNo, attempt+1)
+			continue
+		}
+		return nil, false, err
+	}
 	if err != nil {
 		return nil, false, err
 	}
@@ -1759,10 +1771,10 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		msg, cbErr := s.callbackSource(ctx, o, sh, bearerToken)
 		if cbErr != nil {
 			sh.CallbackStatus = model.CallbackFailed
-			sh.CallbackMessage = cbErr.Error()
+			sh.CallbackMessage = truncate(cbErr.Error(), 500)
 		} else {
 			sh.CallbackStatus = model.CallbackSucceeded
-			sh.CallbackMessage = msg
+			sh.CallbackMessage = truncate(msg, 500)
 			sh.CallbackAt = &now
 		}
 	} else {
@@ -1968,7 +1980,9 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 					}
 					_, isNew, err := s.Ingest(ctx, tenantID, operatorID, ingest, token)
 					if err != nil {
-						return nil, err
+						// 单笔失败不中断整次定时同步，避免一条撞号拖垮全量任务
+						log.Printf("[ordercore] sync kdzs ingest fail platform=%s tid=%s: %v", platform, key, err)
+						continue
 					}
 					if isNew {
 						created++
@@ -3183,6 +3197,16 @@ func syncIngestLogistics(tx *repo.Repos, tenantID, orderID uint64, req dto.Inges
 
 func roundMoney(v float64) float64 {
 	return float64(int64(v*100+0.5)) / 100
+}
+
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "23505") ||
+		strings.Contains(msg, "duplicate key") ||
+		strings.Contains(msg, "idx_orders_tenant_no")
 }
 
 func mapStoreSalesToIngest(so storecore.SalesOrder) dto.IngestOrderRequest {

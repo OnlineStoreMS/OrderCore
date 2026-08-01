@@ -310,21 +310,41 @@ func (r *Repos) DeleteBinding(tenantID, id uint64) error {
 }
 
 func (r *Repos) NextOrderNo(tenantID uint64) (string, error) {
-	prefix := time.Now().Format("20060102")
-	var count int64
-	if err := r.db.Model(&model.Order{}).Where("tenant_id = ? AND order_no LIKE ?", tenantID, "OC"+prefix+"%").Count(&count).Error; err != nil {
+	prefix := "OC" + time.Now().Format("20060102")
+	seq, err := nextSeqFromLast(r.db.Model(&model.Order{}).
+		Where("tenant_id = ? AND order_no LIKE ?", tenantID, prefix+"%"),
+		"order_no", prefix)
+	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("OC%s%04d", prefix, count+1), nil
+	return fmt.Sprintf("%s%04d", prefix, seq), nil
 }
 
 func (r *Repos) NextShipmentNo(tenantID uint64) (string, error) {
-	prefix := time.Now().Format("20060102")
-	var count int64
-	if err := r.db.Model(&model.OrderShipment{}).Where("tenant_id = ? AND shipment_no LIKE ?", tenantID, "SH"+prefix+"%").Count(&count).Error; err != nil {
+	prefix := "SH" + time.Now().Format("20060102")
+	seq, err := nextSeqFromLast(r.db.Model(&model.OrderShipment{}).
+		Where("tenant_id = ? AND shipment_no LIKE ?", tenantID, prefix+"%"),
+		"shipment_no", prefix)
+	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("SH%s%04d", prefix, count+1), nil
+	return fmt.Sprintf("%s%04d", prefix, seq), nil
+}
+
+// nextSeqFromLast 取当日最大单号序号 +1，避免 COUNT+1 在删单留洞时撞唯一索引。
+func nextSeqFromLast(q *gorm.DB, col, prefix string) (int, error) {
+	var last string
+	if err := q.Order(col + " DESC").Limit(1).Pluck(col, &last).Error; err != nil {
+		return 0, err
+	}
+	seq := 1
+	if last != "" && len(last) > len(prefix) {
+		var n int
+		if _, scanErr := fmt.Sscanf(last[len(prefix):], "%d", &n); scanErr == nil && n >= 0 {
+			seq = n + 1
+		}
+	}
+	return seq, nil
 }
 
 func (r *Repos) CountByPurchaseOrderID(tenantID uint64, poNo string, excludeOrderID uint64) (int64, error) {
