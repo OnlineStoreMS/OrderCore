@@ -110,6 +110,14 @@ type RelinkPurchaseOrderRequest struct {
 	ToPoNo    string   `json:"toPoNo"`
 }
 
+// UnlinkDropshipPORequest 供应链解绑销售单后回写：清空指定订单的采购单号；可选同步清履约分配。
+type UnlinkDropshipPORequest struct {
+	OrderIDs   []uint64 `json:"orderIds"`
+	OrderNos   []string `json:"orderNos"`
+	ClearAlloc bool     `json:"clearAlloc"` // true：恢复待分配（不调快递助手撤单）
+	Remark     string   `json:"remark"`
+}
+
 type ShipRequest struct {
 	ExpressCompany string `json:"expressCompany"`
 	ExpressNo      string `json:"expressNo"`

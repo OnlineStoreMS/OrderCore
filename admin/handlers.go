@@ -194,6 +194,20 @@ func (h *Handlers) RelinkPurchaseOrder(c *gin.Context) {
 	response.OK(c, gin.H{"updated": n, "toPoNo": strings.TrimSpace(req.ToPoNo)})
 }
 
+func (h *Handlers) UnlinkDropshipPO(c *gin.Context) {
+	var req dto.UnlinkDropshipPORequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	n, err := h.orders.UnlinkDropshipPO(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), req)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"updated": n})
+}
+
 func (h *Handlers) DecryptOrders(c *gin.Context) {
 	var req dto.DecryptOrdersRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

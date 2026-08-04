@@ -317,7 +317,24 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				kdzsDecided := ps == model.KDZSWaitSend || ps == "shipped" || ps == "completed"
 				skipSelfAuto := hint.AgentType == model.AgentTypeSelf && existing.SkipAutoAlloc && !kdzsDecided &&
 					hint.ShipStatus != model.ShipShipped && hint.Status != model.StatusCompleted
-				if !skipSelfAuto {
+				// OSMS 线下代发会对快递助手走 self_print；同步若按「自营」回写会冲掉供应商。
+				// 已有 osms 代发，或仍挂着代发采购单号时，保留/按采购单恢复。
+				osmsRestoreSID, osmsRestoreSName := uint64(0), ""
+				preserveOSMSDropship := false
+				if hint.AllocType == model.AllocSelfShip {
+					if existing.AllocType == model.AllocDropship &&
+						existing.DropshipMode == model.DropshipOSMSSupplier &&
+						existing.SupplierID > 0 {
+						preserveOSMSDropship = true
+						osmsRestoreSID, osmsRestoreSName = existing.SupplierID, existing.SupplierName
+					} else if poNo := strings.TrimSpace(existing.PurchaseOrderID); poNo != "" {
+						if sid, sname, ok := s.lookupDropshipPOSupplier(ctx, bearerToken, poNo); ok {
+							preserveOSMSDropship = true
+							osmsRestoreSID, osmsRestoreSName = sid, sname
+						}
+					}
+				}
+				if !skipSelfAuto && !preserveOSMSDropship {
 					fields["alloc_type"] = hint.AllocType
 					fields["dropship_mode"] = hint.DropshipMode
 					fields["factory_id"] = req.FactoryID
@@ -341,6 +358,27 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				} else {
 					fields["factory_id"] = req.FactoryID
 					fields["factory_name"] = req.FactoryName
+					if preserveOSMSDropship {
+						fields["alloc_type"] = model.AllocDropship
+						fields["dropship_mode"] = model.DropshipOSMSSupplier
+						fields["supplier_id"] = osmsRestoreSID
+						fields["supplier_name"] = osmsRestoreSName
+						fields["status"] = status
+						fields["skip_auto_alloc"] = false
+						hint.LogRemark = fmt.Sprintf("同步保留OSMS代发→%s", osmsRestoreSName)
+						if status != fromStatus ||
+							existing.AllocType != model.AllocDropship ||
+							existing.DropshipMode != model.DropshipOSMSSupplier ||
+							existing.SupplierID != osmsRestoreSID {
+							statusChanged = true
+						}
+						if existing.AllocatedAt == nil {
+							now := time.Now()
+							fields["allocated_at"] = &now
+						}
+						log.Printf("[ordercore] preserve OSMS dropship order=%s po=%s supplier=%d %s",
+							existing.OrderNo, existing.PurchaseOrderID, osmsRestoreSID, osmsRestoreSName)
+					}
 				}
 			} else if !terminal && hint.ClearAlloc {
 				// 快递助手回到待推单（撤单等）：清空订单中心分配，恢复待分配
@@ -1326,6 +1364,106 @@ func (s *OrderService) RelinkPurchaseOrder(ctx context.Context, tenantID uint64,
 	return s.repos.RelinkPurchaseOrderIDs(tenantID, fromPoNos, strings.TrimSpace(toPoNo))
 }
 
+// UnlinkDropshipPO 供应链侧解绑后回写：清空采购单号；clearAlloc 时恢复待分配（不调用快递助手）。
+func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorID uint64, req dto.UnlinkDropshipPORequest) (int, error) {
+	ids := make([]uint64, 0, len(req.OrderIDs)+len(req.OrderNos))
+	seen := map[uint64]struct{}{}
+	for _, id := range req.OrderIDs {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	for _, no := range req.OrderNos {
+		no = strings.TrimSpace(no)
+		if no == "" {
+			continue
+		}
+		o, err := s.repos.FindByOrderNo(tenantID, no)
+		if err != nil || o == nil {
+			continue
+		}
+		if _, ok := seen[o.ID]; ok {
+			continue
+		}
+		seen[o.ID] = struct{}{}
+		ids = append(ids, o.ID)
+	}
+	if len(ids) == 0 {
+		return 0, fmt.Errorf("请提供 orderIds 或 orderNos")
+	}
+	remark := strings.TrimSpace(req.Remark)
+	if remark == "" {
+		remark = "供应链解绑代发单"
+	}
+	updated := 0
+	for _, id := range ids {
+		o, err := s.repos.GetOrder(tenantID, id)
+		if err != nil || o == nil {
+			continue
+		}
+		if o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
+			// 终态只清采购单号，不清分配
+			if strings.TrimSpace(o.PurchaseOrderID) == "" {
+				continue
+			}
+			if err := s.repos.UpdateOrderFields(tenantID, id, map[string]any{"purchase_order_id": ""}); err != nil {
+				return updated, err
+			}
+			_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+				TenantID: tenantID, OrderID: id, FromStatus: o.Status, ToStatus: o.Status,
+				Action: "unlink_dropship_po", Remark: remark + "（终态仅清采购单号）", OperatorID: operatorID,
+			})
+			updated++
+			continue
+		}
+		fields := map[string]any{"purchase_order_id": ""}
+		toStatus := o.Status
+		if req.ClearAlloc && o.ShipStatus != model.ShipShipped {
+			fields["alloc_type"] = ""
+			fields["dropship_mode"] = ""
+			fields["supplier_id"] = 0
+			fields["supplier_name"] = ""
+			fields["factory_id"] = ""
+			fields["factory_name"] = ""
+			fields["alloc_remark"] = ""
+			fields["allocated_at"] = nil
+			fields["status"] = model.StatusPendingAlloc
+			fields["ship_status"] = model.ShipWaitShip
+			fields["agent_type"] = model.AgentTypeSelf
+			fields["skip_auto_alloc"] = true
+			if o.SourceChannel == model.SourceKDZS {
+				fields["platform_status"] = model.KDZSWaitAudit
+				fields["platform_status_text"] = "待推单"
+				fields["ship_entry_locked"] = true
+				fields["ship_lock_reason"] = "快递助手待推单，请先分配；仅自营待发货可填单号"
+			} else {
+				fields["ship_entry_locked"] = false
+				fields["ship_lock_reason"] = ""
+			}
+			toStatus = model.StatusPendingAlloc
+		}
+		from := o.Status
+		if err := s.repos.Transaction(func(tx *repo.Repos) error {
+			return tx.TransitionOrder(tenantID, id, fields, &model.OrderStatusLog{
+				FromStatus: from,
+				ToStatus:   toStatus,
+				Action:     "unlink_dropship_po",
+				Remark:     remark,
+				OperatorID: operatorID,
+			})
+		}); err != nil {
+			return updated, err
+		}
+		updated++
+	}
+	return updated, nil
+}
+
 func (s *OrderService) rollbackDropshipPurchaseOrder(ctx context.Context, bearerToken string, poID uint64) error {
 	if s.supply == nil || poID == 0 {
 		return nil
@@ -1422,9 +1560,12 @@ func (s *OrderService) cancelOneDropshipPO(ctx context.Context, bearerToken stri
 	if it.Status == "cancelled" {
 		return nil
 	}
-	if it.PayStatus == "paid" || it.Status == "paid" || it.Status == "partial_shipped" ||
-		it.Status == "in_transit" || it.Status == "partial_received" || it.Status == "completed" {
-		return fmt.Errorf("关联代发单 %s 已进入付款/履约，不可撤回分配", it.PoNo)
+	// 已付款/履约：销售单已在 DetachSalesOrder 解绑划线即可，不可整单取消（也不阻断撤回分配）
+	if it.PayStatus == "paid" || it.PayStatus == "partial" || it.Status == "paid" ||
+		it.Status == "partial_shipped" || it.Status == "shipped" || it.Status == "in_transit" ||
+		it.Status == "partial_received" || it.Status == "completed" {
+		log.Printf("[ordercore] skip cancel dropship PO %s status=%s pay=%s (already detached line)", it.PoNo, it.Status, it.PayStatus)
+		return nil
 	}
 	if it.Status == "draft" || it.Status == "ordered" {
 		if _, err := s.supply.CancelPurchaseOrder(ctx, bearerToken, it.ID); err != nil {
@@ -1810,7 +1951,10 @@ func (s *OrderService) callbackSource(ctx context.Context, o *model.Order, sh *m
 		if s.storeSync == nil {
 			return "", fmt.Errorf("StoreSyncAgent 未配置")
 		}
-		res, err := s.storeSync.ShipCallback(ctx, token, storesync.ShipCallbackRequest{
+		// 与请求上下文解耦：前端/网关超时取消时，仍尽量把快递助手发货跑完并落库
+		cbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 150*time.Second)
+		defer cancel()
+		res, err := s.storeSync.ShipCallback(cbCtx, token, storesync.ShipCallbackRequest{
 			Platform:       o.Platform,
 			ShopID:         o.ShopID,
 			PlatformTid:    o.PlatformOrderID,
@@ -2451,6 +2595,37 @@ func (s *OrderService) resolveBoundSupplier(tenantID uint64, factoryID, factoryN
 		}
 	}
 	return 0, ""
+}
+
+// lookupDropshipPOSupplier 按代发采购单号查供应商（用于同步时恢复被 self_print 冲掉的 OSMS 代发）。
+func (s *OrderService) lookupDropshipPOSupplier(ctx context.Context, bearerToken, poNo string) (uint64, string, bool) {
+	poNo = strings.TrimSpace(poNo)
+	if poNo == "" || s.supply == nil || strings.TrimSpace(bearerToken) == "" {
+		return 0, "", false
+	}
+	list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, 0, "dropship", poNo, 1, 20)
+	if err != nil {
+		return 0, "", false
+	}
+	for _, it := range list {
+		if strings.TrimSpace(it.PoNo) != poNo {
+			continue
+		}
+		if it.FulfillmentType != "" && it.FulfillmentType != "dropship" {
+			continue
+		}
+		if it.SupplierID == 0 {
+			continue
+		}
+		name := strings.TrimSpace(it.SupplierName)
+		if name == "" {
+			if detail, gerr := s.supply.GetPurchaseOrder(ctx, bearerToken, it.ID); gerr == nil && detail != nil {
+				name = strings.TrimSpace(detail.SupplierName)
+			}
+		}
+		return it.SupplierID, name, true
+	}
+	return 0, "", false
 }
 
 // ---- helpers ----

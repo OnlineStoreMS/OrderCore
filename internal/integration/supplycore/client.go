@@ -70,14 +70,15 @@ type PurchaseOrderInput struct {
 }
 
 type PurchaseOrderDetail struct {
-	ID              uint64 `json:"id"`
-	PoNo            string `json:"poNo"`
-	SupplierID      uint64 `json:"supplierId"`
-	Status          string `json:"status"`
-	PayStatus       string `json:"payStatus"`
-	FulfillmentType string `json:"fulfillmentType"`
-	RefSoID         uint64 `json:"refSoId"`
-	RefTraceID      string `json:"refTraceId"`
+	ID              uint64  `json:"id"`
+	PoNo            string  `json:"poNo"`
+	SupplierID      uint64  `json:"supplierId"`
+	SupplierName    string  `json:"supplierName"`
+	Status          string  `json:"status"`
+	PayStatus       string  `json:"payStatus"`
+	FulfillmentType string  `json:"fulfillmentType"`
+	RefSoID         uint64  `json:"refSoId"`
+	RefTraceID      string  `json:"refTraceId"`
 	TotalAmount     float64 `json:"totalAmount"`
 }
 
@@ -85,6 +86,7 @@ type PurchaseOrderListItem struct {
 	ID              uint64 `json:"id"`
 	PoNo            string `json:"poNo"`
 	SupplierID      uint64 `json:"supplierId"`
+	SupplierName    string `json:"supplierName"`
 	Status          string `json:"status"`
 	PayStatus       string `json:"payStatus"`
 	FulfillmentType string `json:"fulfillmentType"`

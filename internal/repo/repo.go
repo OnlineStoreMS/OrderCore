@@ -146,6 +146,16 @@ func (r *Repos) GetOrder(tenantID, id uint64) (*model.Order, error) {
 	return &o, nil
 }
 
+func (r *Repos) FindByOrderNo(tenantID uint64, orderNo string) (*model.Order, error) {
+	var o model.Order
+	err := r.db.Where("tenant_id = ? AND order_no = ?", tenantID, strings.TrimSpace(orderNo)).
+		First(&o).Error
+	if err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
 func (r *Repos) FindBySourcePlatform(tenantID uint64, channel, platformOrderID string) (*model.Order, error) {
 	var o model.Order
 	err := r.db.Where("tenant_id = ? AND source_channel = ? AND platform_order_id = ?", tenantID, channel, platformOrderID).
