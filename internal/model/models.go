@@ -96,6 +96,7 @@ type Order struct {
 	FactoryID        string     `gorm:"size:64" json:"factoryId"`
 	FactoryName      string     `gorm:"size:256" json:"factoryName"`
 	PurchaseOrderID  string     `gorm:"size:64" json:"purchaseOrderId"`
+	SelfOrderNo      string     `gorm:"size:64;index" json:"selfOrderNo"`
 	BuyerNick        string     `gorm:"size:128" json:"buyerNick"`
 	BuyerName        string     `gorm:"size:128" json:"buyerName"`
 	BuyerPhone       string     `gorm:"size:32" json:"buyerPhone"`

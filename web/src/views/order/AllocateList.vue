@@ -28,7 +28,7 @@ import {
   type SupplierBinding,
   type SupplierItem,
 } from '../../api/orders'
-import { dateShortcuts, formatDateTimeLocal } from '../../utils/date'
+import { dateShortcuts, dateRangeDefaultTime, formatDateTimeLocal } from '../../utils/date'
 import { copyToClipboard } from '../../utils/clipboard'
 import { bindTableShiftWheel, useTableFillHeight } from '../../composables/useTableFillHeight'
 
@@ -389,6 +389,7 @@ onMounted(load)
             end-placeholder="结束"
             value-format="YYYY-MM-DD HH:mm:ss"
             :shortcuts="dateShortcuts"
+            :default-time="dateRangeDefaultTime"
             clearable
             style="width: 360px"
             @change="onFilterChange"

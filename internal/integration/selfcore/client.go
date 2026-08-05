@@ -1,0 +1,193 @@
+package selfcore
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Client struct {
+	baseURL    string
+	httpClient *http.Client
+}
+
+func NewClient(baseURL string) *Client {
+	return &Client{
+		baseURL: strings.TrimRight(baseURL, "/"),
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+	}
+}
+
+func (c *Client) Enabled() bool {
+	return c != nil && c.baseURL != ""
+}
+
+type SelfOrderItemInput struct {
+	PimSkuID      uint64  `json:"pimSkuId,omitempty"`
+	SkuCode       string  `json:"skuCode,omitempty"`
+	ProductName   string  `json:"productName,omitempty"`
+	SkuSpecs      string  `json:"skuSpecs,omitempty"`
+	PicURL        string  `json:"picUrl,omitempty"`
+	Qty           int     `json:"qty"`
+	SaleUnitPrice float64 `json:"saleUnitPrice,omitempty"`
+	SaleAmount    float64 `json:"saleAmount,omitempty"`
+	RefSoID       uint64  `json:"refSoId,omitempty"`
+	RefOrderNo    string  `json:"refOrderNo,omitempty"`
+	Remark        string  `json:"remark,omitempty"`
+}
+
+type SelfOrderInput struct {
+	WarehouseID   uint64               `json:"warehouseId,omitempty"`
+	RefSoID       uint64               `json:"refSoId,omitempty"`
+	RefTraceID    string               `json:"refTraceId,omitempty"`
+	SaleAmount    float64              `json:"saleAmount,omitempty"`
+	BuyerName     string               `json:"buyerName,omitempty"`
+	BuyerPhone    string               `json:"buyerPhone,omitempty"`
+	Address       string               `json:"address,omitempty"`
+	Remark        string               `json:"remark,omitempty"`
+	SourceChannel string               `json:"sourceChannel,omitempty"`
+	Platform      string               `json:"platform,omitempty"`
+	ShopName      string               `json:"shopName,omitempty"`
+	BuyerRemark   string               `json:"buyerRemark,omitempty"`
+	SellerRemark  string               `json:"sellerRemark,omitempty"`
+	FenFaRemark   string               `json:"fenFaRemark,omitempty"`
+	PrinterRemark string               `json:"printerRemark,omitempty"`
+	OrderedAt     string               `json:"orderedAt,omitempty"`
+	Items         []SelfOrderItemInput `json:"items"`
+}
+
+type SelfOrderDetail struct {
+	ID     uint64 `json:"id"`
+	SoNo   string `json:"soNo"`
+	Status string `json:"status"`
+	RefSoID uint64 `json:"refSoId"`
+}
+
+type listPayload struct {
+	List []SelfOrderDetail `json:"list"`
+}
+
+type apiBody struct {
+	Code    int             `json:"code"`
+	Message string          `json:"message"`
+	Data    json.RawMessage `json:"data"`
+}
+
+func (c *Client) ListByRefSoID(ctx context.Context, bearerToken string, refSoID uint64) ([]SelfOrderDetail, error) {
+	if !c.Enabled() || refSoID == 0 {
+		return nil, nil
+	}
+	q := url.Values{}
+	q.Set("refSoId", strconv.FormatUint(refSoID, 10))
+	q.Set("page", "1")
+	q.Set("pageSize", "20")
+	var page listPayload
+	if err := c.doJSON(ctx, http.MethodGet, bearerToken, "/api/v1/admin/self-orders?"+q.Encode(), nil, &page); err != nil {
+		return nil, err
+	}
+	if page.List == nil {
+		return []SelfOrderDetail{}, nil
+	}
+	return page.List, nil
+}
+
+func (c *Client) CreateSelfOrder(ctx context.Context, bearerToken string, in SelfOrderInput) (*SelfOrderDetail, error) {
+	if !c.Enabled() {
+		return nil, fmt.Errorf("SelfCore 未配置")
+	}
+	var out SelfOrderDetail
+	if err := c.doJSON(ctx, http.MethodPost, bearerToken, "/api/v1/admin/self-orders", in, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// CancelByRefSoID 按销售单取消关联自营单（撤回分配）。
+func (c *Client) CancelByRefSoID(ctx context.Context, bearerToken string, refSoID uint64, reason string) ([]SelfOrderDetail, error) {
+	if !c.Enabled() {
+		return nil, fmt.Errorf("SelfCore 未配置")
+	}
+	if refSoID == 0 {
+		return nil, nil
+	}
+	body := map[string]any{
+		"refSoId": refSoID,
+		"reason":  reason,
+	}
+	var out []SelfOrderDetail
+	if err := c.doJSON(ctx, http.MethodPost, bearerToken, "/api/v1/admin/self-orders/cancel-by-ref-so", body, &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		return []SelfOrderDetail{}, nil
+	}
+	return out, nil
+}
+
+func (c *Client) doJSON(ctx context.Context, method, bearerToken, path string, body any, out any) error {
+	reqURL := c.baseURL + path
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, reader)
+	if err != nil {
+		return err
+	}
+	if bearerToken != "" {
+		if !strings.HasPrefix(bearerToken, "Bearer ") {
+			bearerToken = "Bearer " + bearerToken
+		}
+		req.Header.Set("Authorization", bearerToken)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("selfcore request: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("selfcore http %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var wrapped apiBody
+	if err := json.Unmarshal(raw, &wrapped); err != nil {
+		return fmt.Errorf("selfcore decode: %w", err)
+	}
+	if wrapped.Code != 200 && wrapped.Code != 201 {
+		msg := wrapped.Message
+		if msg == "" {
+			msg = "selfcore error"
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	if out == nil || len(wrapped.Data) == 0 || string(wrapped.Data) == "null" {
+		return nil
+	}
+	return json.Unmarshal(wrapped.Data, out)
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}

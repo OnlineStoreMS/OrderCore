@@ -5,6 +5,7 @@ import (
 	adminmw "ordercore/admin/middleware"
 	"ordercore/internal/config"
 	"ordercore/internal/integration/productcore"
+	"ordercore/internal/integration/selfcore"
 	"ordercore/internal/integration/storecore"
 	"ordercore/internal/integration/storesync"
 	"ordercore/internal/integration/supplycore"
@@ -29,8 +30,9 @@ func Setup(db *gorm.DB, cfg *config.Config) (*gin.Engine, *scheduler.SyncSchedul
 	ssClient := storesync.NewClient(cfg.Integrations.StoreSyncAgentAPIURL)
 	scClient := storecore.NewClient(cfg.Integrations.StoreCoreAPIURL)
 	supplyClient := supplycore.NewClient(cfg.Integrations.SupplyCoreAPIURL)
+	selfClient := selfcore.NewClient(cfg.Integrations.SelfCoreAPIURL)
 	productClient := productcore.NewClient(cfg.Integrations.ProductCoreAPIURL)
-	orderSvc := service.NewOrderService(repos, ssClient, scClient, supplyClient, productClient)
+	orderSvc := service.NewOrderService(repos, ssClient, scClient, supplyClient, selfClient, productClient)
 	jwtMgr := jwtmgr.NewManager(cfg.Auth.JWTSecret)
 	settingsSvc := service.NewSettingsService(repos, orderSvc, jwtMgr)
 	h := admin.NewHandlers(orderSvc, supplyClient)

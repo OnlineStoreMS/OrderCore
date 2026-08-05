@@ -21,7 +21,7 @@ import {
   type Order,
   type OrderItem,
 } from '../../api/orders'
-import { dateShortcuts, formatDateTimeLocal } from '../../utils/date'
+import { dateShortcuts, dateRangeDefaultTime, formatDateTimeLocal } from '../../utils/date'
 import { copyToClipboard } from '../../utils/clipboard'
 import { bindTableShiftWheel, useTableFillHeight } from '../../composables/useTableFillHeight'
 
@@ -348,6 +348,7 @@ async function copyOrderText(order: Order, ev?: Event) {
             end-placeholder="结束"
             value-format="YYYY-MM-DD HH:mm:ss"
             :shortcuts="dateShortcuts"
+            :default-time="dateRangeDefaultTime"
             clearable
             style="width: 360px"
             @change="onFilterChange"
@@ -362,6 +363,7 @@ async function copyOrderText(order: Order, ev?: Event) {
             end-placeholder="结束"
             value-format="YYYY-MM-DD HH:mm:ss"
             :shortcuts="dateShortcuts"
+            :default-time="dateRangeDefaultTime"
             clearable
             style="width: 360px"
             @change="onFilterChange"
@@ -376,6 +378,7 @@ async function copyOrderText(order: Order, ev?: Event) {
             end-placeholder="结束"
             value-format="YYYY-MM-DD HH:mm:ss"
             :shortcuts="dateShortcuts"
+            :default-time="dateRangeDefaultTime"
             clearable
             style="width: 360px"
             @change="onFilterChange"

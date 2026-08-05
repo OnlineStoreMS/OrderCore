@@ -20,6 +20,12 @@ export function defaultOrderedRange(): [string, string] {
   return [formatDateTimeLocal(start), formatDateTimeLocal(end)]
 }
 
+/** 自定义选日期时默认起止时刻（el-date-picker datetimerange 的 default-time） */
+export const dateRangeDefaultTime: [Date, Date] = [
+  new Date(2000, 0, 1, 0, 0, 0),
+  new Date(2000, 0, 1, 23, 59, 59),
+]
+
 export const dateShortcuts = [
   {
     text: '今天',

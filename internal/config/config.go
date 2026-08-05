@@ -35,6 +35,7 @@ type AuthConfig struct {
 type IntegrationsConfig struct {
 	ProductCoreAPIURL     string `mapstructure:"productcore_api_url"`
 	SupplyCoreAPIURL      string `mapstructure:"supplycore_api_url"`
+	SelfCoreAPIURL        string `mapstructure:"selfcore_api_url"`
 	StoreSyncAgentAPIURL  string `mapstructure:"storesyncagent_api_url"`
 	StoreCoreAPIURL       string `mapstructure:"storecore_api_url"`
 }
@@ -93,6 +94,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Integrations.SupplyCoreAPIURL == "" {
 		cfg.Integrations.SupplyCoreAPIURL = "http://127.0.0.1:8092"
+	}
+	if cfg.Integrations.SelfCoreAPIURL == "" {
+		cfg.Integrations.SelfCoreAPIURL = "http://127.0.0.1:8103"
 	}
 	if cfg.Integrations.StoreSyncAgentAPIURL == "" {
 		cfg.Integrations.StoreSyncAgentAPIURL = "http://127.0.0.1:8097"

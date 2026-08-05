@@ -13,6 +13,7 @@ auth:
 integrations:
   productcore_api_url: "http://127.0.0.1:8090"
   supplycore_api_url: "http://127.0.0.1:8092"
+  selfcore_api_url: "http://127.0.0.1:8103"
   storesyncagent_api_url: "http://127.0.0.1:8097"
   storecore_api_url: "http://127.0.0.1:8094"
 

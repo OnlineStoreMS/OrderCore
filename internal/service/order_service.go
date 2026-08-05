@@ -14,6 +14,7 @@ import (
 
 	"ordercore/internal/dto"
 	"ordercore/internal/integration/productcore"
+	"ordercore/internal/integration/selfcore"
 	"ordercore/internal/integration/storecore"
 	"ordercore/internal/integration/storesync"
 	"ordercore/internal/integration/supplycore"
@@ -70,12 +71,13 @@ type OrderService struct {
 	storeSync   *storesync.Client
 	storeCore   *storecore.Client
 	supply      *supplycore.Client
+	selfCore    *selfcore.Client
 	product     *productcore.Client
 	onAllocated func(tenantID, orderID uint64)
 }
 
-func NewOrderService(repos *repo.Repos, storeSync *storesync.Client, storeCore *storecore.Client, supply *supplycore.Client, product *productcore.Client) *OrderService {
-	return &OrderService{repos: repos, storeSync: storeSync, storeCore: storeCore, supply: supply, product: product}
+func NewOrderService(repos *repo.Repos, storeSync *storesync.Client, storeCore *storecore.Client, supply *supplycore.Client, selfCore *selfcore.Client, product *productcore.Client) *OrderService {
+	return &OrderService{repos: repos, storeSync: storeSync, storeCore: storeCore, supply: supply, selfCore: selfCore, product: product}
 }
 
 func (s *OrderService) SetOnAllocated(fn func(tenantID, orderID uint64)) {
@@ -237,6 +239,13 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				return nil, false, fmt.Errorf("同步代发单撤回失败: %w", err)
 			}
 		}
+		needCancelSelf := !terminalPre && (hint.ClearAlloc || status == model.StatusClosed) &&
+			(existing.AllocType == model.AllocSelfShip || strings.TrimSpace(existing.SelfOrderNo) != "")
+		if needCancelSelf && strings.TrimSpace(bearerToken) != "" {
+			if err := s.cancelLinkedSelfOrders(ctx, existing.ID, bearerToken); err != nil {
+				return nil, false, fmt.Errorf("同步自营单取消失败: %w", err)
+			}
+		}
 		err = s.repos.Transaction(func(tx *repo.Repos) error {
 			fields := map[string]any{
 				"platform":             req.Platform,
@@ -303,6 +312,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				fields["factory_id"] = ""
 				fields["factory_name"] = ""
 				fields["purchase_order_id"] = ""
+				fields["self_order_no"] = ""
 				fields["alloc_remark"] = ""
 				fields["allocated_at"] = nil
 				// 关闭且未真实发货：不要继续占「待发货」队列
@@ -389,6 +399,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				fields["supplier_id"] = 0
 				fields["supplier_name"] = ""
 				fields["purchase_order_id"] = ""
+				fields["self_order_no"] = ""
 				fields["alloc_remark"] = ""
 				fields["allocated_at"] = nil
 				fields["skip_auto_alloc"] = false
@@ -686,6 +697,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	// 「自动建代发单」开关仅约束同步自动分配（queueOrCreateDropshipPO），不阻塞手工改分配。
 	// 若请求已带 purchaseOrderId（批量合并代发），则复用该单号不再新建。
 	var createdPOID uint64
+	var selfOrderNo string
 	if allocType == model.AllocDropship {
 		if purchaseOrderID != "" {
 			// 外部已建合并代发单
@@ -707,6 +719,13 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 				}
 			}
 		}
+	}
+	if allocType == model.AllocSelfShip {
+		soNo, err := s.ensureSelfOrder(ctx, o, bearerToken)
+		if err != nil {
+			return nil, err
+		}
+		selfOrderNo = soNo
 	}
 
 	nextStatus := model.StatusAllocated
@@ -749,6 +768,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 			"factory_id":        factoryID,
 			"factory_name":      factoryName,
 			"purchase_order_id": purchaseOrderID,
+			"self_order_no":     selfOrderNo,
 			"alloc_remark":      req.Remark,
 			"status":            nextStatus,
 			"ship_status":       model.ShipWaitShip,
@@ -848,6 +868,139 @@ func (s *OrderService) ensureDropshipPurchaseOrder(ctx context.Context, o *model
 		return "", 0, false, fmt.Errorf("创建 SupplyCore 代发单失败: %w", err)
 	}
 	return po.PoNo, po.ID, true, nil
+}
+
+// ensureSelfOrder 按 refSoId 复用未取消的自营单，否则新建。
+func (s *OrderService) ensureSelfOrder(ctx context.Context, o *model.Order, bearerToken string) (soNo string, err error) {
+	if s.selfCore == nil || !s.selfCore.Enabled() {
+		return "", fmt.Errorf("SelfCore 未配置，无法创建自营单")
+	}
+	if len(o.Items) == 0 {
+		return "", fmt.Errorf("订单无明细，无法创建自营单")
+	}
+	existing, listErr := s.selfCore.ListByRefSoID(ctx, bearerToken, o.ID)
+	if listErr == nil {
+		for _, it := range existing {
+			if it.Status == "cancelled" {
+				continue
+			}
+			if it.SoNo != "" {
+				return it.SoNo, nil
+			}
+		}
+	}
+	items := s.mapOrderToSelfLines(o)
+	if len(items) == 0 {
+		return "", fmt.Errorf("订单无明细，无法创建自营单")
+	}
+	saleTotal := 0.0
+	for _, line := range items {
+		saleTotal += line.SaleAmount
+	}
+	addr := ""
+	buyerPhone := o.BuyerPhone
+	buyerName := o.BuyerName
+	if o.Address != nil {
+		if o.Address.FullText != "" {
+			addr = o.Address.FullText
+		} else {
+			addr = strings.TrimSpace(strings.Join([]string{
+				o.Address.Name, o.Address.Phone, o.Address.Province, o.Address.City, o.Address.District, o.Address.Address,
+			}, " "))
+		}
+		if buyerName == "" {
+			buyerName = o.Address.Name
+		}
+		if buyerPhone == "" {
+			buyerPhone = o.Address.Phone
+		}
+	}
+	orderedAt := ""
+	if o.OrderedAt != nil {
+		orderedAt = o.OrderedAt.Format("2006-01-02 15:04:05")
+	}
+	created, err := s.selfCore.CreateSelfOrder(ctx, bearerToken, selfcore.SelfOrderInput{
+		RefSoID:       o.ID,
+		RefTraceID:    o.OrderNo,
+		SaleAmount:    roundMoney(saleTotal),
+		BuyerName:     buyerName,
+		BuyerPhone:    buyerPhone,
+		Address:       addr,
+		Remark:        fmt.Sprintf("OMS自营 %s", o.OrderNo),
+		SourceChannel: o.SourceChannel,
+		Platform:      o.Platform,
+		ShopName:      o.ShopName,
+		BuyerRemark:   o.Remark,
+		SellerRemark:  o.SellerRemark,
+		FenFaRemark:   o.FenFaRemark,
+		PrinterRemark: o.PrinterRemark,
+		OrderedAt:     orderedAt,
+		Items:         items,
+	})
+	if err != nil {
+		return "", fmt.Errorf("创建 SelfCore 自营单失败: %w", err)
+	}
+	return created.SoNo, nil
+}
+
+func (s *OrderService) mapOrderToSelfLines(o *model.Order) []selfcore.SelfOrderItemInput {
+	if o == nil || len(o.Items) == 0 {
+		return nil
+	}
+	pay := o.PayAmount
+	if pay <= 0 {
+		pay = o.TotalAmount
+	}
+	weights := make([]float64, len(o.Items))
+	var sumW float64
+	for i, it := range o.Items {
+		w := it.TotalAmount
+		if w <= 0 {
+			qty := it.Quantity
+			if qty <= 0 {
+				qty = 1
+			}
+			w = it.Price * float64(qty)
+		}
+		if w <= 0 {
+			w = 1
+		}
+		weights[i] = w
+		sumW += w
+	}
+	out := make([]selfcore.SelfOrderItemInput, 0, len(o.Items))
+	allocated := 0.0
+	for i, it := range o.Items {
+		qty := it.Quantity
+		if qty <= 0 {
+			qty = 1
+		}
+		var saleAmt float64
+		if i == len(o.Items)-1 {
+			saleAmt = roundMoney(pay - allocated)
+		} else if sumW > 0 {
+			saleAmt = roundMoney(pay * weights[i] / sumW)
+			allocated += saleAmt
+		}
+		unit := 0.0
+		if qty > 0 {
+			unit = roundMoney(saleAmt / float64(qty))
+		}
+		out = append(out, selfcore.SelfOrderItemInput{
+			PimSkuID:      it.SkuID,
+			SkuCode:       it.SkuCode,
+			ProductName:   it.ProductName,
+			SkuSpecs:      it.SkuSpecs,
+			PicURL:        it.PicURL,
+			Qty:           qty,
+			SaleUnitPrice: unit,
+			SaleAmount:    saleAmt,
+			RefSoID:       o.ID,
+			RefOrderNo:    o.OrderNo,
+			Remark:        strings.TrimSpace(strings.Join([]string{o.Remark, o.SellerRemark}, " ")),
+		})
+	}
+	return out
 }
 
 // mapOrderToPOLines 将销售单明细转为采购行；明细「订单金额」= 订单实付按行分摊。
@@ -1603,6 +1756,12 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 			return nil, err
 		}
 	}
+	// 自营分配：同步取消 SelfCore 本地自营单
+	if o.AllocType == model.AllocSelfShip || strings.TrimSpace(o.SelfOrderNo) != "" {
+		if err := s.cancelLinkedSelfOrders(ctx, o.ID, bearerToken); err != nil {
+			return nil, err
+		}
+	}
 
 	kdzsRemark := ""
 	if o.SourceChannel == model.SourceKDZS {
@@ -1637,6 +1796,7 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 			"factory_id":        "",
 			"factory_name":      "",
 			"purchase_order_id": "",
+			"self_order_no":     "",
 			"alloc_remark":      "",
 			"allocated_at":      nil,
 			"status":            model.StatusPendingAlloc,
@@ -1666,6 +1826,23 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 		return nil, err
 	}
 	return s.repos.GetOrder(tenantID, orderID)
+}
+
+// cancelLinkedSelfOrders 撤回分配时同步取消 SelfCore 自营单（按销售单 refSoId）。
+// 自营单已不存在视为已同步；已发货等不可取消状态会阻断撤回。
+func (s *OrderService) cancelLinkedSelfOrders(ctx context.Context, orderID uint64, bearerToken string) error {
+	if s.selfCore == nil || !s.selfCore.Enabled() {
+		return nil
+	}
+	_, err := s.selfCore.CancelByRefSoID(ctx, bearerToken, orderID, "撤回分配")
+	if err != nil {
+		if isSupplyNotFound(err) {
+			log.Printf("[ordercore] cancel self order missing orderID=%d: %v (skip)", orderID, err)
+			return nil
+		}
+		return fmt.Errorf("同步自营单取消失败: %w", err)
+	}
+	return nil
 }
 
 func (s *OrderService) cancelKDZSPush(ctx context.Context, o *model.Order, token string) error {
