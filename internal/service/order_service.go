@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -496,11 +497,14 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			o, _ = s.repos.GetOrder(tenantID, existing.ID)
 		}
 		s.autoSyncDropshipLogistics(ctx, o, req, bearerToken)
-		// 分发备注等从快递助手同步后，补写未付款代发采购小计
+		// 合单发货：分发备注只保留在第一单，其余清空（快递助手常复制到每单）
+		o = s.dedupeMergeShipFenFa(ctx, tenantID, o)
+		// 分发备注变更或合单去重后，补写未付款代发采购小计
 		if o != nil && strings.TrimSpace(o.PurchaseOrderID) != "" {
 			newFen := strings.TrimSpace(req.FenFaRemark)
 			oldFen := strings.TrimSpace(existing.FenFaRemark)
-			if newFen != "" && newFen != oldFen {
+			curFen := strings.TrimSpace(o.FenFaRemark)
+			if newFen != oldFen || curFen != oldFen || ingestHasLogistics(req) {
 				s.syncLinkedPOPurchasePrices(ctx, o, bearerToken)
 			}
 		}
@@ -623,6 +627,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		out, _ = s.repos.GetOrder(tenantID, o.ID)
 	}
 	s.autoSyncDropshipLogistics(ctx, out, req, bearerToken)
+	out = s.dedupeMergeShipFenFa(ctx, tenantID, out)
 	return out, true, nil
 }
 
@@ -1478,9 +1483,15 @@ func (s *OrderService) createMergedDropshipPO(ctx context.Context, orders []*mod
 	items := make([]supplycore.PurchaseOrderItemInput, 0)
 	traceParts := make([]string, 0, len(orders))
 	var saleTotal float64
+	// 多单合并建单时不按各单分发备注直接写单价（合单备注常复制到每单，会翻倍）；
+	// 建单后统一 SyncPurchasePrices，有运单号时整包只计一次。
+	lineSyncFrom := syncFrom
+	if len(orders) > 1 {
+		lineSyncFrom = ""
+	}
 	for _, o := range orders {
 		traceParts = append(traceParts, o.OrderNo)
-		lines := s.mapOrderToPOLines(ctx, bearerToken, o, syncFrom)
+		lines := s.mapOrderToPOLines(ctx, bearerToken, o, lineSyncFrom)
 		items = append(items, lines...)
 		for _, line := range lines {
 			saleTotal += line.SaleAmount
@@ -3449,6 +3460,111 @@ func (s *OrderService) autoSyncDropshipLogistics(ctx context.Context, o *model.O
 		return
 	}
 	log.Printf("[ordercore] auto synced logistics PO=%s order=%s", poNo, o.OrderNo)
+}
+
+// dedupeMergeShipFenFa 合单发货（同运单号）时，分发备注只保留在销售单 ID 最小的一单，其余清空。
+// 快递助手合单常把同一备注复制到每单；同步后需去重，避免采购价翻倍、界面重复显示。
+func (s *OrderService) dedupeMergeShipFenFa(ctx context.Context, tenantID uint64, o *model.Order) *model.Order {
+	if o == nil {
+		return o
+	}
+	fen := strings.TrimSpace(o.FenFaRemark)
+	if fen == "" {
+		return o
+	}
+	expressNos := map[string]struct{}{}
+	for _, sh := range o.Shipments {
+		no := strings.TrimSpace(sh.ExpressNo)
+		if no != "" {
+			expressNos[no] = struct{}{}
+		}
+	}
+	if len(expressNos) == 0 {
+		return o
+	}
+	siblingIDs := map[uint64]struct{}{}
+	for no := range expressNos {
+		ids, err := s.repos.ListOrderIDsByExpressNo(tenantID, no)
+		if err != nil {
+			log.Printf("[ordercore] list merge-ship siblings express=%s: %v", no, err)
+			continue
+		}
+		for _, id := range ids {
+			siblingIDs[id] = struct{}{}
+		}
+	}
+	if len(siblingIDs) < 2 {
+		return o
+	}
+	ids := make([]uint64, 0, len(siblingIDs))
+	for id := range siblingIDs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	// 仅处理分发备注与本单相同（或非空同文）的合单成员
+	type pair struct {
+		id  uint64
+		fen string
+	}
+	var same []pair
+	for _, id := range ids {
+		cur, err := s.repos.GetOrder(tenantID, id)
+		if err != nil || cur == nil {
+			continue
+		}
+		cf := strings.TrimSpace(cur.FenFaRemark)
+		if cf == "" {
+			continue
+		}
+		if cf == fen {
+			same = append(same, pair{id: id, fen: cf})
+		}
+	}
+	if len(same) < 2 {
+		return o
+	}
+	primaryID := same[0].id
+	for _, p := range same {
+		if p.id < primaryID {
+			primaryID = p.id
+		}
+	}
+	cleared := 0
+	for _, p := range same {
+		if p.id == primaryID {
+			continue
+		}
+		if err := s.repos.UpdateOrderFields(tenantID, p.id, map[string]any{"fen_fa_remark": ""}); err != nil {
+			log.Printf("[ordercore] clear merge-ship fenfa order=%d: %v", p.id, err)
+			continue
+		}
+		st := ""
+		if cur, gerr := s.repos.GetOrder(tenantID, p.id); gerr == nil && cur != nil {
+			st = cur.Status
+		}
+		_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+			TenantID:   tenantID,
+			OrderID:    p.id,
+			FromStatus: st,
+			ToStatus:   st,
+			Action:     "dedupe_fenfa",
+			Remark:     fmt.Sprintf("合单发货分发备注已归并至订单#%d，本单清空", primaryID),
+		})
+		cleared++
+	}
+	if cleared > 0 {
+		log.Printf("[ordercore] dedupe merge-ship fenfa primary=%d cleared=%d text=%q", primaryID, cleared, fen)
+	}
+	if o.ID == primaryID {
+		return o
+	}
+	// 本单被清空时返回最新状态
+	if fresh, err := s.repos.GetOrder(tenantID, o.ID); err == nil && fresh != nil {
+		return fresh
+	}
+	o.FenFaRemark = ""
+	return o
 }
 
 func ingestHasLogistics(req dto.IngestOrderRequest) bool {

@@ -262,6 +262,21 @@ func (r *Repos) FindShipmentByExpressNo(tenantID, orderID uint64, expressNo stri
 	return &s, nil
 }
 
+// ListOrderIDsByExpressNo 同租户下共用同一运单号的销售单 ID（合单发货）。
+func (r *Repos) ListOrderIDsByExpressNo(tenantID uint64, expressNo string) ([]uint64, error) {
+	expressNo = strings.TrimSpace(expressNo)
+	if expressNo == "" {
+		return nil, nil
+	}
+	var ids []uint64
+	err := r.db.Model(&model.OrderShipment{}).
+		Where("tenant_id = ? AND express_no = ?", tenantID, expressNo).
+		Distinct("order_id").
+		Order("order_id ASC").
+		Pluck("order_id", &ids).Error
+	return ids, err
+}
+
 func (r *Repos) ListBindings(tenantID uint64) ([]model.SupplierSourceBinding, error) {
 	var list []model.SupplierSourceBinding
 	err := r.db.Where("tenant_id = ?", tenantID).Order("id DESC").Find(&list).Error
