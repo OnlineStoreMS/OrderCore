@@ -2,16 +2,43 @@ package dto
 
 // ManualCreateOrderRequest 手工建单
 type ManualCreateOrderRequest struct {
-	BuyerName     string             `json:"buyerName"`
-	BuyerPhone    string             `json:"buyerPhone"`
-	BuyerNick     string             `json:"buyerNick"`
-	TotalAmount   float64            `json:"totalAmount"`
-	PayAmount     float64            `json:"payAmount"`
-	FreightAmount float64            `json:"freightAmount"`
-	Remark        string             `json:"remark"`
-	SellerRemark  string             `json:"sellerRemark"`
-	Address       *AddressInput      `json:"address"`
-	Items         []OrderItemInput   `json:"items"`
+	BuyerName     string           `json:"buyerName"`
+	BuyerPhone    string           `json:"buyerPhone"`
+	BuyerNick     string           `json:"buyerNick"`
+	BuyerTel      string           `json:"buyerTel"`
+	TotalAmount   float64          `json:"totalAmount"`
+	PayAmount     float64          `json:"payAmount"`
+	FreightAmount float64          `json:"freightAmount"`
+	Remark        string           `json:"remark"`
+	SellerRemark  string           `json:"sellerRemark"`
+	ShipContent   string           `json:"shipContent"` // 发货内容（同步快递助手）
+	SellerFlag    *int             `json:"sellerFlag"`
+	Address       *AddressInput    `json:"address"`
+	Items         []OrderItemInput `json:"items"`
+	// SaveCustomer 保存收件人到客户中心
+	SaveCustomer bool `json:"saveCustomer"`
+	// SyncKDZS 同步创建快递助手手工单（默认 true）
+	SyncKDZS *bool `json:"syncKdzs"`
+	// PlatformOrderNo 可选外部订单编号
+	PlatformOrderNo string `json:"platformOrderNo"`
+}
+
+// ManualBatchCreateRequest 批量手工建单（共享商品/备注，多个收件人）
+type ManualBatchCreateRequest struct {
+	Receivers    []ManualReceiverInput `json:"receivers"`
+	Items        []OrderItemInput      `json:"items"`
+	Remark       string                `json:"remark"`
+	ShipContent  string                `json:"shipContent"`
+	SellerFlag   *int                  `json:"sellerFlag"`
+	SaveCustomer bool                  `json:"saveCustomer"`
+	SyncKDZS     *bool                 `json:"syncKdzs"`
+}
+
+type ManualReceiverInput struct {
+	BuyerName  string        `json:"buyerName"`
+	BuyerPhone string        `json:"buyerPhone"`
+	BuyerTel   string        `json:"buyerTel"`
+	Address    *AddressInput `json:"address"`
 }
 
 type AddressInput struct {
@@ -38,44 +65,45 @@ type OrderItemInput struct {
 
 // IngestOrderRequest 外部模块推送/同步入库
 type IngestOrderRequest struct {
-	SourceChannel   string           `json:"sourceChannel" binding:"required"`
-	Platform        string           `json:"platform"`
-	PlatformOrderID string           `json:"platformOrderId"`
-	PlatformSysTid  string           `json:"platformSysTid"`
-	ShopID          string           `json:"shopId"`
-	ShopName        string           `json:"shopName"`
-	ExternalRefID   string           `json:"externalRefId"`
-	Status          string           `json:"status"`
-	PlatformStatus  string           `json:"platformStatus"`
-	BuyerNick       string           `json:"buyerNick"`
-	BuyerName       string           `json:"buyerName"`
-	BuyerPhone      string           `json:"buyerPhone"`
-	TotalAmount     float64          `json:"totalAmount"`
-	PayAmount       float64          `json:"payAmount"`
-	FreightAmount   float64          `json:"freightAmount"`
-	PayStatus       string           `json:"payStatus"`
-	PayTime              string           `json:"payTime"`
-	OrderTime            string           `json:"orderTime"`
-	PlatformStatusText   string           `json:"platformStatusText"`
-	EcommerceStatus      string           `json:"ecommerceStatus"`
-	EcommerceStatusText  string           `json:"ecommerceStatusText"`
-	AfterSaleStatus      string           `json:"afterSaleStatus"`
-	AfterSaleStatusText  string           `json:"afterSaleStatusText"`
-	AgentType            int              `json:"agentType"`
-	Remark               string           `json:"remark"`
-	SellerRemark         string           `json:"sellerRemark"`
-	FenFaRemark          string           `json:"fenFaRemark"`
-	PrinterRemark        string           `json:"printerRemark"`
-	FactoryID            string           `json:"factoryId"`
-	FactoryName          string           `json:"factoryName"`
-	ExpressCompany       string           `json:"expressCompany"`
-	ExpressCode          string           `json:"expressCode"`
-	ExpressNo            string           `json:"expressNo"`
-	ShippedAt            string           `json:"shippedAt"` // 平台真实发货时间
-	Logistics            []LogisticsInput `json:"logistics"`
-	RawPayload           string           `json:"rawPayload"`
-	Address              *AddressInput    `json:"address"`
-	Items                []OrderItemInput `json:"items"`
+	SourceChannel       string           `json:"sourceChannel" binding:"required"`
+	Platform            string           `json:"platform"`
+	PlatformOrderID     string           `json:"platformOrderId"`
+	PlatformSysTid      string           `json:"platformSysTid"`
+	ShopID              string           `json:"shopId"`
+	ShopName            string           `json:"shopName"`
+	ExternalRefID       string           `json:"externalRefId"`
+	Status              string           `json:"status"`
+	PlatformStatus      string           `json:"platformStatus"`
+	BuyerNick           string           `json:"buyerNick"`
+	BuyerName           string           `json:"buyerName"`
+	BuyerPhone          string           `json:"buyerPhone"`
+	TotalAmount         float64          `json:"totalAmount"`
+	PayAmount           float64          `json:"payAmount"`
+	FreightAmount       float64          `json:"freightAmount"`
+	PayStatus           string           `json:"payStatus"`
+	PayTime             string           `json:"payTime"`
+	OrderTime           string           `json:"orderTime"`
+	PlatformStatusText  string           `json:"platformStatusText"`
+	EcommerceStatus     string           `json:"ecommerceStatus"`
+	EcommerceStatusText string           `json:"ecommerceStatusText"`
+	AfterSaleStatus     string           `json:"afterSaleStatus"`
+	AfterSaleStatusText string           `json:"afterSaleStatusText"`
+	AgentType           int              `json:"agentType"`
+	Remark              string           `json:"remark"`
+	SellerRemark        string           `json:"sellerRemark"`
+	SellerFlag          *int             `json:"sellerFlag"` // 0灰 1红 2黄 3绿 4蓝 5紫；nil 表示不覆盖
+	FenFaRemark         string           `json:"fenFaRemark"`
+	PrinterRemark       string           `json:"printerRemark"`
+	FactoryID           string           `json:"factoryId"`
+	FactoryName         string           `json:"factoryName"`
+	ExpressCompany      string           `json:"expressCompany"`
+	ExpressCode         string           `json:"expressCode"`
+	ExpressNo           string           `json:"expressNo"`
+	ShippedAt           string           `json:"shippedAt"` // 平台真实发货时间
+	Logistics           []LogisticsInput `json:"logistics"`
+	RawPayload          string           `json:"rawPayload"`
+	Address             *AddressInput    `json:"address"`
+	Items               []OrderItemInput `json:"items"`
 }
 
 // LogisticsInput 同步入库的物流包裹
@@ -88,7 +116,7 @@ type LogisticsInput struct {
 
 type AllocateRequest struct {
 	AllocType       string `json:"allocType" binding:"required"` // self_ship | dropship | purchase_then_ship
-	DropshipMode    string `json:"dropshipMode"`                // 可选；代发时由绑定关系自动推断
+	DropshipMode    string `json:"dropshipMode"`                 // 可选；代发时由绑定关系自动推断
 	SupplierID      uint64 `json:"supplierId"`
 	SupplierName    string `json:"supplierName"`
 	FactoryID       string `json:"factoryId"`
@@ -129,9 +157,17 @@ type ShipRequest struct {
 // UpdateRemarksRequest 订单详情手工维护备注。
 type UpdateRemarksRequest struct {
 	SellerRemark  string `json:"sellerRemark"`
+	SellerFlag    *int   `json:"sellerFlag"` // 0灰 1红 2黄 3绿 4蓝 5紫；nil 不改旗帜
 	FenFaRemark   string `json:"fenFaRemark"`
 	PrinterRemark string `json:"printerRemark"`
 	AllocRemark   string `json:"allocRemark"`
+}
+
+// UpdatePaymentRequest 自营中心回写付款状态（仅手工单生效）。
+type UpdatePaymentRequest struct {
+	PayStatus    string `json:"payStatus"`              // unpaid|partial|paid
+	PayTime      string `json:"payTime"`                // 空字符串表示清空
+	ClearPayTime bool   `json:"clearPayTime,omitempty"` // true 时清空 pay_time
 }
 
 type BindingRequest struct {
@@ -164,7 +200,7 @@ type SyncKDZSRequest struct {
 	Platform      string   `json:"platform"`
 	ShopID        string   `json:"shopId"`
 	TradeStatus   string   `json:"tradeStatus"`
-	TradeStatuses  []string `json:"tradeStatuses"`
+	TradeStatuses []string `json:"tradeStatuses"`
 	PageNo        int      `json:"pageNo"`
 	PageSize      int      `json:"pageSize"`
 	StartTime     string   `json:"startTime"`

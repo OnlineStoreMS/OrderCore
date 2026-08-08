@@ -74,6 +74,10 @@ export interface Order {
   skipAutoAlloc?: boolean
   remark?: string
   sellerRemark?: string
+  /** 卖家备注旗帜：0灰 1红 2黄 3绿 4蓝 5紫 */
+  sellerFlag?: number
+  /** 发货内容（手工单常用） */
+  shipContent?: string
   fenFaRemark?: string
   printerRemark?: string
   allocRemark?: string
@@ -307,12 +311,25 @@ export function formatRemark(order: Pick<Order, 'remark' | 'sellerRemark' | 'fen
   return parts.length ? parts.join(' / ') : '-'
 }
 
-export function formatRemarkLines(order: Pick<Order, 'remark' | 'sellerRemark' | 'fenFaRemark' | 'printerRemark'>) {
-  const parts: string[] = []
-  if (order.remark?.trim()) parts.push(`买家留言：${order.remark.trim()}`)
-  if (order.sellerRemark?.trim()) parts.push(`卖家备注：${order.sellerRemark.trim()}`)
-  if (order.fenFaRemark?.trim()) parts.push(`分发备注：${order.fenFaRemark.trim()}`)
-  if (order.printerRemark?.trim()) parts.push(`打单备注：${order.printerRemark.trim()}`)
+export type RemarkLine = {
+  kind: 'buyer' | 'seller' | 'fenfa' | 'printer'
+  text: string
+  /** 仅卖家备注携带旗帜 */
+  sellerFlag?: number
+}
+
+export function formatRemarkLines(order: Pick<Order, 'remark' | 'sellerRemark' | 'sellerFlag' | 'fenFaRemark' | 'printerRemark'>): RemarkLine[] {
+  const parts: RemarkLine[] = []
+  if (order.remark?.trim()) parts.push({ kind: 'buyer', text: `买家留言：${order.remark.trim()}` })
+  if (order.sellerRemark?.trim() || (order.sellerFlag != null && order.sellerFlag > 0)) {
+    parts.push({
+      kind: 'seller',
+      text: order.sellerRemark?.trim() ? `卖家备注：${order.sellerRemark.trim()}` : '卖家备注',
+      sellerFlag: order.sellerFlag ?? 0,
+    })
+  }
+  if (order.fenFaRemark?.trim()) parts.push({ kind: 'fenfa', text: `分发备注：${order.fenFaRemark.trim()}` })
+  if (order.printerRemark?.trim()) parts.push({ kind: 'printer', text: `打单备注：${order.printerRemark.trim()}` })
   return parts
 }
 
@@ -364,6 +381,7 @@ export async function revokeAllocateOrder(id: number) {
 
 export async function updateOrderRemarks(id: number, body: {
   sellerRemark?: string
+  sellerFlag?: number
   fenFaRemark?: string
   printerRemark?: string
   allocRemark?: string

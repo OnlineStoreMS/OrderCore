@@ -28,6 +28,7 @@ import {
   type SupplierBinding,
   type SupplierItem,
 } from '../../api/orders'
+import SellerFlag from '../../components/SellerFlag.vue'
 import { dateShortcuts, dateRangeDefaultTime, formatDateTimeLocal } from '../../utils/date'
 import { copyToClipboard } from '../../utils/clipboard'
 import { bindTableShiftWheel, useTableFillHeight } from '../../composables/useTableFillHeight'
@@ -472,10 +473,17 @@ onMounted(load)
           <span v-else>-</span>
         </template>
       </el-table-column>
-      <el-table-column label="留言备注" min-width="180">
+      <el-table-column label="留言备注" min-width="200">
         <template #default="{ row }">
           <div v-if="formatRemarkLines(row).length" class="remark-lines">
-            <div v-for="(line, idx) in formatRemarkLines(row)" :key="idx" class="remark-line">{{ line }}</div>
+            <div v-for="(line, idx) in formatRemarkLines(row)" :key="idx" class="remark-line">
+              <SellerFlag
+                v-if="line.kind === 'seller'"
+                :model-value="line.sellerFlag ?? 0"
+                :size="14"
+              />
+              <span>{{ line.text }}</span>
+            </div>
           </div>
           <span v-else class="muted">-</span>
         </template>
@@ -655,5 +663,12 @@ onMounted(load)
 .platform-oid { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
 .alloc-tip { margin: 0; color: #909399; font-size: 13px; line-height: 1.5; }
 .remark-lines { display: flex; flex-direction: column; gap: 2px; line-height: 1.4; }
-.remark-line { font-size: 12px; color: #606266; word-break: break-all; }
+.remark-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  font-size: 12px;
+  color: #606266;
+  word-break: break-all;
+}
 </style>

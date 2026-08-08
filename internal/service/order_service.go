@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ordercore/internal/dto"
+	"ordercore/internal/integration/customercore"
 	"ordercore/internal/integration/productcore"
 	"ordercore/internal/integration/selfcore"
 	"ordercore/internal/integration/storecore"
@@ -68,17 +69,18 @@ func (b *deferredDropshipBatch) take() []*model.Order {
 }
 
 type OrderService struct {
-	repos       *repo.Repos
-	storeSync   *storesync.Client
-	storeCore   *storecore.Client
-	supply      *supplycore.Client
-	selfCore    *selfcore.Client
-	product     *productcore.Client
-	onAllocated func(tenantID, orderID uint64)
+	repos        *repo.Repos
+	storeSync    *storesync.Client
+	storeCore    *storecore.Client
+	supply       *supplycore.Client
+	selfCore     *selfcore.Client
+	product      *productcore.Client
+	customerCore *customercore.Client
+	onAllocated  func(tenantID, orderID uint64)
 }
 
-func NewOrderService(repos *repo.Repos, storeSync *storesync.Client, storeCore *storecore.Client, supply *supplycore.Client, selfCore *selfcore.Client, product *productcore.Client) *OrderService {
-	return &OrderService{repos: repos, storeSync: storeSync, storeCore: storeCore, supply: supply, selfCore: selfCore, product: product}
+func NewOrderService(repos *repo.Repos, storeSync *storesync.Client, storeCore *storecore.Client, supply *supplycore.Client, selfCore *selfcore.Client, product *productcore.Client, customer *customercore.Client) *OrderService {
+	return &OrderService{repos: repos, storeSync: storeSync, storeCore: storeCore, supply: supply, selfCore: selfCore, product: product, customerCore: customer}
 }
 
 func (s *OrderService) SetOnAllocated(fn func(tenantID, orderID uint64)) {
@@ -124,32 +126,68 @@ func (s *OrderService) Get(tenantID, id uint64) (*model.Order, error) {
 	return s.repos.GetOrder(tenantID, id)
 }
 
-func (s *OrderService) CreateManual(tenantID, operatorID uint64, req dto.ManualCreateOrderRequest) (*model.Order, error) {
-	if len(req.Items) == 0 {
-		return nil, fmt.Errorf("订单明细不能为空")
+func (s *OrderService) CreateManual(ctx context.Context, tenantID, operatorID uint64, req dto.ManualCreateOrderRequest, bearerToken string) (*model.Order, error) {
+	// 对齐快递助手：允许无商品建单（仅发货内容 / 收件人）
+	normalizeManualAddress(&req)
+	if strings.TrimSpace(req.BuyerPhone) == "" && strings.TrimSpace(req.BuyerTel) == "" {
+		return nil, fmt.Errorf("收件人手机或固话至少填一项")
 	}
+	if req.Address == nil || strings.TrimSpace(req.Address.Province) == "" || strings.TrimSpace(req.Address.City) == "" ||
+		strings.TrimSpace(req.Address.District) == "" || strings.TrimSpace(req.Address.Address) == "" {
+		return nil, fmt.Errorf("请填写完整收件地址（省/市/区/详细地址）")
+	}
+	if strings.TrimSpace(req.BuyerName) == "" {
+		req.BuyerName = req.Address.Name
+	}
+	if strings.TrimSpace(req.BuyerPhone) == "" {
+		req.BuyerPhone = req.Address.Phone
+	}
+
+	syncKDZS := true
+	if req.SyncKDZS != nil {
+		syncKDZS = *req.SyncKDZS
+	}
+
+	if req.SaveCustomer {
+		if err := s.saveManualCustomer(tenantID, req); err != nil {
+			log.Printf("[CreateManual] save customer failed: %v", err)
+			return nil, fmt.Errorf("保存客户失败: %w", err)
+		}
+	}
+
 	orderNo, err := s.repos.NextOrderNo(tenantID)
 	if err != nil {
 		return nil, err
 	}
 	o := &model.Order{
-		TenantID:      tenantID,
-		OrderNo:       orderNo,
-		SourceChannel: model.SourceManual,
-		Status:        model.StatusPendingAlloc,
-		ShipStatus:    model.ShipWaitShip,
-		BuyerName:     req.BuyerName,
-		BuyerPhone:    req.BuyerPhone,
-		BuyerNick:     req.BuyerNick,
-		TotalAmount:   req.TotalAmount,
-		PayAmount:     req.PayAmount,
-		FreightAmount: req.FreightAmount,
-		PayStatus:     "paid",
-		Remark:        req.Remark,
-		SellerRemark:  req.SellerRemark,
+		TenantID:       tenantID,
+		OrderNo:        orderNo,
+		SourceChannel:  model.SourceManual,
+		Platform:       "DFHAND",
+		Status:         model.StatusPendingAlloc,
+		ShipStatus:     model.ShipWaitShip,
+		BuyerName:      req.BuyerName,
+		BuyerPhone:     req.BuyerPhone,
+		BuyerNick:      req.BuyerNick,
+		TotalAmount:    req.TotalAmount,
+		PayAmount:      req.PayAmount,
+		FreightAmount:  req.FreightAmount,
+		PayStatus:      "unpaid",
+		Remark:         req.Remark,
+		SellerRemark:   req.SellerRemark,
+		ShipContent:    strings.TrimSpace(req.ShipContent),
+		PlatformStatus: model.KDZSWaitAudit,
+	}
+	if req.SellerFlag != nil {
+		o.SellerFlag = *req.SellerFlag
+	}
+	if req.PlatformOrderNo != "" {
+		o.PlatformOrderID = strings.TrimSpace(req.PlatformOrderNo)
 	}
 	now := time.Now()
-	o.PayTime = &now
+	// 手工单付款时间由自营中心有付款记录后回写，创建时不填
+	o.PayTime = nil
+	o.OrderedAt = &now
 	for i, it := range req.Items {
 		qty := it.Quantity
 		if qty <= 0 {
@@ -157,27 +195,28 @@ func (s *OrderService) CreateManual(tenantID, operatorID uint64, req dto.ManualC
 		}
 		amt := it.Price * float64(qty)
 		o.Items = append(o.Items, model.OrderItem{
-			TenantID:    tenantID,
-			LineNo:      i + 1,
-			SkuID:       it.SkuID,
-			SkuCode:     it.SkuCode,
-			ProductName: it.ProductName,
-			SkuSpecs:    it.SkuSpecs,
-			PicURL:      it.PicURL,
-			Quantity:    qty,
-			Price:       it.Price,
-			TotalAmount: amt,
+			TenantID:       tenantID,
+			LineNo:         i + 1,
+			SkuID:          it.SkuID,
+			SkuCode:        it.SkuCode,
+			PlatformSkuID:  it.PlatformSkuID,
+			PlatformItemID: it.PlatformItemID,
+			ProductName:    it.ProductName,
+			SkuSpecs:       it.SkuSpecs,
+			PicURL:         it.PicURL,
+			Quantity:       qty,
+			Price:          it.Price,
+			TotalAmount:    amt,
 		})
-		if o.TotalAmount == 0 {
+		if req.TotalAmount == 0 {
 			o.TotalAmount += amt
 		}
 	}
 	if o.PayAmount == 0 {
 		o.PayAmount = o.TotalAmount
 	}
-	if req.Address != nil {
-		o.Address = mapAddress(tenantID, 0, req.Address)
-	}
+	o.Address = mapAddress(tenantID, 0, req.Address)
+
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
 		if err := tx.CreateOrder(o); err != nil {
 			return err
@@ -194,7 +233,245 @@ func (s *OrderService) CreateManual(tenantID, operatorID uint64, req dto.ManualC
 	if err != nil {
 		return nil, err
 	}
+
+	if syncKDZS && s.storeSync != nil {
+		kdzsRes, syncErr := s.syncManualToKDZS(ctx, bearerToken, req, o)
+		if syncErr != nil {
+			log.Printf("[CreateManual] sync kdzs failed order=%s: %v", o.OrderNo, syncErr)
+			_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+				TenantID:   tenantID,
+				OrderID:    o.ID,
+				ToStatus:   o.Status,
+				Action:     "sync_kdzs_failed",
+				Remark:     "同步快递助手失败: " + syncErr.Error(),
+				OperatorID: operatorID,
+			})
+			return nil, fmt.Errorf("本地订单已创建(%s)，但同步快递助手失败: %w", o.OrderNo, syncErr)
+		}
+		if kdzsRes != nil {
+			updates := map[string]any{}
+			if kdzsRes.Tid != "" {
+				updates["platform_order_id"] = kdzsRes.Tid
+			}
+			if kdzsRes.SysTid != "" {
+				updates["platform_sys_tid"] = kdzsRes.SysTid
+			}
+			if len(updates) > 0 {
+				_ = s.repos.UpdateOrderFields(tenantID, o.ID, updates)
+			}
+			_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+				TenantID:   tenantID,
+				OrderID:    o.ID,
+				ToStatus:   o.Status,
+				Action:     "sync_kdzs",
+				Remark:     fmt.Sprintf("已同步快递助手(%s) tid=%s sysTid=%s", kdzsRes.AccountName, kdzsRes.Tid, kdzsRes.SysTid),
+				OperatorID: operatorID,
+			})
+		}
+	}
 	return s.repos.GetOrder(tenantID, o.ID)
+}
+
+func (s *OrderService) CreateManualBatch(ctx context.Context, tenantID, operatorID uint64, req dto.ManualBatchCreateRequest, bearerToken string) ([]*model.Order, error) {
+	if len(req.Receivers) == 0 {
+		return nil, fmt.Errorf("收件人列表不能为空")
+	}
+	out := make([]*model.Order, 0, len(req.Receivers))
+	for _, r := range req.Receivers {
+		single := dto.ManualCreateOrderRequest{
+			BuyerName:    r.BuyerName,
+			BuyerPhone:   r.BuyerPhone,
+			BuyerTel:     r.BuyerTel,
+			Remark:       req.Remark,
+			ShipContent:  req.ShipContent,
+			SellerFlag:   req.SellerFlag,
+			Address:      r.Address,
+			Items:        req.Items,
+			SaveCustomer: req.SaveCustomer,
+			SyncKDZS:     req.SyncKDZS,
+		}
+		o, err := s.CreateManual(ctx, tenantID, operatorID, single, bearerToken)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
+func (s *OrderService) ParseManualAddress(ctx context.Context, bearerToken string, raw string, batch bool) (json.RawMessage, error) {
+	if s.storeSync == nil {
+		return nil, fmt.Errorf("storesyncagent 未配置")
+	}
+	return s.storeSync.ParseHandAddress(ctx, bearerToken, storesync.ParseAddressRequest{
+		RawAddress: raw,
+		Batch:      batch,
+	})
+}
+
+func (s *OrderService) SearchManualPIMProducts(ctx context.Context, bearerToken, keyword string, page, pageSize int) (json.RawMessage, error) {
+	if s.product == nil {
+		return nil, fmt.Errorf("productcore 未配置")
+	}
+	return s.product.SuperSearchRaw(ctx, bearerToken, keyword, page, pageSize)
+}
+
+func (s *OrderService) SearchManualShopProducts(ctx context.Context, bearerToken string, q storesync.ShopProductQuery) (*storesync.ShopProductListResult, error) {
+	if s.storeSync == nil {
+		return nil, fmt.Errorf("storesyncagent 未配置")
+	}
+	// 手工建单选商品：按规格编码优先，无结果再按规格名称
+	kw := strings.TrimSpace(q.SkuOuterID)
+	if kw == "" {
+		kw = strings.TrimSpace(q.SpuPropertiesName)
+	}
+	if kw == "" {
+		kw = strings.TrimSpace(q.Title)
+	}
+	if kw != "" {
+		byCode := q
+		byCode.Title = ""
+		byCode.SkuOuterID = kw
+		byCode.SpuPropertiesName = ""
+		res, err := s.storeSync.ListProducts(ctx, bearerToken, byCode)
+		if err != nil {
+			return nil, err
+		}
+		if res != nil && len(res.Items) > 0 {
+			return res, nil
+		}
+		byName := q
+		byName.Title = ""
+		byName.SkuOuterID = ""
+		byName.SpuPropertiesName = kw
+		return s.storeSync.ListProducts(ctx, bearerToken, byName)
+	}
+	return s.storeSync.ListProducts(ctx, bearerToken, q)
+}
+
+func (s *OrderService) LookupManualCustomer(tenantID uint64, phone string) (map[string]interface{}, error) {
+	if s.customerCore == nil {
+		return nil, fmt.Errorf("customercore 未配置")
+	}
+	out, err := s.customerCore.GetByPhone(tenantID, phone)
+	if err != nil {
+		// 未找到客户视为空结果，方便前端静默处理
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "不存在") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *OrderService) ListManualCustomerAddresses(tenantID, customerID uint64) ([]customercore.AddressItem, error) {
+	if s.customerCore == nil {
+		return nil, fmt.Errorf("customercore 未配置")
+	}
+	return s.customerCore.ListAddresses(tenantID, customerID)
+}
+
+func (s *OrderService) SearchManualRecipients(tenantID uint64, keyword string, page, pageSize int) (*customercore.RecipientSearchResult, error) {
+	if s.customerCore == nil {
+		return nil, fmt.Errorf("customercore 未配置")
+	}
+	return s.customerCore.SearchRecipients(tenantID, keyword, page, pageSize)
+}
+
+func normalizeManualAddress(req *dto.ManualCreateOrderRequest) {
+	if req.Address == nil {
+		return
+	}
+	if req.Address.Name == "" {
+		req.Address.Name = req.BuyerName
+	}
+	if req.Address.Phone == "" {
+		req.Address.Phone = req.BuyerPhone
+	}
+	if req.Address.Address == "" && req.Address.FullText != "" && req.Address.Province == "" {
+		// 仅有全文时留给一键填充；此处不强制拆分
+		req.Address.Address = req.Address.FullText
+	}
+}
+
+func (s *OrderService) saveManualCustomer(tenantID uint64, req dto.ManualCreateOrderRequest) error {
+	if s.customerCore == nil {
+		return fmt.Errorf("customercore 未配置")
+	}
+	phone := strings.TrimSpace(req.BuyerPhone)
+	if phone == "" {
+		return fmt.Errorf("保存客户需要手机号")
+	}
+	in := customercore.UpsertByPhoneInput{
+		TenantID:    tenantID,
+		Phone:       phone,
+		DisplayName: strings.TrimSpace(req.BuyerName),
+		Source:      "manual_order",
+	}
+	if req.Address != nil {
+		def := int8(1)
+		in.Address = &customercore.AddressInput{
+			ContactName: firstNonEmpty(req.Address.Name, req.BuyerName),
+			Phone:       firstNonEmpty(req.Address.Phone, phone),
+			Province:    req.Address.Province,
+			City:        req.Address.City,
+			District:    req.Address.District,
+			Detail:      firstNonEmpty(req.Address.Address, req.Address.FullText),
+			Label:       "收货地址",
+			IsDefault:   &def,
+		}
+	}
+	_, err := s.customerCore.UpsertByPhone(in)
+	return err
+}
+
+func (s *OrderService) syncManualToKDZS(ctx context.Context, bearerToken string, req dto.ManualCreateOrderRequest, o *model.Order) (*storesync.CreateHandOrderResult, error) {
+	addr := req.Address
+	skus := make([]storesync.HandOrderSku, 0, len(req.Items))
+	for _, it := range req.Items {
+		qty := it.Quantity
+		if qty <= 0 {
+			qty = 1
+		}
+		skus = append(skus, storesync.HandOrderSku{
+			ItemID:   it.PlatformItemID,
+			ItemName: it.ProductName,
+			ItemPic:  it.PicURL,
+			SkuID:    it.PlatformSkuID,
+			SkuCode:  it.SkuCode,
+			SkuName:  it.SkuSpecs,
+			SkuPic:   it.PicURL,
+			Num:      strconv.Itoa(qty),
+			SkuSpec:  it.SkuSpecs,
+			PicPath:  it.PicURL,
+			OuterID:  it.SkuCode,
+		})
+	}
+	flag := o.SellerFlag
+	if req.SellerFlag != nil {
+		flag = *req.SellerFlag
+	}
+	// 对齐快递助手：有商品时建单不写发货内容（打印面单时再按规格填充）；无商品时才写入手填发货内容
+	sendInfo := ""
+	if len(skus) == 0 {
+		sendInfo = strings.TrimSpace(req.ShipContent)
+	}
+	return s.storeSync.CreateHandOrder(ctx, bearerToken, storesync.CreateHandOrderRequest{
+		Recipient:      firstNonEmpty(req.BuyerName, addr.Name),
+		Phone:          firstNonEmpty(req.BuyerPhone, addr.Phone),
+		Tel:            req.BuyerTel,
+		Province:       addr.Province,
+		City:           addr.City,
+		County:         addr.District,
+		ReceiveAddress: firstNonEmpty(addr.Address, addr.FullText),
+		SaveRecipient:  false, // 客户中心由 OrderCore 负责
+		SkuList:        skus,
+		Remark:         req.Remark,
+		SellerFlag:     &flag,
+		SendInfo:       sendInfo,
+		OrderCode:      firstNonEmpty(req.PlatformOrderNo, o.OrderNo),
+		Type:           "2",
+	})
 }
 
 func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, req dto.IngestOrderRequest, bearerToken string) (*model.Order, bool, error) {
@@ -249,31 +526,34 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		}
 		err = s.repos.Transaction(func(tx *repo.Repos) error {
 			fields := map[string]any{
-				"platform":             req.Platform,
-				"platform_sys_tid":     req.PlatformSysTid,
-				"shop_id":              req.ShopID,
-				"shop_name":            req.ShopName,
-				"buyer_nick":           req.BuyerNick,
-				"buyer_name":           req.BuyerName,
-				"buyer_phone":          req.BuyerPhone,
-				"total_amount":         req.TotalAmount,
-				"pay_amount":           req.PayAmount,
-				"freight_amount":       req.FreightAmount,
-				"pay_status":           req.PayStatus,
-				"platform_status":       platformStatus,
-				"platform_status_text":  platformStatusText,
-				"ecommerce_status":      req.EcommerceStatus,
-				"ecommerce_status_text": req.EcommerceStatusText,
-				"after_sale_status":     req.AfterSaleStatus,
+				"platform":               req.Platform,
+				"platform_sys_tid":       req.PlatformSysTid,
+				"shop_id":                req.ShopID,
+				"shop_name":              req.ShopName,
+				"buyer_nick":             req.BuyerNick,
+				"buyer_name":             req.BuyerName,
+				"buyer_phone":            req.BuyerPhone,
+				"total_amount":           req.TotalAmount,
+				"pay_amount":             req.PayAmount,
+				"freight_amount":         req.FreightAmount,
+				"pay_status":             req.PayStatus,
+				"platform_status":        platformStatus,
+				"platform_status_text":   platformStatusText,
+				"ecommerce_status":       req.EcommerceStatus,
+				"ecommerce_status_text":  req.EcommerceStatusText,
+				"after_sale_status":      req.AfterSaleStatus,
 				"after_sale_status_text": req.AfterSaleStatusText,
-				"agent_type":            hint.AgentType,
-				"ship_entry_locked":     hint.ShipEntryLocked,
-				"ship_lock_reason":      hint.ShipLockReason,
-				"remark":                req.Remark,
-				"seller_remark":         req.SellerRemark,
-				"fen_fa_remark":         req.FenFaRemark,
-				"printer_remark":        req.PrinterRemark,
-				"raw_payload":           req.RawPayload,
+				"agent_type":             hint.AgentType,
+				"ship_entry_locked":      hint.ShipEntryLocked,
+				"ship_lock_reason":       hint.ShipLockReason,
+				"remark":                 req.Remark,
+				"seller_remark":          req.SellerRemark,
+				"fen_fa_remark":          req.FenFaRemark,
+				"printer_remark":         req.PrinterRemark,
+				"raw_payload":            req.RawPayload,
+			}
+			if req.SellerFlag != nil {
+				fields["seller_flag"] = *req.SellerFlag
 			}
 			// 平台备注为空时不覆盖本地手工填写
 			if strings.TrimSpace(req.SellerRemark) == "" {
@@ -557,6 +837,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			FactoryID:           req.FactoryID,
 			FactoryName:         req.FactoryName,
 			RawPayload:          req.RawPayload,
+		}
+		if req.SellerFlag != nil {
+			o.SellerFlag = *req.SellerFlag
 		}
 		if hint.ApplySyncAlloc {
 			now := time.Now()
@@ -924,6 +1207,15 @@ func (s *OrderService) ensureSelfOrder(ctx context.Context, o *model.Order, bear
 	if o.OrderedAt != nil {
 		orderedAt = o.OrderedAt.Format("2006-01-02 15:04:05")
 	}
+	payStatus := strings.TrimSpace(o.PayStatus)
+	paidAt := ""
+	if o.PayTime != nil {
+		paidAt = o.PayTime.Format("2006-01-02 15:04:05")
+	}
+	// 电商订单默认已付款（与快递助手入库一致）
+	if payStatus == "" && o.SourceChannel == model.SourceKDZS {
+		payStatus = "paid"
+	}
 	created, err := s.selfCore.CreateSelfOrder(ctx, bearerToken, selfcore.SelfOrderInput{
 		RefSoID:       o.ID,
 		RefTraceID:    o.OrderNo,
@@ -940,6 +1232,8 @@ func (s *OrderService) ensureSelfOrder(ctx context.Context, o *model.Order, bear
 		FenFaRemark:   o.FenFaRemark,
 		PrinterRemark: o.PrinterRemark,
 		OrderedAt:     orderedAt,
+		PayStatus:     payStatus,
+		PaidAt:        paidAt,
 		Items:         items,
 	})
 	if err != nil {
@@ -1920,8 +2214,22 @@ func (s *OrderService) UpdateRemarks(ctx context.Context, tenantID, operatorID, 
 	alloc := strings.TrimSpace(req.AllocRemark)
 	oldSeller := strings.TrimSpace(o.SellerRemark)
 	oldPrinter := strings.TrimSpace(o.PrinterRemark)
+	oldFlag := o.SellerFlag
+	newFlag := oldFlag
+	flagChanged := false
+	if req.SellerFlag != nil {
+		newFlag = *req.SellerFlag
+		if newFlag < 0 {
+			newFlag = 0
+		}
+		if newFlag > 5 {
+			newFlag = 5
+		}
+		flagChanged = newFlag != oldFlag
+	}
+	sellerChanged := seller != oldSeller || flagChanged
 
-	// 快递助手订单：卖家备注 / 打单备注变更时先写回，再落库
+	// 快递助手订单：卖家备注/旗帜 / 打单备注变更时先写回，再落库
 	if o.SourceChannel == model.SourceKDZS && s.storeSync != nil && strings.TrimSpace(bearerToken) != "" {
 		sysTid := strings.TrimSpace(o.PlatformSysTid)
 		if sysTid == "" {
@@ -1930,13 +2238,15 @@ func (s *OrderService) UpdateRemarks(ctx context.Context, tenantID, operatorID, 
 		platform := strings.TrimSpace(o.Platform)
 		if sysTid != "" && platform != "" {
 			tradeStatus := strings.TrimSpace(o.PlatformStatus)
-			if seller != oldSeller {
+			if sellerChanged {
+				flagPtr := &newFlag
 				if err := s.storeSync.UpdateTradeRemark(ctx, bearerToken, storesync.UpdateTradeRemarkRequest{
 					Platform:    platform,
 					TradeStatus: tradeStatus,
 					SysTids:     []string{sysTid},
 					MemoType:    "sellerMemo",
 					Remark:      seller,
+					SellerFlag:  flagPtr,
 				}); err != nil {
 					return nil, fmt.Errorf("写回快递助手卖家备注失败: %w", err)
 				}
@@ -1959,16 +2269,20 @@ func (s *OrderService) UpdateRemarks(ctx context.Context, tenantID, operatorID, 
 	}
 
 	logRemark := "更新卖家/分发/打单/分配备注"
-	if o.SourceChannel == model.SourceKDZS && (seller != oldSeller || printer != oldPrinter) {
+	if o.SourceChannel == model.SourceKDZS && (sellerChanged || printer != oldPrinter) {
 		logRemark = "更新备注并写回快递助手"
 	}
+	fields := map[string]any{
+		"seller_remark":  seller,
+		"fen_fa_remark":  fenFa,
+		"printer_remark": printer,
+		"alloc_remark":   alloc,
+	}
+	if req.SellerFlag != nil {
+		fields["seller_flag"] = newFlag
+	}
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
-		if err := tx.UpdateOrderFields(tenantID, orderID, map[string]any{
-			"seller_remark":  seller,
-			"fen_fa_remark":  fenFa,
-			"printer_remark": printer,
-			"alloc_remark":   alloc,
-		}); err != nil {
+		if err := tx.UpdateOrderFields(tenantID, orderID, fields); err != nil {
 			return err
 		}
 		return tx.AddStatusLog(&model.OrderStatusLog{
@@ -1992,6 +2306,40 @@ func (s *OrderService) UpdateRemarks(ctx context.Context, tenantID, operatorID, 
 		s.syncLinkedPOPurchasePrices(ctx, out, bearerToken)
 	}
 	return out, nil
+}
+
+// UpdatePaymentFromSelf 自营中心回写付款状态；仅手工单更新 pay_time/pay_status，其它渠道忽略。
+func (s *OrderService) UpdatePaymentFromSelf(ctx context.Context, tenantID, orderID uint64, req dto.UpdatePaymentRequest) (*model.Order, error) {
+	o, err := s.repos.GetOrder(tenantID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if o.SourceChannel != model.SourceManual {
+		return o, nil
+	}
+	payStatus := strings.TrimSpace(req.PayStatus)
+	if payStatus == "" {
+		payStatus = "unpaid"
+	}
+	fields := map[string]any{
+		"pay_status": payStatus,
+	}
+	if req.ClearPayTime || strings.TrimSpace(req.PayTime) == "" {
+		fields["pay_time"] = nil
+	} else if t := parseTime(req.PayTime); t != nil {
+		fields["pay_time"] = t
+	}
+	if err := s.repos.UpdateOrderFields(tenantID, orderID, fields); err != nil {
+		return nil, err
+	}
+	_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+		TenantID: tenantID,
+		OrderID:  orderID,
+		ToStatus: o.Status,
+		Action:   "sync_payment_from_self",
+		Remark:   fmt.Sprintf("自营付款回写 payStatus=%s", payStatus),
+	})
+	return s.repos.GetOrder(tenantID, orderID)
 }
 
 func (s *OrderService) syncLinkedPOPurchasePrices(ctx context.Context, o *model.Order, bearerToken string) {
@@ -2356,8 +2704,8 @@ func (s *OrderService) syncKDZSByTid(ctx context.Context, tenantID, operatorID u
 	// 按列表态探测：tid 回查常用 ALL/电商态，会把「待推单」误成「待发货」
 	probeStatuses := []string{model.KDZSWaitAudit, model.KDZSWaitSend, "shipped", "completed", ""}
 	var (
-		result *storesync.OrderListResult
-		err    error
+		result        *storesync.OrderListResult
+		err           error
 		matchedStatus string
 	)
 	for i, st := range probeStatuses {
@@ -2460,10 +2808,10 @@ func (s *OrderService) RefreshOpenKDZSOrders(ctx context.Context, tenantID, oper
 			platform = "FXG"
 		}
 		result, err := s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
-			Platform:  platform,
-			Tid:       tid,
-			PageNo:    1,
-			PageSize:  5,
+			Platform: platform,
+			Tid:      tid,
+			PageNo:   1,
+			PageSize: 5,
 		})
 		if err != nil {
 			lastErr = err
@@ -3049,6 +3397,7 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 		OrderTime:           t.CreateTime,
 		Remark:              t.BuyerMemo,
 		SellerRemark:        t.SellerMemo,
+		SellerFlag:          t.SellerFlag,
 		FenFaRemark:         t.FenFaMemo,
 		PrinterRemark:       t.PrinterMemo,
 		FactoryID:           t.FactoryID,
@@ -3646,15 +3995,15 @@ func syncIngestLogistics(tx *repo.Repos, tenantID, orderID uint64, req dto.Inges
 			shipAt = &now
 		}
 		sh := &model.OrderShipment{
-			TenantID:       tenantID,
-			OrderID:        orderID,
-			ShipmentNo:     shipNo,
-			ExpressCompany: company,
-			ExpressNo:      no,
-			NeedTracking:   true,
-			CallbackStatus: model.CallbackSkipped,
+			TenantID:        tenantID,
+			OrderID:         orderID,
+			ShipmentNo:      shipNo,
+			ExpressCompany:  company,
+			ExpressNo:       no,
+			NeedTracking:    true,
+			CallbackStatus:  model.CallbackSkipped,
 			CallbackMessage: "快递助手同步",
-			ShippedAt:      shipAt,
+			ShippedAt:       shipAt,
 		}
 		if err := tx.CreateShipment(sh); err != nil {
 			return err
@@ -3706,17 +4055,17 @@ func mapStoreSalesToIngest(so storecore.SalesOrder) dto.IngestOrderRequest {
 	}
 	ref := fmt.Sprintf("%d", so.ID)
 	return dto.IngestOrderRequest{
-		SourceChannel: model.SourceStore,
+		SourceChannel:   model.SourceStore,
 		PlatformOrderID: so.OrderNo,
-		ExternalRefID: ref,
-		Status:        status,
-		BuyerName:     so.CustomerName,
-		BuyerPhone:    so.CustomerPhone,
-		TotalAmount:   so.TotalAmount,
-		PayAmount:     so.PayAmount,
-		PayStatus:     so.PayStatus,
-		Remark:        so.Remark,
-		SellerRemark:  so.SellerRemark,
+		ExternalRefID:   ref,
+		Status:          status,
+		BuyerName:       so.CustomerName,
+		BuyerPhone:      so.CustomerPhone,
+		TotalAmount:     so.TotalAmount,
+		PayAmount:       so.PayAmount,
+		PayStatus:       so.PayStatus,
+		Remark:          so.Remark,
+		SellerRemark:    so.SellerRemark,
 		Address: &dto.AddressInput{
 			Name:     so.CustomerName,
 			Phone:    so.CustomerPhone,

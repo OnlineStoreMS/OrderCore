@@ -16,6 +16,7 @@ integrations:
   selfcore_api_url: "http://127.0.0.1:8103"
   storesyncagent_api_url: "http://127.0.0.1:8097"
   storecore_api_url: "http://127.0.0.1:8094"
+  customercore_api_url: "http://127.0.0.1:8099"
 
 cors:
   allow_origins:

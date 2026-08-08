@@ -8,6 +8,7 @@ import { LineChart, BarChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { fetchDashboard, labelStatus, orderTypeOptions, syncKDZS, syncStore } from '../api/orders'
+import ManualCreateDialog from './order/ManualCreateDialog.vue'
 
 echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
@@ -60,6 +61,7 @@ function defaultRange(): [string, string] {
 const router = useRouter()
 const loading = ref(false)
 const syncing = ref('')
+const manualVisible = ref(false)
 const cards = ref<DashCards>({})
 const byStatus = ref<Record<string, number>>({})
 const bySource = ref<Record<string, number>>({})
@@ -455,6 +457,14 @@ async function doSyncStore() {
 
 watch(trend, () => nextTick().then(renderCharts))
 
+function onManualCreated(orderId?: number) {
+  if (orderId) {
+    router.push(`/orders/${orderId}`)
+    return
+  }
+  load()
+}
+
 onMounted(() => {
   load()
   window.addEventListener('resize', onResize)
@@ -469,9 +479,14 @@ onUnmounted(() => {
 <template>
   <div v-loading="loading" class="page">
     <div class="toolbar">
-      <el-button type="primary" :loading="syncing === 'kdzs'" @click="doSyncKDZS">同步电商订单</el-button>
-      <el-button :loading="syncing === 'store'" @click="doSyncStore">同步门店订单</el-button>
-      <el-button @click="router.push('/orders')">订单列表</el-button>
+      <div class="toolbar-left">
+        <el-button type="primary" :loading="syncing === 'kdzs'" @click="doSyncKDZS">同步电商订单</el-button>
+        <el-button :loading="syncing === 'store'" @click="doSyncStore">同步门店订单</el-button>
+        <el-button @click="router.push('/orders')">订单列表</el-button>
+      </div>
+      <div class="toolbar-right">
+        <el-button type="primary" @click="manualVisible = true">手工建单</el-button>
+      </div>
     </div>
 
     <div class="section-head">订单类型</div>
@@ -587,12 +602,21 @@ onUnmounted(() => {
         <div v-if="!Object.keys(byStatus).length" class="empty">暂无订单</div>
       </div>
     </section>
+
+    <ManualCreateDialog v-model="manualVisible" @created="onManualCreated" />
   </div>
 </template>
 
 <style scoped>
 .page { display: flex; flex-direction: column; gap: 14px; }
-.toolbar { display: flex; gap: 8px; flex-wrap: wrap; }
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.toolbar-left, .toolbar-right { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .section-head { font-size: 13px; font-weight: 600; color: #64748b; margin-top: 2px; }
 .row-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .range-tools { display: flex; align-items: center; gap: 8px; }

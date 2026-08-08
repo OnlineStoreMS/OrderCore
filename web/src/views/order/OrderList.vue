@@ -4,7 +4,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   buildOrderCopyText,
-  createManualOrder,
   decryptOrders,
   formatAddress,
   formatDateTime,
@@ -24,6 +23,7 @@ import {
 import { dateShortcuts, dateRangeDefaultTime, formatDateTimeLocal } from '../../utils/date'
 import { copyToClipboard } from '../../utils/clipboard'
 import { bindTableShiftWheel, useTableFillHeight } from '../../composables/useTableFillHeight'
+import SellerFlag from '../../components/SellerFlag.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -127,17 +127,6 @@ function applyFiltersFromRoute() {
   filters.payRange = null
 }
 
-const manualVisible = ref(false)
-const manualForm = reactive({
-  buyerName: '',
-  buyerPhone: '',
-  remark: '',
-  productName: '',
-  quantity: 1,
-  price: 0,
-  address: '',
-})
-
 async function load() {
   loading.value = true
   try {
@@ -196,27 +185,6 @@ watch(
   },
   { immediate: true },
 )
-
-async function submitManual() {
-  if (!manualForm.productName) {
-    ElMessage.warning('请填写商品名称')
-    return
-  }
-  try {
-    const order = await createManualOrder({
-      buyerName: manualForm.buyerName,
-      buyerPhone: manualForm.buyerPhone,
-      remark: manualForm.remark,
-      address: { name: manualForm.buyerName, phone: manualForm.buyerPhone, fullText: manualForm.address },
-      items: [{ productName: manualForm.productName, quantity: manualForm.quantity, price: manualForm.price }],
-    })
-    ElMessage.success('手工订单已创建')
-    manualVisible.value = false
-    router.push(`/orders/${order.id}`)
-  } catch (e: any) {
-    ElMessage.error(e.message || '创建失败')
-  }
-}
 
 const decrypting = ref(false)
 const decryptRow = reactive<Record<number, boolean>>({})
@@ -390,7 +358,6 @@ async function copyOrderText(order: Order, ev?: Event) {
         <el-form-item>
           <el-button type="primary" @click="onFilterChange">查询</el-button>
           <el-button type="warning" plain :loading="decrypting" :disabled="!list.length" @click="decryptPage">本页解密</el-button>
-          <el-button type="primary" plain @click="manualVisible = true">手工建单</el-button>
         </el-form-item>
       </el-form>
     </div>
@@ -444,10 +411,17 @@ async function copyOrderText(order: Order, ev?: Event) {
           <span v-else>-</span>
         </template>
       </el-table-column>
-      <el-table-column label="留言备注" min-width="180">
+      <el-table-column label="留言备注" min-width="200">
         <template #default="{ row }">
           <div v-if="formatRemarkLines(row).length" class="remark-lines">
-            <div v-for="(line, idx) in formatRemarkLines(row)" :key="idx" class="remark-line">{{ line }}</div>
+            <div v-for="(line, idx) in formatRemarkLines(row)" :key="idx" class="remark-line">
+              <SellerFlag
+                v-if="line.kind === 'seller'"
+                :model-value="line.sellerFlag ?? 0"
+                :size="14"
+              />
+              <span>{{ line.text }}</span>
+            </div>
           </div>
           <span v-else class="muted">-</span>
         </template>
@@ -536,22 +510,6 @@ async function copyOrderText(order: Order, ev?: Event) {
         @current-change="load"
       />
     </div>
-
-    <el-dialog v-model="manualVisible" title="手工建单" width="520px">
-      <el-form label-width="90px">
-        <el-form-item label="买家姓名"><el-input v-model="manualForm.buyerName" /></el-form-item>
-        <el-form-item label="手机"><el-input v-model="manualForm.buyerPhone" /></el-form-item>
-        <el-form-item label="地址"><el-input v-model="manualForm.address" type="textarea" /></el-form-item>
-        <el-form-item label="商品"><el-input v-model="manualForm.productName" /></el-form-item>
-        <el-form-item label="数量"><el-input-number v-model="manualForm.quantity" :min="1" /></el-form-item>
-        <el-form-item label="单价"><el-input-number v-model="manualForm.price" :min="0" :precision="2" /></el-form-item>
-        <el-form-item label="备注"><el-input v-model="manualForm.remark" /></el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="manualVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitManual">创建</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -604,6 +562,13 @@ async function copyOrderText(order: Order, ev?: Event) {
   word-break: keep-all;
 }
 .remark-lines { display: flex; flex-direction: column; gap: 2px; line-height: 1.4; }
-.remark-line { font-size: 12px; color: #606266; word-break: break-all; }
+.remark-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  font-size: 12px;
+  color: #606266;
+  word-break: break-all;
+}
 .muted { color: #c0c4cc; }
 </style>

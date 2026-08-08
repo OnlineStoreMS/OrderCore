@@ -30,6 +30,7 @@ import {
 import { copyToClipboard } from '../../utils/clipboard'
 import { pushOrder } from '../../api/settings'
 import { EXPRESS_COMPANIES, findExpressCompany } from '../../constants/expressCompanies'
+import SellerFlag from '../../components/SellerFlag.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -76,6 +77,7 @@ const suppliers = ref<SupplierItem[]>([])
 const savingRemarks = ref(false)
 const remarkForm = reactive({
   sellerRemark: '',
+  sellerFlag: 0,
   fenFaRemark: '',
   printerRemark: '',
   allocRemark: '',
@@ -83,6 +85,7 @@ const remarkForm = reactive({
 
 function syncRemarkForm(o: Order | null) {
   remarkForm.sellerRemark = o?.sellerRemark || ''
+  remarkForm.sellerFlag = o?.sellerFlag ?? 0
   remarkForm.fenFaRemark = o?.fenFaRemark || ''
   remarkForm.printerRemark = o?.printerRemark || ''
   remarkForm.allocRemark = o?.allocRemark || ''
@@ -170,10 +173,17 @@ async function load() {
   }
 }
 
+function onSellerFlagChange(v: number | null) {
+  remarkForm.sellerFlag = v ?? 0
+  void saveRemarks()
+}
+
 async function saveRemarks() {
   if (!order.value || savingRemarks.value) return
+  const flag = remarkForm.sellerFlag ?? 0
   const same =
     (remarkForm.sellerRemark || '') === (order.value.sellerRemark || '') &&
+    flag === (order.value.sellerFlag ?? 0) &&
     (remarkForm.fenFaRemark || '') === (order.value.fenFaRemark || '') &&
     (remarkForm.printerRemark || '') === (order.value.printerRemark || '') &&
     (remarkForm.allocRemark || '') === (order.value.allocRemark || '')
@@ -181,11 +191,13 @@ async function saveRemarks() {
   const writeBackKDZS =
     order.value.sourceChannel === 'kdzs' &&
     ((remarkForm.sellerRemark || '') !== (order.value.sellerRemark || '') ||
+      flag !== (order.value.sellerFlag ?? 0) ||
       (remarkForm.printerRemark || '') !== (order.value.printerRemark || ''))
   savingRemarks.value = true
   try {
     order.value = await updateOrderRemarks(id, {
       sellerRemark: remarkForm.sellerRemark,
+      sellerFlag: flag,
       fenFaRemark: remarkForm.fenFaRemark,
       printerRemark: remarkForm.printerRemark,
       allocRemark: remarkForm.allocRemark,
@@ -358,15 +370,24 @@ onMounted(load)
           </div>
         </el-descriptions-item>
         <el-descriptions-item label="买家留言">{{ order.remark || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="发货内容" :span="2">{{ order.shipContent || '-' }}</el-descriptions-item>
         <el-descriptions-item label="卖家备注">
-          <el-input
-            v-model="remarkForm.sellerRemark"
-            class="remark-input"
-            size="small"
-            :placeholder="order.sourceChannel === 'kdzs' ? '保存后写回快递助手' : '点击填写'"
-            clearable
-            @change="saveRemarks"
-          />
+          <div class="seller-remark-row">
+            <SellerFlag
+              :model-value="remarkForm.sellerFlag"
+              mode="edit"
+              :size="16"
+              @update:model-value="onSellerFlagChange"
+            />
+            <el-input
+              v-model="remarkForm.sellerRemark"
+              class="remark-input"
+              size="small"
+              :placeholder="order.sourceChannel === 'kdzs' ? '保存后写回快递助手' : '点击填写'"
+              clearable
+              @change="saveRemarks"
+            />
+          </div>
         </el-descriptions-item>
         <el-descriptions-item label="分发备注">
           <el-input
@@ -542,4 +563,10 @@ h3 { margin: 8px 0 0; font-size: 15px; color: #334155; }
 .addr-actions { margin-top: 6px; display: flex; gap: 8px; }
 .alloc-tip { margin: 0 0 12px 110px; color: #64748b; font-size: 12px; line-height: 1.5; }
 .remark-input { width: 100%; max-width: 220px; }
+.seller-remark-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
 </style>

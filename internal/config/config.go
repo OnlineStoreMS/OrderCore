@@ -33,11 +33,12 @@ type AuthConfig struct {
 }
 
 type IntegrationsConfig struct {
-	ProductCoreAPIURL     string `mapstructure:"productcore_api_url"`
-	SupplyCoreAPIURL      string `mapstructure:"supplycore_api_url"`
-	SelfCoreAPIURL        string `mapstructure:"selfcore_api_url"`
-	StoreSyncAgentAPIURL  string `mapstructure:"storesyncagent_api_url"`
-	StoreCoreAPIURL       string `mapstructure:"storecore_api_url"`
+	ProductCoreAPIURL    string `mapstructure:"productcore_api_url"`
+	SupplyCoreAPIURL     string `mapstructure:"supplycore_api_url"`
+	SelfCoreAPIURL       string `mapstructure:"selfcore_api_url"`
+	StoreSyncAgentAPIURL string `mapstructure:"storesyncagent_api_url"`
+	StoreCoreAPIURL      string `mapstructure:"storecore_api_url"`
+	CustomerCoreAPIURL   string `mapstructure:"customercore_api_url"`
 }
 
 type StorageConfig struct {
@@ -103,6 +104,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Integrations.StoreCoreAPIURL == "" {
 		cfg.Integrations.StoreCoreAPIURL = "http://127.0.0.1:8094"
+	}
+	if cfg.Integrations.CustomerCoreAPIURL == "" {
+		cfg.Integrations.CustomerCoreAPIURL = "http://127.0.0.1:8099"
 	}
 	if cfg.Storage.LocalPath == "" {
 		cfg.Storage.LocalPath = "./data/uploads"

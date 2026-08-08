@@ -1,12 +1,14 @@
 package admin
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"ordercore/internal/dto"
+	"ordercore/internal/integration/storesync"
 	"ordercore/internal/integration/supplycore"
 	"ordercore/internal/pkg/authcontext"
 	"ordercore/internal/pkg/response"
@@ -117,12 +119,118 @@ func (h *Handlers) CreateManual(c *gin.Context) {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	o, err := h.orders.CreateManual(authcontext.TenantID(c), authcontext.UserID(c), req)
+	o, err := h.orders.CreateManual(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), req, authcontext.BearerToken(c))
 	if err != nil {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
 	response.Created(c, o)
+}
+
+func (h *Handlers) CreateManualBatch(c *gin.Context) {
+	var req dto.ManualBatchCreateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	list, err := h.orders.CreateManualBatch(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), req, authcontext.BearerToken(c))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.Created(c, gin.H{"orders": list, "total": len(list)})
+}
+
+func (h *Handlers) ParseManualAddress(c *gin.Context) {
+	var req struct {
+		RawAddress string `json:"rawAddress"`
+		Batch      bool   `json:"batch"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	data, err := h.orders.ParseManualAddress(c.Request.Context(), authcontext.BearerToken(c), req.RawAddress, req.Batch)
+	if err != nil {
+		response.Fail(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	var v any
+	if len(data) > 0 {
+		_ = json.Unmarshal(data, &v)
+	}
+	response.OK(c, v)
+}
+
+func (h *Handlers) SearchManualPIMProducts(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
+	data, err := h.orders.SearchManualPIMProducts(c.Request.Context(), authcontext.BearerToken(c), c.Query("keyword"), page, pageSize)
+	if err != nil {
+		response.Fail(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	var v any
+	if len(data) > 0 {
+		_ = json.Unmarshal(data, &v)
+	}
+	response.OK(c, v)
+}
+
+func (h *Handlers) SearchManualShopProducts(c *gin.Context) {
+	pageNo, _ := strconv.Atoi(c.DefaultQuery("pageNo", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	if keyword == "" {
+		keyword = strings.TrimSpace(c.Query("title"))
+	}
+	result, err := h.orders.SearchManualShopProducts(c.Request.Context(), authcontext.BearerToken(c), storesync.ShopProductQuery{
+		Platform:          c.Query("platform"),
+		ShopID:            c.Query("shopId"),
+		SkuOuterID:        keyword,
+		SpuPropertiesName: keyword,
+		PageNo:            pageNo,
+		PageSize:          pageSize,
+	})
+	if err != nil {
+		response.Fail(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	response.OK(c, result)
+}
+
+func (h *Handlers) LookupManualCustomer(c *gin.Context) {
+	data, err := h.orders.LookupManualCustomer(authcontext.TenantID(c), c.Query("phone"))
+	if err != nil {
+		response.Fail(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	response.OK(c, data)
+}
+
+func (h *Handlers) ListManualCustomerAddresses(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, "invalid id")
+		return
+	}
+	list, err := h.orders.ListManualCustomerAddresses(authcontext.TenantID(c), id)
+	if err != nil {
+		response.Fail(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	response.OK(c, list)
+}
+
+func (h *Handlers) SearchManualRecipients(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
+	result, err := h.orders.SearchManualRecipients(authcontext.TenantID(c), c.Query("keyword"), page, pageSize)
+	if err != nil {
+		response.Fail(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	response.OK(c, result)
 }
 
 func (h *Handlers) Ingest(c *gin.Context) {
@@ -248,6 +356,25 @@ func (h *Handlers) UpdateRemarks(c *gin.Context) {
 		return
 	}
 	o, err := h.orders.UpdateRemarks(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), id, req, authcontext.BearerToken(c))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, o)
+}
+
+func (h *Handlers) UpdatePayment(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, "无效 ID")
+		return
+	}
+	var req dto.UpdatePaymentRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	o, err := h.orders.UpdatePaymentFromSelf(c.Request.Context(), authcontext.TenantID(c), id, req)
 	if err != nil {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return

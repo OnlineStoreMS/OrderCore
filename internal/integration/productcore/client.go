@@ -107,3 +107,59 @@ func (c *Client) ResolveSkuIDByCode(ctx context.Context, bearerToken, skuCode st
 	}
 	return 0, nil
 }
+
+// SuperSearchRaw 透传 ProductCore super-search 原始 data，供手工建单商品选择。
+func (c *Client) SuperSearchRaw(ctx context.Context, bearerToken, keyword string, page, pageSize int) (json.RawMessage, error) {
+	if c == nil || c.baseURL == "" {
+		return nil, fmt.Errorf("productcore url not configured")
+	}
+	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		return nil, fmt.Errorf("keyword is required")
+	}
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 20
+	}
+	q := url.Values{}
+	q.Set("keyword", keyword)
+	q.Set("page", strconv.Itoa(page))
+	q.Set("pageSize", strconv.Itoa(pageSize))
+	reqURL := c.baseURL + "/api/v1/admin/super-search?" + q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	token := strings.TrimSpace(bearerToken)
+	if token != "" {
+		if !strings.HasPrefix(strings.ToLower(token), "bearer ") {
+			token = "Bearer " + token
+		}
+		req.Header.Set("Authorization", token)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("productcore: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("productcore http %d", resp.StatusCode)
+	}
+	var wrapped apiBody
+	if err := json.Unmarshal(raw, &wrapped); err != nil {
+		return nil, err
+	}
+	if wrapped.Code != 200 {
+		return nil, fmt.Errorf("%s", wrapped.Message)
+	}
+	if len(wrapped.Data) == 0 {
+		return json.RawMessage(`{"list":[],"total":0}`), nil
+	}
+	return wrapped.Data, nil
+}

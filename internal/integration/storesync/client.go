@@ -57,39 +57,40 @@ type TradeGoods struct {
 }
 
 type TradeOrder struct {
-	Platform          string       `json:"platform"`
-	PlatformName      string       `json:"platformName"`
-	SysTids           []string     `json:"sysTids"`
-	Tids              []string     `json:"tids"`
-	BuyerNick         string       `json:"buyerNick"`
-	ReceiverName      string       `json:"receiverName"`
-	ReceiverMobile    string       `json:"receiverMobile"`
-	ReceiverAddress   string       `json:"receiverAddress"`
-	Payment           float64      `json:"payment"`
-	PostFee           float64      `json:"postFee"`
-	TradeStatus             string       `json:"tradeStatus"`
-	StatusText              string       `json:"statusText"`
-	PlatformOrderStatus     string       `json:"platformOrderStatus"`
-	PlatformOrderStatusText string       `json:"platformOrderStatusText"`
-	AfterSaleStatus         string       `json:"afterSaleStatus"`
-	AfterSaleStatusText     string       `json:"afterSaleStatusText"`
-	CreateTime              string       `json:"createTime"`
-	PayTime                 string       `json:"payTime"`
-	ShopName                string       `json:"shopName"`
-	ShopID                  string       `json:"shopId"`
-	Goods                   []TradeGoods `json:"goods"`
-	BuyerMemo               string       `json:"buyerMemo"`
-	SellerMemo              string       `json:"sellerMemo"`
-	FenFaMemo               string       `json:"fenFaMemo"`
-	PrinterMemo             string       `json:"printerMemo"`
-	AgentType               int          `json:"agentType"`
-	FactoryID               string       `json:"factoryId"`
-	FactoryName             string       `json:"factoryName"`
-	FormattedReceiver       string       `json:"formattedReceiver"`
-	ExpressCompany          string       `json:"expressCompany"`
-	ExpressCode             string       `json:"expressCode"`
-	ExpressNo               string       `json:"expressNo"`
-	ShippedAt               string       `json:"shippedAt"`
+	Platform                string           `json:"platform"`
+	PlatformName            string           `json:"platformName"`
+	SysTids                 []string         `json:"sysTids"`
+	Tids                    []string         `json:"tids"`
+	BuyerNick               string           `json:"buyerNick"`
+	ReceiverName            string           `json:"receiverName"`
+	ReceiverMobile          string           `json:"receiverMobile"`
+	ReceiverAddress         string           `json:"receiverAddress"`
+	Payment                 float64          `json:"payment"`
+	PostFee                 float64          `json:"postFee"`
+	TradeStatus             string           `json:"tradeStatus"`
+	StatusText              string           `json:"statusText"`
+	PlatformOrderStatus     string           `json:"platformOrderStatus"`
+	PlatformOrderStatusText string           `json:"platformOrderStatusText"`
+	AfterSaleStatus         string           `json:"afterSaleStatus"`
+	AfterSaleStatusText     string           `json:"afterSaleStatusText"`
+	CreateTime              string           `json:"createTime"`
+	PayTime                 string           `json:"payTime"`
+	ShopName                string           `json:"shopName"`
+	ShopID                  string           `json:"shopId"`
+	Goods                   []TradeGoods     `json:"goods"`
+	BuyerMemo               string           `json:"buyerMemo"`
+	SellerMemo              string           `json:"sellerMemo"`
+	SellerFlag              *int             `json:"sellerFlag"` // 0灰 1红 2黄 3绿 4蓝 5紫；nil=未带回
+	FenFaMemo               string           `json:"fenFaMemo"`
+	PrinterMemo             string           `json:"printerMemo"`
+	AgentType               int              `json:"agentType"`
+	FactoryID               string           `json:"factoryId"`
+	FactoryName             string           `json:"factoryName"`
+	FormattedReceiver       string           `json:"formattedReceiver"`
+	ExpressCompany          string           `json:"expressCompany"`
+	ExpressCode             string           `json:"expressCode"`
+	ExpressNo               string           `json:"expressNo"`
+	ShippedAt               string           `json:"shippedAt"`
 	Logistics               []TradeLogistics `json:"logistics"`
 }
 
@@ -265,6 +266,7 @@ type UpdateTradeRemarkRequest struct {
 	SysTids     []string `json:"sysTids"`
 	MemoType    string   `json:"memoType"` // sellerMemo | printerMemo | fenFaMemo
 	Remark      string   `json:"remark"`
+	SellerFlag  *int     `json:"sellerFlag,omitempty"` // 卖家备注旗帜
 }
 
 func (c *Client) UpdateTradeRemark(ctx context.Context, token string, req UpdateTradeRemarkRequest) error {
@@ -323,6 +325,202 @@ type ShipCallbackResult struct {
 func (c *Client) ShipCallback(ctx context.Context, token string, req ShipCallbackRequest) (*ShipCallbackResult, error) {
 	var result ShipCallbackResult
 	if err := c.post(ctx, token, c.baseURL+"/api/v1/admin/orders/ship-callback", req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+type HandOrderSku struct {
+	ItemID     string `json:"itemId,omitempty"`
+	ItemCode   string `json:"itemCode,omitempty"`
+	ItemName   string `json:"itemName,omitempty"`
+	ItemPic    string `json:"itemPic,omitempty"`
+	SkuID      string `json:"skuId,omitempty"`
+	SkuCode    string `json:"skuCode,omitempty"`
+	SkuName    string `json:"skuName,omitempty"`
+	SkuPic     string `json:"skuPic,omitempty"`
+	Num        string `json:"num,omitempty"`
+	SkuSpec    string `json:"skuSpec,omitempty"`
+	ShortName  string `json:"shortName,omitempty"`
+	PicPath    string `json:"picPath,omitempty"`
+	OuterID    string `json:"outerId,omitempty"`
+	SkuOuterID string `json:"skuOuterId,omitempty"`
+	Platform   string `json:"platform,omitempty"`
+	ShopID     string `json:"shopId,omitempty"`
+	ShopName   string `json:"shopName,omitempty"`
+}
+
+type CreateHandOrderRequest struct {
+	Recipient      string         `json:"recipient"`
+	Phone          string         `json:"phone"`
+	Tel            string         `json:"tel"`
+	Province       string         `json:"province"`
+	City           string         `json:"city"`
+	County         string         `json:"county"`
+	ReceiveAddress string         `json:"receiveaddress"`
+	SaveRecipient  bool           `json:"saveRecipient"`
+	SkuList        []HandOrderSku `json:"skuList"`
+	Remark         string         `json:"remark"`
+	SellerFlag     *int           `json:"sellerFlag"`
+	SendInfo       string         `json:"sendInfo"`
+	OrderCode      string         `json:"orderCode"`
+	Type           string         `json:"type"`
+}
+
+type CreateHandOrderResult struct {
+	AccountCode string `json:"accountCode"`
+	AccountName string `json:"accountName"`
+	SysTid      string `json:"sysTid"`
+	Tid         string `json:"tid"`
+}
+
+type ParseAddressRequest struct {
+	RawAddress string `json:"rawAddress"`
+	Batch      bool   `json:"batch"`
+}
+
+type ParsedAddress struct {
+	Name    string `json:"name"`
+	Phone   string `json:"phone"`
+	Tel     string `json:"tel"`
+	Address struct {
+		Province string `json:"province"`
+		City     string `json:"city"`
+		District string `json:"district"`
+		Detail   string `json:"detail"`
+		Str      string `json:"str"`
+	} `json:"address"`
+	ShipContent string `json:"shipContent"`
+}
+
+func (c *Client) ParseHandAddress(ctx context.Context, token string, req ParseAddressRequest) (json.RawMessage, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("storesyncagent url not configured")
+	}
+	var raw json.RawMessage
+	if err := c.post(ctx, token, c.baseURL+"/api/v1/admin/orders/hand/parse-address", req, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+func (c *Client) CreateHandOrder(ctx context.Context, token string, req CreateHandOrderRequest) (*CreateHandOrderResult, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("storesyncagent url not configured")
+	}
+	var result CreateHandOrderResult
+	if err := c.post(ctx, token, c.baseURL+"/api/v1/admin/orders/hand/create", req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+type HandOrderReceiver struct {
+	Recipient      string `json:"recipient"`
+	Phone          string `json:"phone"`
+	Tel            string `json:"tel,omitempty"`
+	Province       string `json:"province"`
+	City           string `json:"city"`
+	County         string `json:"county"`
+	ReceiveAddress string `json:"receiveaddress"`
+}
+
+type BatchCreateHandOrderRequest struct {
+	CreateHandOrderRequest
+	Receivers []HandOrderReceiver `json:"receivers"`
+}
+
+type BatchCreateHandOrderResult struct {
+	AccountCode string `json:"accountCode"`
+	AccountName string `json:"accountName"`
+	KDZS        struct {
+		SuccessList        []string          `json:"successList"`
+		SuccessRealList    []string          `json:"successRealList"`
+		SuccessNotItemList []string          `json:"successNotItemList"`
+		FailList           []string          `json:"failList"`
+		FailMessageMap     map[string]string `json:"failMessageMap"`
+		AllSuccess         bool              `json:"allSuccess"`
+		AllFail            bool              `json:"allFail"`
+	} `json:"kdzs"`
+}
+
+func (c *Client) BatchCreateHandOrder(ctx context.Context, token string, req BatchCreateHandOrderRequest) (*BatchCreateHandOrderResult, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("storesyncagent url not configured")
+	}
+	var result BatchCreateHandOrderResult
+	if err := c.post(ctx, token, c.baseURL+"/api/v1/admin/orders/hand/batch-create", req, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+type ShopProductQuery struct {
+	Platform          string
+	ShopID            string
+	Title             string
+	SkuOuterID        string // 规格编码
+	SpuPropertiesName string // 规格名称
+	PageNo            int
+	PageSize          int
+}
+
+type ShopProductSKU struct {
+	SkuID          string `json:"skuId"`
+	PropertiesName string `json:"propertiesName"`
+	OuterID        string `json:"outerId"`
+	Price          string `json:"price"`
+	PicURL         string `json:"picUrl"`
+}
+
+type ShopProductItem struct {
+	ItemID   string           `json:"itemId"`
+	Title    string           `json:"title"`
+	OuterID  string           `json:"outerId"`
+	PicURL   string           `json:"picUrl"`
+	Platform string           `json:"platform"`
+	ShopID   string           `json:"shopId"`
+	ShopName string           `json:"shopName"`
+	Skus     []ShopProductSKU `json:"skus"`
+}
+
+type ShopProductListResult struct {
+	Total    int               `json:"total"`
+	PageNo   int               `json:"pageNo"`
+	PageSize int               `json:"pageSize"`
+	Items    []ShopProductItem `json:"items"`
+}
+
+func (c *Client) ListProducts(ctx context.Context, token string, q ShopProductQuery) (*ShopProductListResult, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("storesyncagent url not configured")
+	}
+	u, _ := url.Parse(c.baseURL + "/api/v1/admin/products")
+	qs := u.Query()
+	if q.Platform != "" {
+		qs.Set("platform", q.Platform)
+	}
+	if q.ShopID != "" {
+		qs.Set("shopId", q.ShopID)
+	}
+	if q.Title != "" {
+		qs.Set("title", q.Title)
+	}
+	if q.SkuOuterID != "" {
+		qs.Set("skuOuterId", q.SkuOuterID)
+	}
+	if q.SpuPropertiesName != "" {
+		qs.Set("spuPropertiesName", q.SpuPropertiesName)
+	}
+	if q.PageNo > 0 {
+		qs.Set("pageNo", strconv.Itoa(q.PageNo))
+	}
+	if q.PageSize > 0 {
+		qs.Set("pageSize", strconv.Itoa(q.PageSize))
+	}
+	u.RawQuery = qs.Encode()
+	var result ShopProductListResult
+	if err := c.get(ctx, token, u.String(), &result); err != nil {
 		return nil, err
 	}
 	return &result, nil

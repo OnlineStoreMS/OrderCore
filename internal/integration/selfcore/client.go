@@ -62,6 +62,8 @@ type SelfOrderInput struct {
 	FenFaRemark   string               `json:"fenFaRemark,omitempty"`
 	PrinterRemark string               `json:"printerRemark,omitempty"`
 	OrderedAt     string               `json:"orderedAt,omitempty"`
+	PayStatus     string               `json:"payStatus,omitempty"`
+	PaidAt        string               `json:"paidAt,omitempty"`
 	Items         []SelfOrderItemInput `json:"items"`
 }
 
