@@ -535,7 +535,9 @@ function buildItemsPayload() {
     }))
 }
 
-async function submit() {
+type CreateAction = 'create_only' | 'create_and_push' | 'create_and_print'
+
+async function submit(action: CreateAction) {
   const payloadItems = buildItemsPayload()
   // 对齐快递助手：有商品时建单不传发货内容；无商品时才写入
   const shipContent = payloadItems.length ? '' : (form.shipContent || '').trim()
@@ -565,9 +567,10 @@ async function submit() {
         shipContent,
         sellerFlag: form.sellerFlag,
         saveCustomer: form.saveCustomer,
-        syncKdzs: form.syncKdzs,
+        syncKdzs: true,
+        createAction: action,
       })
-      ElMessage.success(`已创建 ${res.total} 个订单`)
+      ElMessage.success(successMsg(action, res.total))
       visible.value = false
       emit('created', res.orders?.[0]?.id)
     } else {
@@ -584,7 +587,8 @@ async function submit() {
         shipContent,
         sellerFlag: form.sellerFlag,
         saveCustomer: form.saveCustomer,
-        syncKdzs: form.syncKdzs,
+        syncKdzs: true,
+        createAction: action,
         platformOrderNo: form.platformOrderNo || undefined,
         address: {
           name: form.buyerName,
@@ -596,7 +600,7 @@ async function submit() {
         },
         items: payloadItems,
       })
-      ElMessage.success('手工订单已创建')
+      ElMessage.success(successMsg(action, 1))
       visible.value = false
       emit('created', order.id)
     }
@@ -605,6 +609,18 @@ async function submit() {
   } finally {
     submitting.value = false
   }
+}
+
+function successMsg(action: CreateAction, total: number) {
+  const n = total > 1 ? `${total} 个订单` : '订单'
+  if (action === 'create_and_push') return `已创建并推送（自营）${n}`
+  if (action === 'create_and_print') return `已创建并推送（自营）${n}；打印功能预留，后续对接发货中心`
+  return `已创建${n}到待推单`
+}
+
+function clearContent() {
+  reset()
+  ElMessage.success('已清空内容')
 }
 </script>
 
@@ -801,26 +817,34 @@ async function submit() {
           <SellerFlag v-model="form.sellerFlag" mode="edit" :size="18" />
         </div>
       </div>
-      <div class="field-row">
+      <div class="field-row ship-row">
         <span class="field-label">发货内容：</span>
-        <el-input
-          v-model="form.shipContent"
-          type="textarea"
-          :rows="2"
-          placeholder="可选；未添加商品时写入发货内容，添加商品后打印面单时按规格自动填充"
-          class="grow-input"
-        />
-      </div>
-      <div class="field-row">
-        <span class="field-label field-label-wide">同步快递助手：</span>
-        <el-switch v-model="form.syncKdzs" />
-        <span class="hint">默认使用该租户的默认快递助手账号，创建到待推单</span>
+        <div class="ship-box">
+          <el-input
+            v-model="form.shipContent"
+            type="textarea"
+            :rows="2"
+            placeholder="填写本地商品后将自动填充发货内容"
+            class="grow-input"
+          />
+          <div class="ship-tip">仅填写发货内容的手工订单将无法对账</div>
+        </div>
       </div>
     </div>
 
     <template #footer>
-      <el-button @click="visible = false">取消</el-button>
-      <el-button type="primary" :loading="submitting" @click="submit">创建订单到待推单</el-button>
+      <div class="manual-footer">
+        <el-button class="btn-create" type="warning" :loading="submitting" @click="submit('create_only')">
+          仅创建
+        </el-button>
+        <el-button class="btn-create" type="warning" :loading="submitting" @click="submit('create_and_push')">
+          创建并推送
+        </el-button>
+        <el-button class="btn-create" type="warning" :loading="submitting" @click="submit('create_and_print')">
+          创建并打印
+        </el-button>
+        <el-button :disabled="submitting" @click="clearContent">清空内容</el-button>
+      </div>
     </template>
 
     <!-- 选择已有收件人 -->
@@ -1015,6 +1039,19 @@ async function submit() {
 }
 .amt { color: #303133; font-variant-numeric: tabular-nums; }
 .hint { margin-left: 4px; color: #909399; font-size: 12px; }
+.ship-row { align-items: flex-start; }
+.ship-box { flex: 1; min-width: 0; }
+.ship-tip { margin-top: 6px; color: #909399; font-size: 12px; line-height: 1.4; }
+.manual-footer {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  width: 100%;
+}
+.manual-footer .btn-create {
+  min-width: 108px;
+}
 .search-row { display: flex; gap: 8px; margin-bottom: 10px; }
 .pager-row { display: flex; justify-content: flex-end; margin-top: 10px; }
 .default-tag { margin-left: 6px; }

@@ -244,6 +244,7 @@ type SetAgentTypeRequest struct {
 	Action      string   `json:"action"`
 	FactoryID   string   `json:"factoryId"`
 	SysTids     []string `json:"sysTids"`
+	Tids        []string `json:"tids,omitempty"`
 }
 
 func (c *Client) SetOrderAgentType(ctx context.Context, token string, req SetAgentTypeRequest) error {

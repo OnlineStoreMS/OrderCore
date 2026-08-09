@@ -147,6 +147,8 @@ func (s *OrderService) CreateManual(ctx context.Context, tenantID, operatorID ui
 	if req.SyncKDZS != nil {
 		syncKDZS = *req.SyncKDZS
 	}
+	createAction := normalizeManualCreateAction(req.CreateAction)
+	handType := manualHandOrderType(createAction)
 
 	if req.SaveCustomer {
 		if err := s.saveManualCustomer(tenantID, req); err != nil {
@@ -160,23 +162,25 @@ func (s *OrderService) CreateManual(ctx context.Context, tenantID, operatorID ui
 		return nil, err
 	}
 	o := &model.Order{
-		TenantID:       tenantID,
-		OrderNo:        orderNo,
-		SourceChannel:  model.SourceManual,
-		Platform:       "DFHAND",
-		Status:         model.StatusPendingAlloc,
-		ShipStatus:     model.ShipWaitShip,
-		BuyerName:      req.BuyerName,
-		BuyerPhone:     req.BuyerPhone,
-		BuyerNick:      req.BuyerNick,
-		TotalAmount:    req.TotalAmount,
-		PayAmount:      req.PayAmount,
-		FreightAmount:  req.FreightAmount,
-		PayStatus:      "unpaid",
-		Remark:         req.Remark,
-		SellerRemark:   req.SellerRemark,
-		ShipContent:    strings.TrimSpace(req.ShipContent),
-		PlatformStatus: model.KDZSWaitAudit,
+		TenantID:           tenantID,
+		OrderNo:            orderNo,
+		SourceChannel:      model.SourceManual,
+		Platform:           "DFHAND",
+		Status:             model.StatusPendingAlloc,
+		ShipStatus:         model.ShipWaitShip,
+		BuyerName:          req.BuyerName,
+		BuyerPhone:         req.BuyerPhone,
+		BuyerNick:          req.BuyerNick,
+		TotalAmount:        req.TotalAmount,
+		PayAmount:          req.PayAmount,
+		FreightAmount:      req.FreightAmount,
+		PayStatus:          "unpaid",
+		Remark:             req.Remark,
+		SellerRemark:       req.SellerRemark,
+		ShipContent:        strings.TrimSpace(req.ShipContent),
+		PlatformStatus:     model.KDZSWaitAudit,
+		PlatformStatusText: "待推单",
+		AgentType:          model.AgentTypeSelf,
 	}
 	if req.SellerFlag != nil {
 		o.SellerFlag = *req.SellerFlag
@@ -226,7 +230,7 @@ func (s *OrderService) CreateManual(ctx context.Context, tenantID, operatorID ui
 			OrderID:    o.ID,
 			ToStatus:   o.Status,
 			Action:     "create_manual",
-			Remark:     "手工建单",
+			Remark:     fmt.Sprintf("手工建单 action=%s type=%s", createAction, handType),
 			OperatorID: operatorID,
 		})
 	})
@@ -235,7 +239,7 @@ func (s *OrderService) CreateManual(ctx context.Context, tenantID, operatorID ui
 	}
 
 	if syncKDZS && s.storeSync != nil {
-		kdzsRes, syncErr := s.syncManualToKDZS(ctx, bearerToken, req, o)
+		kdzsRes, syncErr := s.syncManualToKDZS(ctx, bearerToken, req, o, handType)
 		if syncErr != nil {
 			log.Printf("[CreateManual] sync kdzs failed order=%s: %v", o.OrderNo, syncErr)
 			_ = s.repos.AddStatusLog(&model.OrderStatusLog{
@@ -264,7 +268,36 @@ func (s *OrderService) CreateManual(ctx context.Context, tenantID, operatorID ui
 				OrderID:    o.ID,
 				ToStatus:   o.Status,
 				Action:     "sync_kdzs",
-				Remark:     fmt.Sprintf("已同步快递助手(%s) tid=%s sysTid=%s", kdzsRes.AccountName, kdzsRes.Tid, kdzsRes.SysTid),
+				Remark:     fmt.Sprintf("已同步快递助手(%s) action=%s type=%s tid=%s sysTid=%s", kdzsRes.AccountName, createAction, handType, kdzsRes.Tid, kdzsRes.SysTid),
+				OperatorID: operatorID,
+			})
+		}
+	}
+
+	// 创建并推送 / 创建并打印：默认自营发货（建自营单）；打印对接发货中心后续再接
+	if createAction == "create_and_push" || createAction == "create_and_print" {
+		// 快递助手 type=1 已推自营；本地先记待发货，分配时跳过二次 self_print，只建自营单
+		_ = s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{
+			"platform_status":      model.KDZSWaitSend,
+			"platform_status_text": "待发货",
+			"agent_type":           model.AgentTypeSelf,
+		})
+		allocated, aerr := s.Allocate(ctx, tenantID, operatorID, o.ID, dto.AllocateRequest{
+			AllocType: model.AllocSelfShip,
+			Remark:    "手工建单" + manualCreateActionLabel(createAction) + "（默认自营）",
+		}, bearerToken)
+		if aerr != nil {
+			log.Printf("[CreateManual] auto self_ship allocate failed order=%s: %v", o.OrderNo, aerr)
+			return nil, fmt.Errorf("订单已创建(%s)并已同步快递助手，但自营分配失败: %w", o.OrderNo, aerr)
+		}
+		o = allocated
+		if createAction == "create_and_print" {
+			_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+				TenantID:   tenantID,
+				OrderID:    o.ID,
+				ToStatus:   o.Status,
+				Action:     "print_reserved",
+				Remark:     "创建并打印：打印能力预留，后续对接发货中心",
 				OperatorID: operatorID,
 			})
 		}
@@ -289,6 +322,7 @@ func (s *OrderService) CreateManualBatch(ctx context.Context, tenantID, operator
 			Items:        req.Items,
 			SaveCustomer: req.SaveCustomer,
 			SyncKDZS:     req.SyncKDZS,
+			CreateAction: req.CreateAction,
 		}
 		o, err := s.CreateManual(ctx, tenantID, operatorID, single, bearerToken)
 		if err != nil {
@@ -425,7 +459,39 @@ func (s *OrderService) saveManualCustomer(tenantID uint64, req dto.ManualCreateO
 	return err
 }
 
-func (s *OrderService) syncManualToKDZS(ctx context.Context, bearerToken string, req dto.ManualCreateOrderRequest, o *model.Order) (*storesync.CreateHandOrderResult, error) {
+func normalizeManualCreateAction(action string) string {
+	switch strings.TrimSpace(action) {
+	case "create_and_push", "push", "1":
+		return "create_and_push"
+	case "create_and_print", "print", "3":
+		return "create_and_print"
+	default:
+		return "create_only"
+	}
+}
+
+func manualHandOrderType(action string) string {
+	switch action {
+	case "create_and_push", "create_and_print":
+		// 创建并打印：快递助手侧先按「创建并推送/自营」落单；面单打印后续对接发货中心，暂不走 KDZS type=3
+		return "1"
+	default:
+		return "2" // 仅创建 → 待推单
+	}
+}
+
+func manualCreateActionLabel(action string) string {
+	switch action {
+	case "create_and_push":
+		return "创建并推送"
+	case "create_and_print":
+		return "创建并打印"
+	default:
+		return "仅创建"
+	}
+}
+
+func (s *OrderService) syncManualToKDZS(ctx context.Context, bearerToken string, req dto.ManualCreateOrderRequest, o *model.Order, handType string) (*storesync.CreateHandOrderResult, error) {
 	addr := req.Address
 	skus := make([]storesync.HandOrderSku, 0, len(req.Items))
 	for _, it := range req.Items {
@@ -456,6 +522,9 @@ func (s *OrderService) syncManualToKDZS(ctx context.Context, bearerToken string,
 	if len(skus) == 0 {
 		sendInfo = strings.TrimSpace(req.ShipContent)
 	}
+	if strings.TrimSpace(handType) == "" {
+		handType = "2"
+	}
 	return s.storeSync.CreateHandOrder(ctx, bearerToken, storesync.CreateHandOrderRequest{
 		Recipient:      firstNonEmpty(req.BuyerName, addr.Name),
 		Phone:          firstNonEmpty(req.BuyerPhone, addr.Phone),
@@ -470,7 +539,7 @@ func (s *OrderService) syncManualToKDZS(ctx context.Context, bearerToken string,
 		SellerFlag:     &flag,
 		SendInfo:       sendInfo,
 		OrderCode:      firstNonEmpty(req.PlatformOrderNo, o.OrderNo),
-		Type:           "2",
+		Type:           handType,
 	})
 }
 
@@ -941,11 +1010,12 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	agentType := model.AgentTypeSelf
 	kdzsAction := "" // self_print | push_factory | ""
 	purchaseOrderID := strings.TrimSpace(req.PurchaseOrderID)
+	syncKDZS := shouldSyncKDZSAgent(o)
 
 	switch allocType {
 	case model.AllocSelfShip, model.AllocPurchaseThenShip:
 		dropshipMode = ""
-		if o.SourceChannel == model.SourceKDZS {
+		if syncKDZS {
 			kdzsAction = "self_print"
 			agentType = model.AgentTypeSelf
 		}
@@ -965,7 +1035,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 			factoryName = b.ExternalFactoryName
 			supplierName = b.SupplierName
 			agentType = model.AgentTypeFactory
-			if o.SourceChannel == model.SourceKDZS {
+			if syncKDZS {
 				kdzsAction = "push_factory"
 			}
 		} else {
@@ -973,7 +1043,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 			factoryID = ""
 			factoryName = ""
 			agentType = model.AgentTypeSelf
-			if o.SourceChannel == model.SourceKDZS {
+			if syncKDZS {
 				kdzsAction = "self_print"
 			}
 		}
@@ -2069,7 +2139,7 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 	}
 
 	kdzsRemark := ""
-	if o.SourceChannel == model.SourceKDZS {
+	if shouldSyncKDZSAgent(o) {
 		// 待发货（自营/厂家）需先调快递助手撤单；已在待推单则跳过
 		needCancel := o.PlatformStatus == model.KDZSWaitSend ||
 			o.AllocType == model.AllocSelfShip ||
@@ -2111,7 +2181,7 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 			"ship_lock_reason":  lockReason,
 			"skip_auto_alloc":   true,
 		}
-		if o.SourceChannel == model.SourceKDZS {
+		if shouldSyncKDZSAgent(o) {
 			fields["platform_status"] = model.KDZSWaitAudit
 			fields["platform_status_text"] = "待推单"
 		}
@@ -2150,14 +2220,30 @@ func (s *OrderService) cancelLinkedSelfOrders(ctx context.Context, orderID uint6
 	return nil
 }
 
+// kdzsAgentSysTid 快递助手推单/撤单接口使用的 sysTid。
+// 手工单（DFHAND）建单 SuccessList/SuccessRealList 与电商含义不一致，setTradeAgentType 认的是平台单号（platform_order_id）。
+func kdzsAgentSysTid(o *model.Order) (sysTid, tid string) {
+	if o == nil {
+		return "", ""
+	}
+	sysTid = strings.TrimSpace(o.PlatformSysTid)
+	tid = strings.TrimSpace(o.PlatformOrderID)
+	if strings.EqualFold(strings.TrimSpace(o.Platform), "DFHAND") || o.SourceChannel == model.SourceManual {
+		if tid != "" {
+			return tid, sysTid
+		}
+	}
+	if sysTid == "" {
+		sysTid = tid
+	}
+	return sysTid, tid
+}
+
 func (s *OrderService) cancelKDZSPush(ctx context.Context, o *model.Order, token string) error {
 	if s.storeSync == nil {
 		return fmt.Errorf("StoreSyncAgent 未配置")
 	}
-	sysTid := o.PlatformSysTid
-	if sysTid == "" {
-		sysTid = o.PlatformOrderID
-	}
+	sysTid, _ := kdzsAgentSysTid(o)
 	if sysTid == "" {
 		return fmt.Errorf("缺少平台系统单号，无法同步快递助手")
 	}
@@ -2180,10 +2266,7 @@ func (s *OrderService) setKDZSAgentType(ctx context.Context, o *model.Order, act
 	if s.storeSync == nil {
 		return fmt.Errorf("StoreSyncAgent 未配置")
 	}
-	sysTid := o.PlatformSysTid
-	if sysTid == "" {
-		sysTid = o.PlatformOrderID
-	}
+	sysTid, tid := kdzsAgentSysTid(o)
 	if sysTid == "" {
 		return fmt.Errorf("缺少平台系统单号，无法同步快递助手")
 	}
@@ -2191,13 +2274,17 @@ func (s *OrderService) setKDZSAgentType(ctx context.Context, o *model.Order, act
 	if tradeStatus == "" {
 		tradeStatus = model.KDZSWaitAudit
 	}
-	return s.storeSync.SetOrderAgentType(ctx, token, storesync.SetAgentTypeRequest{
+	req := storesync.SetAgentTypeRequest{
 		Platform:    o.Platform,
 		TradeStatus: tradeStatus,
 		Action:      action,
 		FactoryID:   factoryID,
 		SysTids:     []string{sysTid},
-	})
+	}
+	if tid != "" && tid != sysTid {
+		req.Tids = []string{tid}
+	}
+	return s.storeSync.SetOrderAgentType(ctx, token, req)
 }
 
 func (s *OrderService) UpdateRemarks(ctx context.Context, tenantID, operatorID, orderID uint64, req dto.UpdateRemarksRequest, bearerToken string) (*model.Order, error) {
@@ -3641,6 +3728,22 @@ func normalizeNonKDZSHint(h *kdzsIngestHint) {
 			h.ShipStatus = model.ShipWaitShip
 		}
 	}
+}
+
+// shouldSyncKDZSAgent 订单是否已挂到快递助手、分配时需同步「自己打单/推厂家」。
+// 电商单（kdzs）始终同步；手工单等在建单时已落 DFHAND/sysTid 的也同步。
+func shouldSyncKDZSAgent(o *model.Order) bool {
+	if o == nil {
+		return false
+	}
+	if o.SourceChannel == model.SourceKDZS {
+		return true
+	}
+	if strings.TrimSpace(o.PlatformSysTid) != "" {
+		return true
+	}
+	platform := strings.ToUpper(strings.TrimSpace(o.Platform))
+	return platform == "DFHAND" && strings.TrimSpace(o.PlatformOrderID) != ""
 }
 
 func computeShipLock(channel, platformStatus string, agentType int, dropshipMode string) (bool, string) {

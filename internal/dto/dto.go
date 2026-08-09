@@ -21,6 +21,9 @@ type ManualCreateOrderRequest struct {
 	SyncKDZS *bool `json:"syncKdzs"`
 	// PlatformOrderNo 可选外部订单编号
 	PlatformOrderNo string `json:"platformOrderNo"`
+	// CreateAction 对齐快递助手建单动作：
+	// create_only=仅创建(待推单) | create_and_push=创建并推送(默认自营) | create_and_print=创建并打印(打印预留)
+	CreateAction string `json:"createAction"`
 }
 
 // ManualBatchCreateRequest 批量手工建单（共享商品/备注，多个收件人）
@@ -32,6 +35,7 @@ type ManualBatchCreateRequest struct {
 	SellerFlag   *int                  `json:"sellerFlag"`
 	SaveCustomer bool                  `json:"saveCustomer"`
 	SyncKDZS     *bool                 `json:"syncKdzs"`
+	CreateAction string                `json:"createAction"`
 }
 
 type ManualReceiverInput struct {
