@@ -2,6 +2,7 @@ declare global {
   interface Window {
     __RUNTIME_CONFIG__?: {
       portalUrl?: string
+      shippingCoreUrl?: string
     }
   }
 }
@@ -20,6 +21,16 @@ function portalFromLocation(): string {
   const { protocol, hostname } = window.location
   if (!hostname || isLocalHost(hostname)) return ''
   return `${protocol}//${hostname}:5174`
+}
+
+function deriveHostBase(port: number, fallbackHost = 'localhost'): string {
+  const portal = getPortalUrl()
+  try {
+    const u = new URL(portal)
+    return `${u.protocol}//${u.hostname}:${port}`
+  } catch {
+    return `http://${fallbackHost}:${port}`
+  }
 }
 
 /**
@@ -42,4 +53,21 @@ export function getPortalUrl(): string {
   }
 
   return 'http://localhost:5174'
+}
+
+/** 发货中心 Web 根地址（默认 :5181） */
+export function getShippingCoreUrl(): string {
+  const fromRuntime = trimUrl(window.__RUNTIME_CONFIG__?.shippingCoreUrl)
+  if (fromRuntime) return fromRuntime
+
+  const fromEnv = trimUrl(import.meta.env.VITE_SHIPPINGCORE_URL)
+  if (fromEnv) return fromEnv
+
+  // 与当前打开的订单中心同主机，避免 portal 推导到 localhost 导致跳错
+  if (typeof window !== 'undefined' && window.location?.hostname) {
+    const { protocol, hostname } = window.location
+    if (hostname) return `${protocol}//${hostname}:5181`
+  }
+
+  return deriveHostBase(5181)
 }

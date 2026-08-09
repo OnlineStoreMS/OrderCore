@@ -39,6 +39,7 @@ type IntegrationsConfig struct {
 	StoreSyncAgentAPIURL string `mapstructure:"storesyncagent_api_url"`
 	StoreCoreAPIURL      string `mapstructure:"storecore_api_url"`
 	CustomerCoreAPIURL   string `mapstructure:"customercore_api_url"`
+	ShippingCoreAPIURL   string `mapstructure:"shippingcore_api_url"`
 }
 
 type StorageConfig struct {
@@ -107,6 +108,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Integrations.CustomerCoreAPIURL == "" {
 		cfg.Integrations.CustomerCoreAPIURL = "http://127.0.0.1:8099"
+	}
+	if cfg.Integrations.ShippingCoreAPIURL == "" {
+		cfg.Integrations.ShippingCoreAPIURL = "http://127.0.0.1:8096"
 	}
 	if cfg.Storage.LocalPath == "" {
 		cfg.Storage.LocalPath = "./data/uploads"

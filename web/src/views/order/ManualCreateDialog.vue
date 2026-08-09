@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { pcaTextArr } from 'element-china-area-data'
 import {
   createManualOrder,
@@ -12,15 +12,21 @@ import {
   type ParsedAddress,
   type RecipientSearchItem,
 } from '../../api/manualOrder'
+import { getToken, getRefreshToken } from '../../utils/auth'
+import { getShippingCoreUrl } from '../../utils/runtimeConfig'
 import SellerFlag from '../../components/SellerFlag.vue'
 
 type AreaNode = { label: string; value: string; children?: AreaNode[] }
 const areaOptions = pcaTextArr as AreaNode[]
 
+type CreateAction = 'create_only' | 'create_and_push' | 'create_and_print'
+type PrintMode = 'kdzs' | 'carrier'
+
 const props = defineProps<{ modelValue: boolean }>()
 const emit = defineEmits<{
   'update:modelValue': [boolean]
-  created: [orderId?: number]
+  /** skipNavigate：创建并打印已跳转发货中心，父级勿再进订单详情 */
+  created: [payload?: { orderId?: number; action?: CreateAction; skipNavigate?: boolean }]
 }>()
 
 const visible = computed({
@@ -535,12 +541,66 @@ function buildItemsPayload() {
     }))
 }
 
-type CreateAction = 'create_only' | 'create_and_push' | 'create_and_print'
+async function pickPrintMode(): Promise<PrintMode | null> {
+  try {
+    await ElMessageBox.confirm(
+      '请选择打印方式：快递助手打印将使用发货中心默认快递助手账号并同步；自建物流打印不同步快递助手。创建成功后将跳转发货中心继续打单发货。',
+      '创建并打印',
+      {
+        distinguishCancelAndClose: true,
+        confirmButtonText: '快递助手打印',
+        cancelButtonText: '自建物流打印',
+        type: 'info',
+      },
+    )
+    return 'kdzs'
+  } catch (action) {
+    if (action === 'cancel') return 'carrier'
+    return null
+  }
+}
+
+/** 带登录态跳转发货中心待发货，并自动打开打单弹窗 */
+function goShippingPrint(order: { id: number; orderNo?: string }, printMode: PrintMode) {
+  const base = getShippingCoreUrl().replace(/\/$/, '')
+  if (!base) {
+    throw new Error('发货中心地址未配置')
+  }
+  const scMode = printMode === 'carrier' ? 'sf' : 'kdzs'
+  const params = new URLSearchParams({
+    orderId: String(order.id),
+    printMode: scMode,
+    autoShip: '1',
+    sourceChannel: 'manual',
+  })
+  if (order.orderNo) params.set('keyword', order.orderNo)
+  const pending = `/pending?${params.toString()}`
+  const token = getToken()
+  let target = `${base}${pending}`
+  if (token) {
+    const url = new URL(`${base}/auth/callback`)
+    url.searchParams.set('token', token)
+    const refresh = getRefreshToken()
+    if (refresh) url.searchParams.set('refresh', refresh)
+    url.searchParams.set('redirect', pending)
+    target = url.toString()
+  }
+  // replace：避免返回键回到半关闭的建单弹窗；先跳转再关弹窗
+  window.location.replace(target)
+}
 
 async function submit(action: CreateAction) {
+  let printMode: PrintMode | undefined
+  if (action === 'create_and_print') {
+    const picked = await pickPrintMode()
+    if (!picked) return
+    printMode = picked
+  }
   const payloadItems = buildItemsPayload()
   // 对齐快递助手：有商品时建单不传发货内容；无商品时才写入
   const shipContent = payloadItems.length ? '' : (form.shipContent || '').trim()
+  // 自建物流打印：即使开关打开也不同步
+  const syncKdzs = printMode === 'carrier' ? false : form.syncKdzs
   submitting.value = true
   try {
     if (mode.value === 'batch') {
@@ -567,12 +627,24 @@ async function submit(action: CreateAction) {
         shipContent,
         sellerFlag: form.sellerFlag,
         saveCustomer: form.saveCustomer,
-        syncKdzs: true,
+        syncKdzs,
         createAction: action,
+        printMode,
       })
-      ElMessage.success(successMsg(action, res.total))
+      ElMessage.success(successMsg(action, res.total, printMode, syncKdzs))
+      const first = res.orders?.[0]
+      if (action === 'create_and_print' && printMode) {
+        if (!first?.id) {
+          ElMessage.error('已创建但缺少订单 ID，无法跳转发货中心')
+          visible.value = false
+          emit('created', { orderId: first?.id, action, skipNavigate: true })
+          return
+        }
+        goShippingPrint(first, printMode)
+        return
+      }
       visible.value = false
-      emit('created', res.orders?.[0]?.id)
+      emit('created', { orderId: first?.id, action })
     } else {
       if (!form.buyerName || (!form.buyerPhone && !form.buyerTel)) {
         ElMessage.warning('请填写收件人与手机/固话')
@@ -587,8 +659,9 @@ async function submit(action: CreateAction) {
         shipContent,
         sellerFlag: form.sellerFlag,
         saveCustomer: form.saveCustomer,
-        syncKdzs: true,
+        syncKdzs,
         createAction: action,
+        printMode,
         platformOrderNo: form.platformOrderNo || undefined,
         address: {
           name: form.buyerName,
@@ -600,9 +673,19 @@ async function submit(action: CreateAction) {
         },
         items: payloadItems,
       })
-      ElMessage.success(successMsg(action, 1))
+      ElMessage.success(successMsg(action, 1, printMode, syncKdzs))
+      if (action === 'create_and_print' && printMode) {
+        if (!order?.id) {
+          ElMessage.error('已创建但缺少订单 ID，无法跳转发货中心')
+          visible.value = false
+          emit('created', { orderId: order?.id, action, skipNavigate: true })
+          return
+        }
+        goShippingPrint(order, printMode)
+        return
+      }
       visible.value = false
-      emit('created', order.id)
+      emit('created', { orderId: order.id, action })
     }
   } catch (e: any) {
     ElMessage.error(e.message || '创建失败')
@@ -611,11 +694,16 @@ async function submit(action: CreateAction) {
   }
 }
 
-function successMsg(action: CreateAction, total: number) {
+function successMsg(action: CreateAction, total: number, printMode?: PrintMode, syncKdzs = true) {
   const n = total > 1 ? `${total} 个订单` : '订单'
-  if (action === 'create_and_push') return `已创建并推送（自营）${n}`
-  if (action === 'create_and_print') return `已创建并推送（自营）${n}；打印功能预留，后续对接发货中心`
-  return `已创建${n}到待推单`
+  if (action === 'create_and_push') {
+    return syncKdzs ? `已创建并推送（自营/发货中心默认账号）${n}` : `已创建并分配自营（未同步快递助手）${n}`
+  }
+  if (action === 'create_and_print') {
+    if (printMode === 'carrier') return `已创建并分配自营${n}，正在跳转发货中心打单…`
+    return `已创建并推送（自营）${n}，正在跳转发货中心打单…`
+  }
+  return syncKdzs ? `已创建${n}到待推单（已同步发货中心默认账号）` : `已创建本地${n}（未同步快递助手）`
 }
 
 function clearContent() {
@@ -829,6 +917,11 @@ function clearContent() {
           />
           <div class="ship-tip">仅填写发货内容的手工订单将无法对账</div>
         </div>
+      </div>
+      <div class="field-row">
+        <span class="field-label field-label-wide">同步快递助手：</span>
+        <el-switch v-model="form.syncKdzs" />
+        <span class="hint">账号取发货中心「默认」快递助手账号；创建并推送=自营自己打单。自建物流打印时忽略此开关</span>
       </div>
     </div>
 

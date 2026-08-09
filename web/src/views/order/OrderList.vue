@@ -17,6 +17,8 @@ import {
   labelSource,
   labelStatus,
   listOrders,
+  orderTypeOptions,
+  platformOptions,
   type Order,
   type OrderItem,
 } from '../../api/orders'
@@ -253,21 +255,35 @@ async function copyOrderText(order: Order, ev?: Event) {
     <div ref="toolbarRef" class="toolbar">
       <el-form inline @submit.prevent>
         <el-form-item label="订单类型">
-          <el-select v-model="filters.sourceChannel" clearable style="width: 140px" @change="onFilterChange">
-            <el-option label="电商" value="kdzs" />
-            <el-option label="小程序" value="wx_mall" />
-            <el-option label="门店" value="store" />
-            <el-option label="闲鱼" value="xianyu" />
-            <el-option label="手工订单" value="manual" />
+          <el-select
+            v-model="filters.sourceChannel"
+            clearable
+            placeholder="全部"
+            style="width: 140px"
+            @change="onFilterChange"
+          >
+            <el-option
+              v-for="opt in orderTypeOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
           </el-select>
         </el-form-item>
         <el-form-item label="平台">
-          <el-select v-model="filters.platform" clearable style="width: 120px" @change="onFilterChange">
-            <el-option label="抖店" value="FXG" />
-            <el-option label="淘宝" value="TB" />
-            <el-option label="小红书" value="XHS" />
-            <el-option label="拼多多" value="PDD" />
-            <el-option label="快手" value="KSXD" />
+          <el-select
+            v-model="filters.platform"
+            clearable
+            placeholder="全部"
+            style="width: 120px"
+            @change="onFilterChange"
+          >
+            <el-option
+              v-for="opt in platformOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
           </el-select>
         </el-form-item>
         <el-form-item label="履约状态">

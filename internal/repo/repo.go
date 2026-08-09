@@ -39,6 +39,7 @@ type OrderListQuery struct {
 	AllocType         string
 	Keyword           string
 	Platform          string
+	PlatformSysTid    string
 	EcommerceWaitShip bool // 兼容：按电商订单「待发货」筛选
 	SalesChannel      string // self | dropship，与工作台自营/代发口径一致
 	OrderedAtStart    *time.Time
@@ -77,6 +78,9 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	}
 	if q.Platform != "" {
 		tx = tx.Where("platform = ?", q.Platform)
+	}
+	if tid := strings.TrimSpace(q.PlatformSysTid); tid != "" {
+		tx = tx.Where("platform_sys_tid = ?", tid)
 	}
 	switch strings.ToLower(strings.TrimSpace(q.SalesChannel)) {
 	case "self":

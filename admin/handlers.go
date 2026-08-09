@@ -64,6 +64,7 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 		AllocType:         c.Query("allocType"),
 		Keyword:           keyword,
 		Platform:          c.Query("platform"),
+		PlatformSysTid:    c.Query("platformSysTid"),
 		SalesChannel:      c.Query("salesChannel"),
 		EcommerceWaitShip: c.Query("ecommerceWaitShip") == "1" || c.Query("ecommerceWaitShip") == "true",
 		OrderedAtStart:    parseQueryTime(c.Query("orderedAtStart")),

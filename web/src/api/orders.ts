@@ -143,6 +143,16 @@ export const orderTypeOptions = [
   { value: 'manual', label: '手工订单', tip: '' },
 ] as const
 
+/** 列表筛选项：平台（含手工单 DFHAND） */
+export const platformOptions = [
+  { value: 'FXG', label: '抖店' },
+  { value: 'TB', label: '淘宝' },
+  { value: 'XHS', label: '小红书' },
+  { value: 'PDD', label: '拼多多' },
+  { value: 'KSXD', label: '快手' },
+  { value: 'DFHAND', label: '手工单' },
+] as const
+
 const statusLabels: Record<string, string> = {
   pending_payment: '待付款',
   pending_alloc: '待分配',
@@ -177,6 +187,7 @@ const platformLabels: Record<string, string> = {
   XHS: '小红书',
   PDD: '拼多多',
   KSXD: '快手',
+  DFHAND: '手工单',
   MANUAL: '手工单',
 }
 
@@ -192,12 +203,12 @@ const platformStatusLabels: Record<string, string> = {
 export function labelSource(v?: string) {
   return (v && sourceLabels[v]) || v || '-'
 }
-/** 平台展示：FXG / 店铺名 */
+/** 平台展示：抖店 / 店铺名 */
 export function formatPlatformShop(row: Pick<Order, 'platform' | 'shopName'>) {
-  const p = (row.platform || '').trim()
+  const p = labelPlatform((row.platform || '').trim())
   const shop = (row.shopName || '').trim()
-  if (p && shop) return `${p} / ${shop}`
-  if (p) return p
+  if (p && p !== '-' && shop) return `${p} / ${shop}`
+  if (p && p !== '-') return p
   if (shop) return shop
   return '-'
 }

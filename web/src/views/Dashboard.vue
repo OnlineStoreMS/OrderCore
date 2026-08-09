@@ -457,9 +457,14 @@ async function doSyncStore() {
 
 watch(trend, () => nextTick().then(renderCharts))
 
-function onManualCreated(orderId?: number) {
-  if (orderId) {
-    router.push(`/orders/${orderId}`)
+function onManualCreated(payload?: { orderId?: number; action?: string; skipNavigate?: boolean }) {
+  // 创建并打印由弹窗跳转发货中心，勿再进订单详情
+  if (payload?.skipNavigate || payload?.action === 'create_and_print') {
+    load()
+    return
+  }
+  if (payload?.orderId) {
+    router.push(`/orders/${payload.orderId}`)
     return
   }
   load()

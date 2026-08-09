@@ -366,6 +366,7 @@ type CreateHandOrderRequest struct {
 	SendInfo       string         `json:"sendInfo"`
 	OrderCode      string         `json:"orderCode"`
 	Type           string         `json:"type"`
+	AccountID      string         `json:"accountId,omitempty"` // 指定账号（发货中心默认账号 code）
 }
 
 type CreateHandOrderResult struct {
