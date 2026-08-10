@@ -719,38 +719,24 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				kdzsDecided := ps == model.KDZSWaitSend || ps == "shipped" || ps == "completed"
 				skipSelfAuto := hint.AgentType == model.AgentTypeSelf && existing.SkipAutoAlloc && !kdzsDecided &&
 					hint.ShipStatus != model.ShipShipped && hint.Status != model.StatusCompleted
-				// OSMS 线下代发会对快递助手走 self_print；同步常残留厂家字段，若按「厂家代发」回写会
-				// 重新锁定填单号，导致发货中心回传失败（需再撤分配）。本地已是 OSMS 代发时一律保留。
+				// OSMS 线下代发会对快递助手走 self_print；同步若按「自营」回写会冲掉供应商。
+				// 已有 osms 代发，或仍挂着代发采购单号时，保留/按采购单恢复。
 				osmsRestoreSID, osmsRestoreSName := uint64(0), ""
 				preserveOSMSDropship := false
-				if existing.AllocType == model.AllocDropship &&
-					existing.DropshipMode == model.DropshipOSMSSupplier &&
-					existing.SupplierID > 0 {
-					preserveOSMSDropship = true
-					osmsRestoreSID, osmsRestoreSName = existing.SupplierID, existing.SupplierName
-				} else if hint.AllocType == model.AllocSelfShip || hint.AgentType == model.AgentTypeFactory {
-					// 自营镜像或厂家噪点：仍可按代发采购单号恢复 OSMS 供应商
-					if poNo := strings.TrimSpace(existing.PurchaseOrderID); poNo != "" {
+				if hint.AllocType == model.AllocSelfShip {
+					if existing.AllocType == model.AllocDropship &&
+						existing.DropshipMode == model.DropshipOSMSSupplier &&
+						existing.SupplierID > 0 {
+						preserveOSMSDropship = true
+						osmsRestoreSID, osmsRestoreSName = existing.SupplierID, existing.SupplierName
+					} else if poNo := strings.TrimSpace(existing.PurchaseOrderID); poNo != "" {
 						if sid, sname, ok := s.lookupDropshipPOSupplier(ctx, bearerToken, poNo); ok {
-							// 有厂家绑定的供应商不应被「恢复成 OSMS」——那是真厂家代发
-							if b, berr := s.repos.FindBindingBySupplier(tenantID, sid, model.SourceKDZS); berr != nil || b.ExternalFactoryID == "" {
-								preserveOSMSDropship = true
-								osmsRestoreSID, osmsRestoreSName = sid, sname
-							}
+							preserveOSMSDropship = true
+							osmsRestoreSID, osmsRestoreSName = sid, sname
 						}
 					}
 				}
-				// 本地已发货：不再用同步改写履约分配（避免已发 OSMS 单被盖成 kdzs_factory）
-				localShipped := existing.ShipStatus == model.ShipShipped
-				if localShipped && existing.AllocType != "" {
-					preserveOSMSDropship = preserveOSMSDropship ||
-						(existing.AllocType == model.AllocDropship && existing.DropshipMode == model.DropshipOSMSSupplier)
-					if existing.AllocType == model.AllocDropship && existing.DropshipMode == model.DropshipOSMSSupplier && existing.SupplierID > 0 {
-						osmsRestoreSID, osmsRestoreSName = existing.SupplierID, existing.SupplierName
-						preserveOSMSDropship = true
-					}
-				}
-				if !skipSelfAuto && !preserveOSMSDropship && !localShipped {
+				if !skipSelfAuto && !preserveOSMSDropship {
 					fields["alloc_type"] = hint.AllocType
 					fields["dropship_mode"] = hint.DropshipMode
 					fields["factory_id"] = req.FactoryID
@@ -772,52 +758,28 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 						fields["allocated_at"] = &now
 					}
 				} else {
-					if !preserveOSMSDropship {
-						fields["factory_id"] = req.FactoryID
-						fields["factory_name"] = req.FactoryName
-					}
+					fields["factory_id"] = req.FactoryID
+					fields["factory_name"] = req.FactoryName
 					if preserveOSMSDropship {
 						fields["alloc_type"] = model.AllocDropship
 						fields["dropship_mode"] = model.DropshipOSMSSupplier
 						fields["supplier_id"] = osmsRestoreSID
 						fields["supplier_name"] = osmsRestoreSName
-						fields["agent_type"] = model.AgentTypeSelf
 						fields["status"] = status
 						fields["skip_auto_alloc"] = false
-						// 覆盖顶部从 hint 写入的厂家锁定，保证发货中心可回传
-						if localShipped || shipStatus == model.ShipShipped || ps == "shipped" || ps == "completed" {
-							fields["ship_entry_locked"] = true
-							if ps == "completed" {
-								fields["ship_lock_reason"] = "快递助手交易完成"
-							} else {
-								fields["ship_lock_reason"] = "快递助手已发货"
-							}
-						} else {
-							locked, reason := computeShipLock(channel, platformStatus, model.AgentTypeSelf, model.DropshipOSMSSupplier)
-							fields["ship_entry_locked"] = locked
-							fields["ship_lock_reason"] = reason
-						}
 						hint.LogRemark = fmt.Sprintf("同步保留OSMS代发→%s", osmsRestoreSName)
 						if status != fromStatus ||
 							existing.AllocType != model.AllocDropship ||
 							existing.DropshipMode != model.DropshipOSMSSupplier ||
-							existing.SupplierID != osmsRestoreSID ||
-							existing.AgentType != model.AgentTypeSelf {
+							existing.SupplierID != osmsRestoreSID {
 							statusChanged = true
 						}
 						if existing.AllocatedAt == nil {
 							now := time.Now()
 							fields["allocated_at"] = &now
 						}
-						log.Printf("[ordercore] preserve OSMS dropship order=%s po=%s supplier=%d %s (kdzsAgent=%d)",
-							existing.OrderNo, existing.PurchaseOrderID, osmsRestoreSID, osmsRestoreSName, hint.AgentType)
-					} else if localShipped {
-						// 已发货且非 OSMS：只跟平台态/锁定说明，不动履约分配
-						fields["status"] = status
-						if hint.ShipEntryLocked {
-							fields["ship_entry_locked"] = true
-							fields["ship_lock_reason"] = hint.ShipLockReason
-						}
+						log.Printf("[ordercore] preserve OSMS dropship order=%s po=%s supplier=%d %s",
+							existing.OrderNo, existing.PurchaseOrderID, osmsRestoreSID, osmsRestoreSName)
 					}
 				}
 			} else if !terminal && hint.ClearAlloc {
@@ -2562,18 +2524,10 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	if o.Status == model.StatusClosed {
 		return nil, fmt.Errorf("订单已关闭")
 	}
-	// 本地已标发货但快递助手仍待发货且回传失败：允许换正确单号重试
-	retryFailedCallback := false
 	if o.ShipStatus == model.ShipShipped {
-		if o.SourceChannel == model.SourceKDZS &&
-			strings.EqualFold(strings.TrimSpace(o.PlatformStatus), model.KDZSWaitSend) &&
-			orderLatestCallbackFailed(o) {
-			retryFailedCallback = true
-		} else {
-			return nil, fmt.Errorf("订单已发货")
-		}
+		return nil, fmt.Errorf("订单已发货")
 	}
-	if o.ShipEntryLocked && !retryFailedCallback {
+	if o.ShipEntryLocked {
 		reason := o.ShipLockReason
 		if reason == "" {
 			reason = "当前订单已锁定填单号发货"
@@ -2601,13 +2555,12 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		return nil, err
 	}
 	now := time.Now()
-	expressNo := strings.TrimSpace(req.ExpressNo)
 	sh := &model.OrderShipment{
 		TenantID:       tenantID,
 		OrderID:        orderID,
 		ShipmentNo:     shipNo,
 		ExpressCompany: req.ExpressCompany,
-		ExpressNo:      expressNo,
+		ExpressNo:      strings.TrimSpace(req.ExpressNo),
 		NeedTracking:   true,
 		CallbackStatus: model.CallbackPending,
 		Remark:         req.Remark,
@@ -2625,57 +2578,29 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		if cbErr != nil {
 			sh.CallbackStatus = model.CallbackFailed
 			sh.CallbackMessage = truncate(cbErr.Error(), 500)
-			// 记失败流水，但不把订单标成已发货，避免前端误报成功且无法重试
-			if cerr := s.repos.CreateShipment(sh); cerr != nil {
-				log.Printf("[ordercore] persist failed ship callback order=%s: %v", o.OrderNo, cerr)
-			}
-			_ = s.repos.AddStatusLog(&model.OrderStatusLog{
-				TenantID:   tenantID,
-				OrderID:    orderID,
-				FromStatus: o.Status,
-				ToStatus:   o.Status,
-				Action:     "ship_callback_failed",
-				Remark:     truncate(fmt.Sprintf("回传失败 %s %s: %s", req.ExpressCompany, expressNo, cbErr.Error()), 500),
-				OperatorID: operatorID,
-			})
-			// 若此前误标已发货，回退为待发货以便继续回传
-			if retryFailedCallback || o.ShipStatus == model.ShipShipped {
-				_ = s.repos.UpdateOrderFields(tenantID, orderID, map[string]any{
-					"ship_status": model.ShipWaitShip,
-					"shipped_at":  nil,
-				})
-			}
-			return nil, fmt.Errorf("回传快递助手失败: %w", cbErr)
+		} else {
+			sh.CallbackStatus = model.CallbackSucceeded
+			sh.CallbackMessage = truncate(msg, 500)
+			sh.CallbackAt = &now
 		}
-		sh.CallbackStatus = model.CallbackSucceeded
-		sh.CallbackMessage = truncate(msg, 500)
-		sh.CallbackAt = &now
 	} else {
 		sh.CallbackStatus = model.CallbackSkipped
 		sh.CallbackMessage = "未回传来源平台"
 	}
 
 	from := o.Status
-	fields := map[string]any{
-		"ship_status": model.ShipShipped,
-		"shipped_at":  now,
-	}
-	// 回传成功时同步平台态，避免本地已发货而 platform_status 仍停在待发货
-	if doCallback && sh.CallbackStatus == model.CallbackSucceeded && o.SourceChannel == model.SourceKDZS {
-		fields["platform_status"] = "shipped"
-		fields["platform_status_text"] = "已发货"
-		fields["ship_entry_locked"] = true
-		fields["ship_lock_reason"] = "快递助手已发货"
-	}
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
 		if err := tx.CreateShipment(sh); err != nil {
 			return err
 		}
-		return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
+		return tx.TransitionOrder(tenantID, orderID, map[string]any{
+			"ship_status": model.ShipShipped,
+			"shipped_at":  now,
+		}, &model.OrderStatusLog{
 			FromStatus: from,
 			ToStatus:   from, // 履约状态不变
 			Action:     "ship",
-			Remark:     fmt.Sprintf("发货状态→已发货 %s %s", req.ExpressCompany, expressNo),
+			Remark:     fmt.Sprintf("发货状态→已发货 %s %s", req.ExpressCompany, req.ExpressNo),
 			OperatorID: operatorID,
 		})
 	})
@@ -2683,19 +2608,6 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		return nil, err
 	}
 	return s.repos.GetOrder(tenantID, orderID)
-}
-
-func orderLatestCallbackFailed(o *model.Order) bool {
-	if o == nil || len(o.Shipments) == 0 {
-		return false
-	}
-	latest := o.Shipments[0]
-	for i := 1; i < len(o.Shipments); i++ {
-		if o.Shipments[i].ID > latest.ID {
-			latest = o.Shipments[i]
-		}
-	}
-	return latest.CallbackStatus == model.CallbackFailed
 }
 
 func (s *OrderService) callbackSource(ctx context.Context, o *model.Order, sh *model.OrderShipment, token string) (string, error) {
