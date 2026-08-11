@@ -202,6 +202,17 @@ func (s *OrderService) CreateManual(ctx context.Context, tenantID, operatorID ui
 	if req.SellerFlag != nil {
 		o.SellerFlag = *req.SellerFlag
 	}
+	if req.ManualSourceID > 0 {
+		src, serr := s.repos.GetManualOrderSource(tenantID, req.ManualSourceID)
+		if serr != nil {
+			return nil, fmt.Errorf("订单来源无效或不存在")
+		}
+		if !src.Enabled {
+			return nil, fmt.Errorf("订单来源「%s」已停用", src.Name)
+		}
+		o.ManualSourceID = src.ID
+		o.ManualSourceName = src.Name
+	}
 	if req.PlatformOrderNo != "" {
 		o.PlatformOrderID = strings.TrimSpace(req.PlatformOrderNo)
 	}
@@ -343,18 +354,19 @@ func (s *OrderService) CreateManualBatch(ctx context.Context, tenantID, operator
 	out := make([]*model.Order, 0, len(req.Receivers))
 	for _, r := range req.Receivers {
 		single := dto.ManualCreateOrderRequest{
-			BuyerName:    r.BuyerName,
-			BuyerPhone:   r.BuyerPhone,
-			BuyerTel:     r.BuyerTel,
-			Remark:       req.Remark,
-			ShipContent:  req.ShipContent,
-			SellerFlag:   req.SellerFlag,
-			Address:      r.Address,
-			Items:        req.Items,
-			SaveCustomer: req.SaveCustomer,
-			SyncKDZS:     req.SyncKDZS,
-			CreateAction: req.CreateAction,
-			PrintMode:    req.PrintMode,
+			BuyerName:      r.BuyerName,
+			BuyerPhone:     r.BuyerPhone,
+			BuyerTel:       r.BuyerTel,
+			Remark:         req.Remark,
+			ShipContent:    req.ShipContent,
+			SellerFlag:     req.SellerFlag,
+			Address:        r.Address,
+			Items:          req.Items,
+			SaveCustomer:   req.SaveCustomer,
+			SyncKDZS:       req.SyncKDZS,
+			ManualSourceID: req.ManualSourceID,
+			CreateAction:   req.CreateAction,
+			PrintMode:      req.PrintMode,
 		}
 		o, err := s.CreateManual(ctx, tenantID, operatorID, single, bearerToken)
 		if err != nil {

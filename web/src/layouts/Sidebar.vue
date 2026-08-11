@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { HomeFilled, List, Share, Link, Refresh, Promotion } from '@element-plus/icons-vue'
+import { HomeFilled, List, Share, Link, Refresh, Promotion, CollectionTag } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -54,6 +54,10 @@ function navigate(path: string) {
 
       <el-menu-item index="/settings/sync" @click="navigate('/settings/sync')">
         <el-icon><Refresh /></el-icon><span>同步设置</span>
+      </el-menu-item>
+
+      <el-menu-item index="/settings/manual-sources" @click="navigate('/settings/manual-sources')">
+        <el-icon><CollectionTag /></el-icon><span>手工订单来源</span>
       </el-menu-item>
 
       <el-menu-item index="/settings/push" @click="navigate('/settings/push')">

@@ -389,6 +389,11 @@ async function copyOrderText(order: Order, ev?: Event) {
       <el-table-column label="订单类型" width="88">
         <template #default="{ row }">{{ labelSource(row.sourceChannel) }}</template>
       </el-table-column>
+      <el-table-column label="订单来源" width="120" show-overflow-tooltip>
+        <template #default="{ row }">
+          {{ row.sourceChannel === 'manual' ? (row.manualSourceName || '—') : '—' }}
+        </template>
+      </el-table-column>
       <el-table-column label="平台" min-width="180" show-overflow-tooltip>
         <template #default="{ row }">{{ formatPlatformShop(row) }}</template>
       </el-table-column>
