@@ -384,7 +384,6 @@ async function copyOrderText(order: Order, ev?: Event) {
       :data="list"
       :height="tableHeight"
       stripe
-      @row-click="(row: Order) => router.push(`/orders/${row.id}`)"
     >
       <el-table-column label="订单类型" width="88">
         <template #default="{ row }">{{ labelSource(row.sourceChannel) }}</template>
@@ -394,20 +393,20 @@ async function copyOrderText(order: Order, ev?: Event) {
           {{ row.sourceChannel === 'manual' ? (row.manualSourceName || '—') : '—' }}
         </template>
       </el-table-column>
+      <el-table-column prop="orderNo" label="订单号" min-width="150" width="160" show-overflow-tooltip />
       <el-table-column label="平台" min-width="180" show-overflow-tooltip>
         <template #default="{ row }">{{ formatPlatformShop(row) }}</template>
-      </el-table-column>
-      <el-table-column prop="platformOrderId" label="平台单号" min-width="200" width="220">
-        <template #default="{ row }">
-          <span class="platform-oid">{{ row.platformOrderId || '-' }}</span>
-        </template>
       </el-table-column>
       <el-table-column label="买家" min-width="120" show-overflow-tooltip>
         <template #default="{ row }">{{ row.buyerNick || row.buyerName || '-' }}</template>
       </el-table-column>
       <el-table-column label="商品" min-width="260">
         <template #default="{ row }">
-          <div v-if="row.items?.length" class="goods-list" @click.stop>
+          <div
+            v-if="row.items?.length"
+            class="goods-list goods-link"
+            @click="router.push(`/orders/${row.id}`)"
+          >
             <div v-for="(it, idx) in row.items" :key="it.id || idx" class="goods-row">
               <el-image
                 v-if="it.picUrl"
@@ -417,8 +416,9 @@ async function copyOrderText(order: Order, ev?: Event) {
                 fit="cover"
                 class="goods-pic"
                 preview-teleported
+                @click.stop
               />
-              <div v-else class="goods-pic goods-pic-empty">无图</div>
+              <div v-else class="goods-pic goods-pic-empty" @click.stop>无图</div>
               <div class="goods-info">
                 <div class="goods-title">{{ it.productName || it.skuCode || '商品' }}</div>
                 <div v-if="it.skuSpecs || it.skuCode" class="goods-meta">
@@ -429,7 +429,11 @@ async function copyOrderText(order: Order, ev?: Event) {
               </div>
             </div>
           </div>
-          <span v-else>-</span>
+          <span
+            v-else
+            class="goods-link"
+            @click="router.push(`/orders/${row.id}`)"
+          >-</span>
         </template>
       </el-table-column>
       <el-table-column label="留言备注" min-width="200">
@@ -549,7 +553,8 @@ async function copyOrderText(order: Order, ev?: Event) {
   flex-shrink: 0;
 }
 .pager { display: flex; justify-content: flex-end; flex-shrink: 0; }
-:deep(.el-table__row) { cursor: pointer; }
+.goods-link { cursor: pointer; }
+.goods-link:hover .goods-title { color: var(--el-color-primary); }
 .goods-list { display: flex; flex-direction: column; gap: 8px; }
 .goods-row { display: flex; gap: 8px; align-items: flex-start; }
 .goods-pic { width: 48px; height: 48px; border-radius: 4px; flex-shrink: 0; background: #f5f5f5; }
