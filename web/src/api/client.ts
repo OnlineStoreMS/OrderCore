@@ -16,7 +16,7 @@ export interface PageData<T> {
 }
 
 const client: AxiosInstance = axios.create({
-  baseURL: '/api/v1/admin',
+  baseURL: (import.meta.env.BASE_URL || '/') + 'api/v1/admin',
   timeout: 30000,
   headers: { 'Content-Type': 'application/json' },
   withCredentials: true,

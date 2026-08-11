@@ -109,6 +109,8 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.web
+          build-args: |
+            VITE_BASE=/apps/order/
           push: true
           tags: |
             ${{ secrets.ALIYUN_ACR_REGISTRY }}/${{ secrets.ALIYUN_ACR_NAMESPACE }}/${{ matrix.item.id }}:${{ needs.prepare.outputs.tag }}

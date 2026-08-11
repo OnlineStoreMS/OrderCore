@@ -153,7 +153,7 @@ export async function exchangeSsoCode(code: string): Promise<{
   refreshToken?: string
   expiresAt?: number
 }> {
-  const redirectUri = `${window.location.origin}/auth/callback`
+  const redirectUri = `${window.location.origin}${import.meta.env.BASE_URL || '/'}auth/callback`.replace(/([^:]\/)\/+/g, '$1')
   const res = await fetch(`${iamBase()}/auth/sso/token`, {
     method: 'POST',
     credentials: 'include',
