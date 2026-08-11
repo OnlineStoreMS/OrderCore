@@ -60,7 +60,7 @@ export function saveExpiresAt(expiresAt: number) {
 }
 
 /** Cookie SSO：仅记录过期时间；access/refresh 由 httpOnly Cookie 持有（过渡期仍可写入 localStorage） */
-export function saveAuthTokens(accessToken: string, refreshToken?: string, expiresAt?: number) {
+export function saveAuthTokens(accessToken: string, _refreshToken?: string, expiresAt?: number) {
   // 不再依赖 localStorage 中的 JWT；若传入 token 仅用于解析 exp
   const exp = expiresAt || (accessToken ? readJwtExp(accessToken) : undefined)
   if (exp) saveExpiresAt(exp)
