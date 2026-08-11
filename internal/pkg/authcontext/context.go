@@ -50,5 +50,11 @@ func BearerToken(c *gin.Context) string {
 	if strings.HasPrefix(auth, "Bearer ") {
 		return strings.TrimPrefix(auth, "Bearer ")
 	}
+	// Cookie SSO: browser sends uc_access; service-to-service clients need the raw JWT
+	if ck, err := c.Request.Cookie("uc_access"); err == nil && ck != nil {
+		if v := strings.TrimSpace(ck.Value); v != "" {
+			return v
+		}
+	}
 	return ""
 }
