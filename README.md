@@ -58,7 +58,7 @@ go run ./cmd/api -config configs/config.local.yaml
 cd web && npm install && npm run dev
 ```
 
-SSO：UserCore 应用中心跳转 `/auth/callback?token=...`。
+SSO：统一父域下共享 httpOnly Cookie；过渡期仍支持 `/auth/callback?code=` 换票。
 
 ## 主要 API
 

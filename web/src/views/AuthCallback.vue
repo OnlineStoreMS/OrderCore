@@ -2,22 +2,41 @@
 import { onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { fetchSession } from '../api/session'
-import { redirectToPortal, saveAuthTokens, startTokenKeepAlive, trustFreshToken } from '../utils/auth'
+import {
+  exchangeSsoCode,
+  redirectToPortal,
+  saveAuthTokens,
+  startTokenKeepAlive,
+  trustFreshToken,
+} from '../utils/auth'
 
 const route = useRoute()
 const router = useRouter()
 
 onMounted(async () => {
-  const token = route.query.token as string | undefined
-  if (!token) {
+  const code = route.query.code as string | undefined
+  if (code) {
+    try {
+      const tokens = await exchangeSsoCode(code)
+      saveAuthTokens(tokens.accessToken, tokens.refreshToken, tokens.expiresAt)
+      trustFreshToken()
+      startTokenKeepAlive()
+      await fetchSession()
+      router.replace('/dashboard')
+      return
+    } catch {
+      redirectToPortal()
+      return
+    }
+  }
+  // Cookie SSO：共享父域直达时无 code，凭 cookie 拉会话
+  const info = await fetchSession()
+  if (!info) {
     redirectToPortal()
     return
   }
-  const refresh = route.query.refresh as string | undefined
-  saveAuthTokens(token, refresh)
   trustFreshToken()
   startTokenKeepAlive()
-  await fetchSession()
   router.replace('/dashboard')
 })
 </script>

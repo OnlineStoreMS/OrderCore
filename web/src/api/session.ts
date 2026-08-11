@@ -1,6 +1,5 @@
 import {
   clearToken,
-  getToken,
   resetSessionVerification,
   saveAuthTokens,
   startTokenKeepAlive,
@@ -14,11 +13,9 @@ const IAM_API =
 export type { SessionInfo }
 
 export async function fetchSession(): Promise<SessionInfo | null> {
-  const token = getToken()
-  if (!token) return null
   try {
     const res = await fetch(`${IAM_API}/auth/me`, {
-      headers: { Authorization: `Bearer ${token}` },
+      credentials: 'include',
     })
     const body = await res.json()
     if (body.code !== 200 || !body.data) return null
@@ -61,21 +58,23 @@ export function clearSession() {
 }
 
 export async function switchTenant(tenantId: number): Promise<SessionInfo> {
-  const token = getToken()
-  if (!token) throw new Error('未登录')
   const res = await fetch(`${IAM_API}/auth/switch-tenant`, {
     method: 'POST',
+    credentials: 'include',
     headers: {
-      Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ tenantId }),
   })
   const body = await res.json()
-  if (body.code !== 200 || !body.data?.accessToken) {
+  if (body.code !== 200 || !body.data) {
     throw new Error(body.message || '切换租户失败')
   }
-  saveAuthTokens(body.data.accessToken, body.data.refreshToken, body.data.expiresAt)
+  if (body.data.accessToken) {
+    saveAuthTokens(body.data.accessToken, body.data.refreshToken, body.data.expiresAt)
+  } else if (body.data.expiresAt) {
+    saveAuthTokens('', undefined, body.data.expiresAt)
+  }
   resetSessionVerification()
   const info: SessionInfo = {
     user: body.data.user,

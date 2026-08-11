@@ -13,7 +13,6 @@ import {
   type RecipientSearchItem,
 } from '../../api/manualOrder'
 import { listManualOrderSources, type ManualOrderSource } from '../../api/manualSources'
-import { getToken, getRefreshToken } from '../../utils/auth'
 import { getShippingCoreUrl } from '../../utils/runtimeConfig'
 import SellerFlag from '../../components/SellerFlag.vue'
 
@@ -575,8 +574,8 @@ async function pickPrintMode(): Promise<PrintMode | null> {
   }
 }
 
-/** 带登录态跳转发货中心待发货，并自动打开打单弹窗 */
-function goShippingPrint(order: { id: number; orderNo?: string }, printMode: PrintMode) {
+/** Cookie SSO：共享父域下直接打开发货中心（带 redirect） */
+async function goShippingPrint(order: { id: number; orderNo?: string }, printMode: PrintMode) {
   const base = getShippingCoreUrl().replace(/\/$/, '')
   if (!base) {
     throw new Error('发货中心地址未配置')
@@ -590,18 +589,9 @@ function goShippingPrint(order: { id: number; orderNo?: string }, printMode: Pri
   })
   if (order.orderNo) params.set('keyword', order.orderNo)
   const pending = `/pending?${params.toString()}`
-  const token = getToken()
-  let target = `${base}${pending}`
-  if (token) {
-    const url = new URL(`${base}/auth/callback`)
-    url.searchParams.set('token', token)
-    const refresh = getRefreshToken()
-    if (refresh) url.searchParams.set('refresh', refresh)
-    url.searchParams.set('redirect', pending)
-    target = url.toString()
-  }
-  // replace：避免返回键回到半关闭的建单弹窗；先跳转再关弹窗
-  window.location.replace(target)
+  const url = new URL(`${base}/auth/callback`)
+  url.searchParams.set('redirect', pending)
+  window.location.replace(url.toString())
 }
 
 async function submit(action: CreateAction) {
@@ -656,7 +646,7 @@ async function submit(action: CreateAction) {
           emit('created', { orderId: first?.id, action, skipNavigate: true })
           return
         }
-        goShippingPrint(first, printMode)
+        await goShippingPrint(first, printMode)
         return
       }
       visible.value = false
@@ -698,7 +688,7 @@ async function submit(action: CreateAction) {
           emit('created', { orderId: order?.id, action, skipNavigate: true })
           return
         }
-        goShippingPrint(order, printMode)
+        await goShippingPrint(order, printMode)
         return
       }
       visible.value = false

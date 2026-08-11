@@ -20,18 +20,26 @@ func AdminAuth(cfg *config.AuthConfig, jwt *jwtmgr.Manager) gin.HandlerFunc {
 		}
 	}
 	return func(c *gin.Context) {
-		auth := c.GetHeader("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") {
-			response.Fail(c, http.StatusUnauthorized, "请先登录")
-			c.Abort()
-			return
-		}
 		if jwt == nil {
 			response.Fail(c, http.StatusUnauthorized, "JWT 未配置")
 			c.Abort()
 			return
 		}
-		token := strings.TrimPrefix(auth, "Bearer ")
+		token := ""
+		auth := c.GetHeader("Authorization")
+		if strings.HasPrefix(auth, "Bearer ") {
+			token = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+		}
+		if token == "" {
+			if ck, err := c.Request.Cookie("uc_access"); err == nil && ck != nil {
+				token = strings.TrimSpace(ck.Value)
+			}
+		}
+		if token == "" {
+			response.Fail(c, http.StatusUnauthorized, "请先登录")
+			c.Abort()
+			return
+		}
 		claims, err := jwt.ParseAccess(token)
 		if err != nil {
 			response.Fail(c, http.StatusUnauthorized, "登录已过期，请重新登录")

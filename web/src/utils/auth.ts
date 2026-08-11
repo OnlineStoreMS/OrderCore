@@ -59,12 +59,14 @@ export function saveExpiresAt(expiresAt: number) {
   localStorage.setItem(EXPIRES_KEY, String(expiresAt))
 }
 
-/** 保存门户下发的 access / refresh；expiresAt 可选，缺省时从 JWT payload 解析 */
+/** Cookie SSO：仅记录过期时间；access/refresh 由 httpOnly Cookie 持有（过渡期仍可写入 localStorage） */
 export function saveAuthTokens(accessToken: string, refreshToken?: string, expiresAt?: number) {
-  saveToken(accessToken)
-  if (refreshToken) saveRefreshToken(refreshToken)
-  const exp = expiresAt || readJwtExp(accessToken)
+  // 不再依赖 localStorage 中的 JWT；若传入 token 仅用于解析 exp
+  const exp = expiresAt || (accessToken ? readJwtExp(accessToken) : undefined)
   if (exp) saveExpiresAt(exp)
+  // 清理历史遗留明文 JWT
+  localStorage.removeItem(TOKEN_KEY)
+  localStorage.removeItem(REFRESH_KEY)
 }
 
 function readJwtExp(token: string): number | undefined {
@@ -108,11 +110,65 @@ export function portalLoginUrl() {
   return `${getPortalUrl()}/login`
 }
 
-function iamBase(): string {
+export function iamBase(): string {
   return (
     import.meta.env.VITE_IAM_API_URL ||
     (import.meta.env.VITE_API_GATEWAY ? '/api/v1' : '/iam')
   )
+}
+
+/** SSO：签发一次性 code（跨应用跳转时用目标应用的 redirectUri） */
+export async function authorizeSso(opts: {
+  appCode?: string
+  redirectUri?: string
+}): Promise<{ code: string; redirectUri: string; expiresIn: number }> {
+  const token = getToken()
+  if (!token) throw new Error('未登录')
+  const res = await fetch(`${iamBase()}/auth/sso/authorize`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      appCode: opts.appCode,
+      redirectUri: opts.redirectUri,
+    }),
+  })
+  const body = await res.json()
+  if (body.code !== 200 || !body.data?.code || !body.data?.redirectUri) {
+    throw new Error(body.message || 'SSO 授权失败')
+  }
+  return {
+    code: body.data.code as string,
+    redirectUri: body.data.redirectUri as string,
+    expiresIn: body.data.expiresIn as number,
+  }
+}
+
+/** SSO：用一次性 code 换 access/refresh（禁止从 URL 接收 JWT） */
+export async function exchangeSsoCode(code: string): Promise<{
+  accessToken: string
+  refreshToken?: string
+  expiresAt?: number
+}> {
+  const redirectUri = `${window.location.origin}/auth/callback`
+  const res = await fetch(`${iamBase()}/auth/sso/token`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, redirectUri }),
+  })
+  const body = await res.json()
+  if (body.code !== 200 || !body.data?.accessToken) {
+    throw new Error(body.message || 'SSO 换票失败')
+  }
+  return {
+    accessToken: body.data.accessToken as string,
+    refreshToken: body.data.refreshToken as string | undefined,
+    expiresAt: body.data.expiresAt as number | undefined,
+  }
 }
 
 /** 静默续期；并发复用同一次请求 */
@@ -120,12 +176,12 @@ export async function tryRefreshAccessToken(): Promise<boolean> {
   if (refreshPromise) return refreshPromise
   refreshPromise = (async () => {
     const refreshToken = getRefreshToken()
-    if (!refreshToken) return false
     try {
       const res = await fetch(`${iamBase()}/auth/refresh`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken }),
+        body: JSON.stringify(refreshToken ? { refreshToken } : {}),
       })
       const body = await res.json()
       if (body.code !== 200 || !body.data?.accessToken) return false
@@ -193,7 +249,6 @@ export async function verifySession(): Promise<boolean> {
 }
 
 export async function ensureSession(): Promise<boolean> {
-  if (!getToken()) return false
   const exp = getExpiresAt()
   if (exp && exp * 1000 <= Date.now()) {
     const refreshed = await tryRefreshAccessToken()

@@ -1,11 +1,21 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
-import { clearSession } from '../api/session'
-import { portalLoginUrl } from '../utils/auth'
+import { clearToken, iamBase, redirectToPortal } from '../utils/auth'
 
-onMounted(() => {
-  clearSession()
-  window.location.href = portalLoginUrl()
+onMounted(async () => {
+  try {
+    await fetch(`${iamBase()}/auth/logout`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+  } catch {
+    // ignore
+  }
+  clearToken()
+  if (window.self !== window.top) return
+  redirectToPortal()
 })
 </script>
 
