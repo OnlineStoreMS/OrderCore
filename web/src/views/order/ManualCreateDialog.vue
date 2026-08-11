@@ -12,7 +12,6 @@ import {
   type ParsedAddress,
   type RecipientSearchItem,
 } from '../../api/manualOrder'
-import { listManualOrderSources, type ManualOrderSource } from '../../api/manualSources'
 import { getToken, getRefreshToken } from '../../utils/auth'
 import { getShippingCoreUrl } from '../../utils/runtimeConfig'
 import SellerFlag from '../../components/SellerFlag.vue'
@@ -58,18 +57,7 @@ const form = reactive({
   saveCustomer: true,
   syncKdzs: true,
   platformOrderNo: '',
-  manualSourceId: undefined as number | undefined,
 })
-
-const manualSources = ref<ManualOrderSource[]>([])
-
-async function loadManualSources() {
-  try {
-    manualSources.value = await listManualOrderSources({ enabledOnly: true })
-  } catch {
-    manualSources.value = []
-  }
-}
 
 const provinceOptions = computed(() => areaOptions)
 const cityOptions = computed(() => {
@@ -137,10 +125,7 @@ const recipientPage = ref(1)
 const selectedRecipientKey = ref('')
 
 watch(visible, (v) => {
-  if (v) {
-    reset()
-    loadManualSources()
-  }
+  if (v) reset()
 })
 
 function reset() {
@@ -162,7 +147,6 @@ function reset() {
     saveCustomer: true,
     syncKdzs: true,
     platformOrderNo: '',
-    manualSourceId: undefined,
   })
   items.value = []
   batchReceivers.value = []
@@ -560,18 +544,18 @@ function buildItemsPayload() {
 async function pickPrintMode(): Promise<PrintMode | null> {
   try {
     await ElMessageBox.confirm(
-      '请选择打印方式：默认自建物流（不同步快递助手）；也可改用快递助手打印（使用发货中心默认账号并同步）。创建成功后将跳转发货中心继续打单发货。',
+      '请选择打印方式：快递助手打印将使用发货中心默认快递助手账号并同步；自建物流打印不同步快递助手。创建成功后将跳转发货中心继续打单发货。',
       '创建并打印',
       {
         distinguishCancelAndClose: true,
-        confirmButtonText: '自建物流打印',
-        cancelButtonText: '快递助手打印',
+        confirmButtonText: '快递助手打印',
+        cancelButtonText: '自建物流打印',
         type: 'info',
       },
     )
-    return 'carrier'
+    return 'kdzs'
   } catch (action) {
-    if (action === 'cancel') return 'kdzs'
+    if (action === 'cancel') return 'carrier'
     return null
   }
 }
@@ -644,7 +628,6 @@ async function submit(action: CreateAction) {
         sellerFlag: form.sellerFlag,
         saveCustomer: form.saveCustomer,
         syncKdzs,
-        manualSourceId: form.manualSourceId || undefined,
         createAction: action,
         printMode,
       })
@@ -679,7 +662,6 @@ async function submit(action: CreateAction) {
         syncKdzs,
         createAction: action,
         printMode,
-        manualSourceId: form.manualSourceId || undefined,
         platformOrderNo: form.platformOrderNo || undefined,
         address: {
           name: form.buyerName,
@@ -731,7 +713,7 @@ function clearContent() {
 </script>
 
 <template>
-  <el-dialog v-model="visible" title="手工建单" width="1280px" destroy-on-close class="manual-dialog">
+  <el-dialog v-model="visible" title="手工建单" width="1080px" destroy-on-close class="manual-dialog">
     <div class="form">
       <!-- 识别类型与选项同一行，整体左对齐 -->
       <div class="field-row">
@@ -850,22 +832,22 @@ function clearContent() {
           <span class="goods-total">订单合计 ¥{{ orderAmount.toFixed(2) }}</span>
         </div>
         <el-table :data="items" border size="small" class="goods-table" empty-text="暂无数据">
-          <el-table-column label="商品名称" min-width="180">
+          <el-table-column label="商品名称" min-width="150">
             <template #default="{ row }">
               <el-input v-model="row.productName" placeholder="商品名称" />
             </template>
           </el-table-column>
-          <el-table-column label="商家编码" width="120">
+          <el-table-column label="商家编码" width="110">
             <template #default="{ row }">
               <el-input v-model="row.outerId" placeholder="商家编码" />
             </template>
           </el-table-column>
-          <el-table-column label="规格名称" min-width="200">
+          <el-table-column label="规格名称" width="110">
             <template #default="{ row }">
               <el-input v-model="row.skuSpecs" placeholder="规格名称" />
             </template>
           </el-table-column>
-          <el-table-column label="规格编码" min-width="160">
+          <el-table-column label="规格编码" width="110">
             <template #default="{ row }">
               <el-input v-model="row.skuCode" placeholder="规格编码" />
             </template>
@@ -905,30 +887,8 @@ function clearContent() {
       </div>
 
       <div class="field-row top-gap">
-        <span class="field-label">订单来源：</span>
-        <el-select
-          v-model="form.manualSourceId"
-          clearable
-          filterable
-          placeholder="可选，请先在「手工订单来源」中录入"
-          class="w-orderno"
-        >
-          <el-option
-            v-for="s in manualSources"
-            :key="s.id"
-            :label="s.name"
-            :value="s.id"
-          />
-        </el-select>
-        <span class="hint">仅手工单</span>
-      </div>
-      <div class="field-row">
         <span class="field-label">订单编号：</span>
-        <el-input
-          v-model="form.platformOrderNo"
-          placeholder="可选；填写则作为本系统单号，已占用会提示。不填自动生成"
-          class="w-orderno"
-        />
+        <el-input v-model="form.platformOrderNo" placeholder="可选，不填则用系统单号" class="w-orderno" />
       </div>
       <div class="field-row remark-flag-row">
         <span class="field-label">订单备注：</span>

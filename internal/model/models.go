@@ -86,9 +86,6 @@ type Order struct {
 	PlatformSysTid      string     `gorm:"size:128" json:"platformSysTid"`
 	ShopID              string     `gorm:"size:64" json:"shopId"`
 	ShopName            string     `gorm:"size:128" json:"shopName"`
-	// ManualSourceID / ManualSourceName 仅手工单：来源字典（可提前录入）
-	ManualSourceID      uint64     `gorm:"index" json:"manualSourceId"`
-	ManualSourceName    string     `gorm:"size:128" json:"manualSourceName"`
 	ExternalRefID       string     `gorm:"size:64;index" json:"externalRefId"`                         // StoreCore 销售单 ID 等
 	Status              string     `gorm:"size:32;not null;index" json:"status"`                       // 履约状态
 	ShipStatus          string     `gorm:"size:32;not null;index;default:wait_ship" json:"shipStatus"` // 发货状态

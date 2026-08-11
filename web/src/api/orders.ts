@@ -45,8 +45,6 @@ export interface Order {
   platformSysTid?: string
   shopId?: string
   shopName?: string
-  manualSourceId?: number
-  manualSourceName?: string
   status: string
   shipStatus?: string
   allocType?: string

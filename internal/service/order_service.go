@@ -174,21 +174,9 @@ func (s *OrderService) CreateManual(ctx context.Context, tenantID, operatorID ui
 		}
 	}
 
-	customNo := strings.TrimSpace(req.PlatformOrderNo)
-	var orderNo string
-	if customNo != "" {
-		if existing, ferr := s.repos.FindByOrderNo(tenantID, customNo); ferr == nil && existing != nil {
-			return nil, fmt.Errorf("订单编号「%s」已被占用，请换一个或留空由系统生成", customNo)
-		} else if ferr != nil && !errors.Is(ferr, gorm.ErrRecordNotFound) {
-			return nil, ferr
-		}
-		orderNo = customNo
-	} else {
-		var err error
-		orderNo, err = s.repos.NextOrderNo(tenantID)
-		if err != nil {
-			return nil, err
-		}
+	orderNo, err := s.repos.NextOrderNo(tenantID)
+	if err != nil {
+		return nil, err
 	}
 	o := &model.Order{
 		TenantID:           tenantID,
@@ -214,18 +202,9 @@ func (s *OrderService) CreateManual(ctx context.Context, tenantID, operatorID ui
 	if req.SellerFlag != nil {
 		o.SellerFlag = *req.SellerFlag
 	}
-	if req.ManualSourceID > 0 {
-		src, serr := s.repos.GetManualOrderSource(tenantID, req.ManualSourceID)
-		if serr != nil {
-			return nil, fmt.Errorf("订单来源无效或不存在")
-		}
-		if !src.Enabled {
-			return nil, fmt.Errorf("订单来源「%s」已停用", src.Name)
-		}
-		o.ManualSourceID = src.ID
-		o.ManualSourceName = src.Name
+	if req.PlatformOrderNo != "" {
+		o.PlatformOrderID = strings.TrimSpace(req.PlatformOrderNo)
 	}
-	// 自定义订单编号只安放为系统单号 order_no；platform_order_id 留给同步快递助手后回填，避免撞唯一索引
 	now := time.Now()
 	// 手工单付款时间由自营中心有付款记录后回写，创建时不填
 	o.PayTime = nil
@@ -259,7 +238,7 @@ func (s *OrderService) CreateManual(ctx context.Context, tenantID, operatorID ui
 	}
 	o.Address = mapAddress(tenantID, 0, req.Address)
 
-	err := s.repos.Transaction(func(tx *repo.Repos) error {
+	err = s.repos.Transaction(func(tx *repo.Repos) error {
 		if err := tx.CreateOrder(o); err != nil {
 			return err
 		}
@@ -364,19 +343,18 @@ func (s *OrderService) CreateManualBatch(ctx context.Context, tenantID, operator
 	out := make([]*model.Order, 0, len(req.Receivers))
 	for _, r := range req.Receivers {
 		single := dto.ManualCreateOrderRequest{
-			BuyerName:      r.BuyerName,
-			BuyerPhone:     r.BuyerPhone,
-			BuyerTel:       r.BuyerTel,
-			Remark:         req.Remark,
-			ShipContent:    req.ShipContent,
-			SellerFlag:     req.SellerFlag,
-			Address:        r.Address,
-			Items:          req.Items,
-			SaveCustomer:   req.SaveCustomer,
-			SyncKDZS:       req.SyncKDZS,
-			ManualSourceID: req.ManualSourceID,
-			CreateAction:   req.CreateAction,
-			PrintMode:      req.PrintMode,
+			BuyerName:    r.BuyerName,
+			BuyerPhone:   r.BuyerPhone,
+			BuyerTel:     r.BuyerTel,
+			Remark:       req.Remark,
+			ShipContent:  req.ShipContent,
+			SellerFlag:   req.SellerFlag,
+			Address:      r.Address,
+			Items:        req.Items,
+			SaveCustomer: req.SaveCustomer,
+			SyncKDZS:     req.SyncKDZS,
+			CreateAction: req.CreateAction,
+			PrintMode:    req.PrintMode,
 		}
 		o, err := s.CreateManual(ctx, tenantID, operatorID, single, bearerToken)
 		if err != nil {

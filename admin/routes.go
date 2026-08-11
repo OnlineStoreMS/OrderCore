@@ -60,11 +60,6 @@ func RegisterRoutes(g *gin.RouterGroup, h *Handlers, sh *SettingsHandlers) {
 	g.PUT("/push-rules/:id", sh.UpdatePushRule)
 	g.DELETE("/push-rules/:id", sh.DeletePushRule)
 	g.GET("/push-logs", sh.ListPushLogs)
-
-	g.GET("/manual-order-sources", sh.ListManualOrderSources)
-	g.POST("/manual-order-sources", sh.CreateManualOrderSource)
-	g.PUT("/manual-order-sources/:id", sh.UpdateManualOrderSource)
-	g.DELETE("/manual-order-sources/:id", sh.DeleteManualOrderSource)
 }
 
 func RegisterInternalRoutes(g *gin.RouterGroup, h *Handlers) {

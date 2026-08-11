@@ -151,34 +151,3 @@ func (r *Repos) ListPushLogs(tenantID, orderID uint64, limit int) ([]model.PushL
 	err := q.Order("id DESC").Limit(limit).Find(&list).Error
 	return list, err
 }
-
-func (r *Repos) ListManualOrderSources(tenantID uint64, enabledOnly bool) ([]model.ManualOrderSource, error) {
-	q := r.db.Where("tenant_id = ?", tenantID)
-	if enabledOnly {
-		q = q.Where("enabled = ?", true)
-	}
-	var list []model.ManualOrderSource
-	err := q.Order("sort ASC, id ASC").Find(&list).Error
-	return list, err
-}
-
-func (r *Repos) GetManualOrderSource(tenantID, id uint64) (*model.ManualOrderSource, error) {
-	var row model.ManualOrderSource
-	err := r.db.Where("tenant_id = ? AND id = ?", tenantID, id).First(&row).Error
-	if err != nil {
-		return nil, err
-	}
-	return &row, nil
-}
-
-func (r *Repos) CreateManualOrderSource(row *model.ManualOrderSource) error {
-	return r.db.Create(row).Error
-}
-
-func (r *Repos) SaveManualOrderSource(row *model.ManualOrderSource) error {
-	return r.db.Save(row).Error
-}
-
-func (r *Repos) DeleteManualOrderSource(tenantID, id uint64) error {
-	return r.db.Where("tenant_id = ? AND id = ?", tenantID, id).Delete(&model.ManualOrderSource{}).Error
-}

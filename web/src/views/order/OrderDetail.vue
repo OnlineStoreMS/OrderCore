@@ -338,9 +338,6 @@ onMounted(load)
     <template v-if="order">
       <el-descriptions :column="3" border>
         <el-descriptions-item label="订单类型">{{ labelSource(order.sourceChannel) }}</el-descriptions-item>
-        <el-descriptions-item v-if="order.sourceChannel === 'manual'" label="订单来源">
-          {{ order.manualSourceName || '—' }}
-        </el-descriptions-item>
         <el-descriptions-item label="平台">{{ order.platform || '-' }} / {{ order.shopName || '-' }}</el-descriptions-item>
         <el-descriptions-item label="平台单号">{{ order.platformOrderId || '-' }}</el-descriptions-item>
         <el-descriptions-item label="履约状态">{{ labelStatus(order.status) }}</el-descriptions-item>
