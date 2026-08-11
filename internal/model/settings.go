@@ -112,3 +112,18 @@ type PushLog struct {
 }
 
 func (PushLog) TableName() string { return "push_logs" }
+
+// ManualOrderSource 手工订单来源（仅手工单可选；租户可提前录入）
+type ManualOrderSource struct {
+	ID        uint64    `gorm:"primaryKey" json:"id"`
+	TenantID  uint64    `gorm:"uniqueIndex:uk_manual_src_tenant_name;not null;index" json:"tenantId"`
+	Name      string    `gorm:"size:128;uniqueIndex:uk_manual_src_tenant_name;not null" json:"name"`
+	Code      string    `gorm:"size:64" json:"code"`
+	Sort      int       `gorm:"default:100" json:"sort"`
+	Enabled   bool      `gorm:"default:true;index" json:"enabled"`
+	Remark    string    `gorm:"size:512" json:"remark"`
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+func (ManualOrderSource) TableName() string { return "manual_order_sources" }

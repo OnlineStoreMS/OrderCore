@@ -19,8 +19,10 @@ type ManualCreateOrderRequest struct {
 	SaveCustomer bool `json:"saveCustomer"`
 	// SyncKDZS 同步创建快递助手手工单（默认 true）；账号取发货中心默认快递助手账号
 	SyncKDZS *bool `json:"syncKdzs"`
-	// PlatformOrderNo 可选外部订单编号
+	// PlatformOrderNo 可选自定义系统单号；不填则自动生成 OC…。写入 order_no，不同步写入 platform_order_id（后者留给快递助手回填 tid）
 	PlatformOrderNo string `json:"platformOrderNo"`
+	// ManualSourceID 手工订单来源（仅手工单；来自「手工订单来源」管理）
+	ManualSourceID uint64 `json:"manualSourceId"`
 	// CreateAction 对齐快递助手建单动作：
 	// create_only=仅创建(待推单) | create_and_push=创建并推送(默认自营) | create_and_print=创建并打印
 	CreateAction string `json:"createAction"`
@@ -35,10 +37,11 @@ type ManualBatchCreateRequest struct {
 	Remark       string                `json:"remark"`
 	ShipContent  string                `json:"shipContent"`
 	SellerFlag   *int                  `json:"sellerFlag"`
-	SaveCustomer bool                  `json:"saveCustomer"`
-	SyncKDZS     *bool                 `json:"syncKdzs"`
-	CreateAction string                `json:"createAction"`
-	PrintMode    string                `json:"printMode"`
+	SaveCustomer   bool                  `json:"saveCustomer"`
+	SyncKDZS       *bool                 `json:"syncKdzs"`
+	ManualSourceID uint64                `json:"manualSourceId"`
+	CreateAction   string                `json:"createAction"`
+	PrintMode      string                `json:"printMode"`
 }
 
 type ManualReceiverInput struct {

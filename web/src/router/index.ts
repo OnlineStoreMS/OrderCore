@@ -31,6 +31,7 @@ const router = createRouter({
         { path: 'settings', redirect: '/settings/sync' },
         { path: 'settings/sync', name: 'SyncSettings', component: () => import('../views/settings/SyncSettings.vue'), meta: { title: '同步设置' } },
         { path: 'settings/push', name: 'PushSettings', component: () => import('../views/settings/PushSettings.vue'), meta: { title: '推送设置' } },
+        { path: 'settings/manual-sources', name: 'ManualSources', component: () => import('../views/settings/ManualSourceSettings.vue'), meta: { title: '手工订单来源' } },
       ],
     },
   ],

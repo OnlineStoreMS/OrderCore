@@ -12,6 +12,7 @@ import {
   type ParsedAddress,
   type RecipientSearchItem,
 } from '../../api/manualOrder'
+import { listManualOrderSources, type ManualOrderSource } from '../../api/manualSources'
 import { getToken, getRefreshToken } from '../../utils/auth'
 import { getShippingCoreUrl } from '../../utils/runtimeConfig'
 import SellerFlag from '../../components/SellerFlag.vue'
@@ -57,7 +58,18 @@ const form = reactive({
   saveCustomer: true,
   syncKdzs: true,
   platformOrderNo: '',
+  manualSourceId: undefined as number | undefined,
 })
+
+const manualSources = ref<ManualOrderSource[]>([])
+
+async function loadManualSources() {
+  try {
+    manualSources.value = await listManualOrderSources({ enabledOnly: true })
+  } catch {
+    manualSources.value = []
+  }
+}
 
 const provinceOptions = computed(() => areaOptions)
 const cityOptions = computed(() => {
@@ -125,7 +137,10 @@ const recipientPage = ref(1)
 const selectedRecipientKey = ref('')
 
 watch(visible, (v) => {
-  if (v) reset()
+  if (v) {
+    reset()
+    loadManualSources()
+  }
 })
 
 function reset() {
@@ -147,6 +162,7 @@ function reset() {
     saveCustomer: true,
     syncKdzs: true,
     platformOrderNo: '',
+    manualSourceId: undefined,
   })
   items.value = []
   batchReceivers.value = []
@@ -628,6 +644,7 @@ async function submit(action: CreateAction) {
         sellerFlag: form.sellerFlag,
         saveCustomer: form.saveCustomer,
         syncKdzs,
+        manualSourceId: form.manualSourceId || undefined,
         createAction: action,
         printMode,
       })
@@ -662,6 +679,7 @@ async function submit(action: CreateAction) {
         syncKdzs,
         createAction: action,
         printMode,
+        manualSourceId: form.manualSourceId || undefined,
         platformOrderNo: form.platformOrderNo || undefined,
         address: {
           name: form.buyerName,
@@ -887,8 +905,30 @@ function clearContent() {
       </div>
 
       <div class="field-row top-gap">
+        <span class="field-label">订单来源：</span>
+        <el-select
+          v-model="form.manualSourceId"
+          clearable
+          filterable
+          placeholder="可选，请先在「手工订单来源」中录入"
+          class="w-orderno"
+        >
+          <el-option
+            v-for="s in manualSources"
+            :key="s.id"
+            :label="s.name"
+            :value="s.id"
+          />
+        </el-select>
+        <span class="hint">仅手工单</span>
+      </div>
+      <div class="field-row">
         <span class="field-label">订单编号：</span>
-        <el-input v-model="form.platformOrderNo" placeholder="可选，不填则用系统单号" class="w-orderno" />
+        <el-input
+          v-model="form.platformOrderNo"
+          placeholder="可选；填写则作为本系统单号，已占用会提示。不填自动生成"
+          class="w-orderno"
+        />
       </div>
       <div class="field-row remark-flag-row">
         <span class="field-label">订单备注：</span>
