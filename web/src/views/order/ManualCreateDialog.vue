@@ -557,19 +557,20 @@ function buildItemsPayload() {
 
 async function pickPrintMode(): Promise<PrintMode | null> {
   try {
+    // 默认主按钮：自建物流打印（与发货中心打单默认 sf 一致）
     await ElMessageBox.confirm(
-      '请选择打印方式：快递助手打印将使用发货中心默认快递助手账号并同步；自建物流打印不同步快递助手。创建成功后将跳转发货中心继续打单发货。',
+      '请选择打印方式：自建物流打印不同步快递助手；快递助手打印将使用发货中心默认快递助手账号并同步。创建成功后将跳转发货中心继续打单发货。',
       '创建并打印',
       {
         distinguishCancelAndClose: true,
-        confirmButtonText: '快递助手打印',
-        cancelButtonText: '自建物流打印',
+        confirmButtonText: '自建物流打印',
+        cancelButtonText: '快递助手打印',
         type: 'info',
       },
     )
-    return 'kdzs'
+    return 'carrier'
   } catch (action) {
-    if (action === 'cancel') return 'carrier'
+    if (action === 'cancel') return 'kdzs'
     return null
   }
 }

@@ -26,7 +26,7 @@ type ManualCreateOrderRequest struct {
 	// CreateAction 对齐快递助手建单动作：
 	// create_only=仅创建(待推单) | create_and_push=创建并推送(默认自营) | create_and_print=创建并打印
 	CreateAction string `json:"createAction"`
-	// PrintMode 仅 create_and_print：kdzs=快递助手打印 | carrier=自建物流账号打印
+	// PrintMode 仅 create_and_print：kdzs=快递助手打印 | carrier=自建物流账号打印（默认 carrier）
 	PrintMode string `json:"printMode"`
 }
 

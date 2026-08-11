@@ -519,10 +519,13 @@ func normalizeManualPrintMode(mode, createAction string) string {
 		return ""
 	}
 	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "kdzs", "express":
+		return "kdzs"
 	case "carrier", "sf", "self", "local":
 		return "carrier"
 	default:
-		return "kdzs"
+		// 创建并打印默认自建物流
+		return "carrier"
 	}
 }
 
