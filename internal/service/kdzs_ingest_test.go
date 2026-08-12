@@ -23,8 +23,24 @@ func TestDeriveKDZSFactoryFromFactoryName(t *testing.T) {
 	if h.ShipStatus != model.ShipWaitShip {
 		t.Fatalf("shipStatus=%s", h.ShipStatus)
 	}
-	if h.PlatformStatus != model.KDZSWaitSend {
-		t.Fatalf("platformStatus=%s", h.PlatformStatus)
+	// 电商「待发货」不能推断为 wait_send；厂家代发走 default 分支仍会已分配
+	if h.PlatformStatus == model.KDZSWaitSend {
+		t.Fatalf("ORDER_PAID+待发货 must not become wait_send, platformStatus=%s", h.PlatformStatus)
+	}
+}
+
+func TestDeriveKDZSOrderPaidSelfStaysPending(t *testing.T) {
+	// 待推单在助手侧，但详情常回 ORDER_PAID + 文案「待发货」——不可误成自营已分配
+	h := deriveKDZSIngest(model.SourceKDZS, dto.IngestOrderRequest{
+		PlatformStatus:     "ORDER_PAID",
+		PlatformStatusText: "待发货",
+		AgentType:          1,
+	})
+	if h.Status != model.StatusPendingAlloc || h.ApplySyncAlloc || h.AllocType == model.AllocSelfShip {
+		t.Fatalf("ORDER_PAID self should stay pending_alloc, hint=%+v", h)
+	}
+	if h.PlatformStatus == model.KDZSWaitSend {
+		t.Fatalf("must not normalize ecommerce 待发货 to wait_send, got %s", h.PlatformStatus)
 	}
 }
 

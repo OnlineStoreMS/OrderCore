@@ -3928,7 +3928,10 @@ func normalizeKDZSPlatformStatus(status, statusText string) (string, string) {
 	case "待推单":
 		return model.KDZSWaitAudit, text
 	case "待发货":
-		return model.KDZSWaitSend, text
+		// 电商 ORDER_PAID / WAIT_SELLER_SEND_GOODS 的中文也是「待发货」。
+		// 单凭文案不能当成快递助手 wait_send，否则待推单会被误标自营已分配。
+		// 真正的 wait_send 应由列表查询态覆盖，或上游已带 wait_send 码（上面已处理）。
+		return st, text
 	case "已发货":
 		return "shipped", text
 	case "交易完成", "已完成":
