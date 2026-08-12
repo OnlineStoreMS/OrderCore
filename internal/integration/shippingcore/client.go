@@ -1,6 +1,7 @@
 package shippingcore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -102,4 +103,50 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// DeleteShipmentsByOrderCore 按订单中心销售单删除发货运单（手工单删除级联）。
+func (c *Client) DeleteShipmentsByOrderCore(ctx context.Context, token string, orderCoreOrderID uint64, sourceRef string) (int, error) {
+	if !c.Enabled() {
+		return 0, fmt.Errorf("shippingcore 未配置")
+	}
+	body := map[string]any{
+		"orderCoreOrderId": orderCoreOrderID,
+		"sourceRef":        strings.TrimSpace(sourceRef),
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/admin/shipments/delete-by-ordercore", bytes.NewReader(payload))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimPrefix(token, "Bearer "))
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("shippingcore http %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var wrap struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			Deleted int `json:"deleted"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &wrap); err != nil {
+		return 0, fmt.Errorf("decode shippingcore: %w", err)
+	}
+	if wrap.Code != 0 && wrap.Code != 200 {
+		return 0, fmt.Errorf("shippingcore: %s", firstNonEmpty(wrap.Message, "请求失败"))
+	}
+	return wrap.Data.Deleted, nil
 }

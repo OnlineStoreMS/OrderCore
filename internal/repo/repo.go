@@ -190,6 +190,32 @@ func (r *Repos) SaveOrder(o *model.Order) error {
 	return r.db.Session(&gorm.Session{FullSaveAssociations: true}).Save(o).Error
 }
 
+// DeleteOrderCascade 硬删除销售单及其子表（手工单删除）。
+func (r *Repos) DeleteOrderCascade(tenantID, orderID uint64) error {
+	return r.Transaction(func(txRepos *Repos) error {
+		db := txRepos.db
+		for _, m := range []any{
+			&model.OrderItem{},
+			&model.OrderAddress{},
+			&model.OrderStatusLog{},
+			&model.OrderShipment{},
+			&model.PushLog{},
+		} {
+			if err := db.Where("tenant_id = ? AND order_id = ?", tenantID, orderID).Delete(m).Error; err != nil {
+				return err
+			}
+		}
+		res := db.Where("tenant_id = ? AND id = ?", tenantID, orderID).Delete(&model.Order{})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	})
+}
+
 func (r *Repos) UpdateOrderFields(tenantID, id uint64, fields map[string]interface{}) error {
 	res := r.db.Model(&model.Order{}).Where("tenant_id = ? AND id = ?", tenantID, id).Updates(fields)
 	if res.Error != nil {

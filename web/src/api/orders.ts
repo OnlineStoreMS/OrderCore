@@ -392,6 +392,10 @@ export async function revokeAllocateOrder(id: number) {
   return unwrap<Order>(await client.post(`/orders/${id}/revoke-allocate`))
 }
 
+export async function deleteManualOrder(id: number) {
+  return unwrap<{ ok: boolean }>(await client.delete(`/orders/${id}`))
+}
+
 export async function updateOrderRemarks(id: number, body: {
   sellerRemark?: string
   sellerFlag?: number

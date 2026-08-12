@@ -345,6 +345,19 @@ func (h *Handlers) RevokeAllocate(c *gin.Context) {
 	response.OK(c, o)
 }
 
+func (h *Handlers) DeleteManualOrder(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, "无效 ID")
+		return
+	}
+	if err := h.orders.DeleteManualOrder(c.Request.Context(), authcontext.TenantID(c), id, authcontext.BearerToken(c)); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, gin.H{"ok": true})
+}
+
 func (h *Handlers) UpdateRemarks(c *gin.Context) {
 	id, err := parseID(c.Param("id"))
 	if err != nil {

@@ -136,6 +136,24 @@ func (c *Client) CancelByRefSoID(ctx context.Context, bearerToken string, refSoI
 	return out, nil
 }
 
+// DeleteByRefSoID 按销售单硬删除关联自营单（手工单删除级联）。
+func (c *Client) DeleteByRefSoID(ctx context.Context, bearerToken string, refSoID uint64) (int, error) {
+	if !c.Enabled() {
+		return 0, fmt.Errorf("SelfCore 未配置")
+	}
+	if refSoID == 0 {
+		return 0, nil
+	}
+	body := map[string]any{"refSoId": refSoID}
+	var out struct {
+		Deleted int `json:"deleted"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, bearerToken, "/api/v1/admin/self-orders/delete-by-ref-so", body, &out); err != nil {
+		return 0, err
+	}
+	return out.Deleted, nil
+}
+
 func (c *Client) doJSON(ctx context.Context, method, bearerToken, path string, body any, out any) error {
 	reqURL := c.baseURL + path
 	var reader io.Reader

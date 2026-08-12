@@ -2281,6 +2281,44 @@ func (s *OrderService) cancelLinkedSelfOrders(ctx context.Context, orderID uint6
 	return nil
 }
 
+// DeleteManualOrder 仅允许删除手工订单：级联删除自营单、发货中心运单，再硬删销售单。
+func (s *OrderService) DeleteManualOrder(ctx context.Context, tenantID, orderID uint64, bearerToken string) error {
+	o, err := s.repos.GetOrder(tenantID, orderID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("订单不存在")
+		}
+		return err
+	}
+	if o.SourceChannel != model.SourceManual {
+		return fmt.Errorf("仅支持删除手工订单")
+	}
+
+	if s.selfCore != nil && s.selfCore.Enabled() && strings.TrimSpace(bearerToken) != "" {
+		if _, err := s.selfCore.DeleteByRefSoID(ctx, bearerToken, orderID); err != nil {
+			if !isSupplyNotFound(err) {
+				return fmt.Errorf("删除关联自营单失败: %w", err)
+			}
+			log.Printf("[ordercore] delete self orders missing orderID=%d: %v (skip)", orderID, err)
+		}
+	}
+
+	if s.shipping != nil && s.shipping.Enabled() && strings.TrimSpace(bearerToken) != "" {
+		sourceRef := strings.TrimSpace(o.OrderNo)
+		if _, err := s.shipping.DeleteShipmentsByOrderCore(ctx, bearerToken, orderID, sourceRef); err != nil {
+			log.Printf("[ordercore] delete shipping shipments orderID=%d: %v (best-effort)", orderID, err)
+		}
+	}
+
+	if err := s.repos.DeleteOrderCascade(tenantID, orderID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("订单不存在")
+		}
+		return err
+	}
+	return nil
+}
+
 // kdzsAgentSysTid 快递助手推单/撤单接口使用的 sysTid。
 // 手工单（DFHAND）建单 SuccessList/SuccessRealList 与电商含义不一致，setTradeAgentType 认的是平台单号（platform_order_id）。
 func kdzsAgentSysTid(o *model.Order) (sysTid, tid string) {

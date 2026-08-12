@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   buildOrderCopyText,
   decryptOrders,
+  deleteManualOrder,
   formatAddress,
   formatDateTime,
   formatPlatformShop,
@@ -215,6 +216,35 @@ async function decryptOne(order: Order, ev?: Event) {
     ElMessage.error(e.message || '解密失败')
   } finally {
     decryptRow[order.id] = false
+  }
+}
+
+const deleting = reactive<Record<number, boolean>>({})
+
+async function onDeleteManual(order: Order, ev?: Event) {
+  ev?.stopPropagation()
+  if (order.sourceChannel !== 'manual') {
+    ElMessage.warning('仅支持删除手工订单')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认删除手工订单 ${order.orderNo}？将同步删除关联自营单与发货中心运单，且不可恢复。`,
+      '删除手工订单',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  deleting[order.id] = true
+  try {
+    await deleteManualOrder(order.id)
+    ElMessage.success('已删除')
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e.message || '删除失败')
+  } finally {
+    deleting[order.id] = false
   }
 }
 
@@ -524,6 +554,18 @@ async function copyOrderText(order: Order, ev?: Event) {
           </el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="操作" width="90" fixed="right">
+        <template #default="{ row }">
+          <el-button
+            v-if="row.sourceChannel === 'manual'"
+            type="danger"
+            link
+            :loading="!!deleting[row.id]"
+            @click="onDeleteManual(row, $event)"
+          >删除</el-button>
+          <span v-else class="op-empty">—</span>
+        </template>
+      </el-table-column>
     </el-table>
 
     <div ref="pagerRef" class="pager">
@@ -553,6 +595,7 @@ async function copyOrderText(order: Order, ev?: Event) {
   flex-shrink: 0;
 }
 .pager { display: flex; justify-content: flex-end; flex-shrink: 0; }
+.op-empty { color: #c0c4cc; }
 .goods-link { cursor: pointer; }
 .goods-link:hover .goods-title { color: var(--el-color-primary); }
 .goods-list { display: flex; flex-direction: column; gap: 8px; }
