@@ -67,10 +67,17 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 		tx = tx.Where("status = ?", q.Status)
 	}
 	if q.ShipStatus != "" {
-		tx = tx.Where("ship_status = ?", q.ShipStatus)
-		// 待发货工作队列：排除已关闭/已完成（关闭单常残留 wait_ship）
-		if q.ShipStatus == model.ShipWaitShip {
-			tx = tx.Where("status NOT IN ?", []string{model.StatusClosed, model.StatusCompleted})
+		switch q.ShipStatus {
+		case "need_ship", "unshipped":
+			// 待发货工作队列：待发货 + 部分发货
+			tx = tx.Where("ship_status IN ?", model.ShipNeedShipStatuses).
+				Where("status NOT IN ?", []string{model.StatusClosed, model.StatusCompleted})
+		default:
+			tx = tx.Where("ship_status = ?", q.ShipStatus)
+			// 待发货工作队列：排除已关闭/已完成（关闭单常残留 wait_ship）
+			if q.ShipStatus == model.ShipWaitShip {
+				tx = tx.Where("status NOT IN ?", []string{model.StatusClosed, model.StatusCompleted})
+			}
 		}
 	}
 	if q.AllocType != "" {
@@ -142,6 +149,7 @@ func (r *Repos) GetOrder(tenantID, id uint64) (*model.Order, error) {
 		Preload("Items").
 		Preload("Address").
 		Preload("Shipments", func(db *gorm.DB) *gorm.DB { return db.Order("id ASC") }).
+		Preload("Shipments.Items").
 		Preload("StatusLogs", func(db *gorm.DB) *gorm.DB { return db.Order("id DESC") }).
 		First(&o).Error
 	if err != nil {
@@ -195,6 +203,7 @@ func (r *Repos) DeleteOrderCascade(tenantID, orderID uint64) error {
 	return r.Transaction(func(txRepos *Repos) error {
 		db := txRepos.db
 		for _, m := range []any{
+			&model.OrderShipmentItem{},
 			&model.OrderItem{},
 			&model.OrderAddress{},
 			&model.OrderStatusLog{},
@@ -276,6 +285,19 @@ func (r *Repos) TransitionOrder(tenantID, orderID uint64, fields map[string]inte
 
 func (r *Repos) CreateShipment(s *model.OrderShipment) error {
 	return r.db.Create(s).Error
+}
+
+func (r *Repos) CreateShipmentItems(items []model.OrderShipmentItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	return r.db.Create(&items).Error
+}
+
+func (r *Repos) ListShipmentItemsByOrder(tenantID, orderID uint64) ([]model.OrderShipmentItem, error) {
+	var list []model.OrderShipmentItem
+	err := r.db.Where("tenant_id = ? AND order_id = ?", tenantID, orderID).Find(&list).Error
+	return list, err
 }
 
 func (r *Repos) UpdateShipment(s *model.OrderShipment) error {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -152,6 +152,47 @@ const canShip = computed(() => {
   return !!o.allocType
 })
 
+function shippedQtyMap(o: Order): Record<number, number> {
+  const map: Record<number, number> = {}
+  let hasItemRows = false
+  for (const sh of o.shipments || []) {
+    if (sh.items?.length) {
+      hasItemRows = true
+      for (const it of sh.items) {
+        if (!it.orderItemId || it.qty <= 0) continue
+        map[it.orderItemId] = (map[it.orderItemId] || 0) + it.qty
+      }
+    }
+  }
+  if (!hasItemRows && o.shipStatus === 'shipped') {
+    for (const it of o.items || []) {
+      if (it.id) map[it.id] = it.quantity
+    }
+  }
+  return map
+}
+
+const remainingShipItems = computed(() => {
+  const o = order.value
+  if (!o?.items?.length) return []
+  const shipped = shippedQtyMap(o)
+  return o.items
+    .filter((it) => it.id)
+    .map((it) => {
+      const left = Math.max(0, (it.quantity || 0) - (shipped[it.id!] || 0))
+      return { ...it, remaining: left }
+    })
+    .filter((it) => it.remaining > 0)
+})
+
+const shipItemIds = ref<number[]>([])
+
+watch(shipVisible, (v) => {
+  if (v) {
+    shipItemIds.value = remainingShipItems.value.map((it) => it.id!).filter(Boolean)
+  }
+})
+
 const bindingHint = computed(() => {
   if (allocForm.allocType !== 'dropship' || !allocForm.supplierId) return ''
   const b = bindings.value.find((x) => x.supplierId === allocForm.supplierId)
@@ -287,14 +328,30 @@ async function submitShip() {
     ElMessage.warning('请填写物流单号')
     return
   }
+  const remaining = remainingShipItems.value
+  let items: { orderItemId: number; qty: number }[] | undefined
+  if (remaining.length) {
+    if (!shipItemIds.value.length) {
+      ElMessage.warning('请选择本单要发货的商品')
+      return
+    }
+    items = remaining
+      .filter((it) => shipItemIds.value.includes(it.id!))
+      .map((it) => ({ orderItemId: it.id!, qty: it.remaining }))
+    if (!items.length) {
+      ElMessage.warning('请选择本单要发货的商品')
+      return
+    }
+  }
   try {
     order.value = await shipOrder(id, {
       expressCompany: shipForm.expressCompany,
       expressNo: shipForm.expressNo,
       remark: shipForm.remark,
       callback: shipForm.callback,
+      items,
     })
-    ElMessage.success('发货已记录')
+    ElMessage.success(order.value.shipStatus === 'partial_shipped' ? '已记录部分发货' : '发货已记录')
     shipVisible.value = false
   } catch (e: any) {
     ElMessage.error(e.message || '发货失败')
@@ -457,6 +514,16 @@ onMounted(load)
         <el-table-column prop="shipmentNo" label="发货单号" width="160" />
         <el-table-column prop="expressCompany" label="快递公司" width="120" />
         <el-table-column prop="expressNo" label="物流单号" min-width="160" />
+        <el-table-column label="发货商品" min-width="220">
+          <template #default="{ row }">
+            <template v-if="row.items?.length">
+              <div v-for="(it, idx) in row.items" :key="it.id || idx" class="ship-item-line">
+                {{ it.skuSpecs || it.productName || it.skuCode || `行#${it.orderItemId}` }} ×{{ it.qty }}
+              </div>
+            </template>
+            <span v-else class="muted">整单/未关联明细</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="callbackStatus" label="回传状态" width="120" />
         <el-table-column prop="callbackMessage" label="回传说明" min-width="200" show-overflow-tooltip />
         <el-table-column label="发货时间" width="170">
@@ -519,8 +586,19 @@ onMounted(load)
       </template>
     </el-dialog>
 
-    <el-dialog v-model="shipVisible" title="填写物流单号" width="480px">
+    <el-dialog v-model="shipVisible" title="填写物流单号" width="560px">
       <el-form label-width="100px">
+        <el-form-item v-if="remainingShipItems.length" label="发货商品" required>
+          <el-checkbox-group v-model="shipItemIds">
+            <div v-for="it in remainingShipItems" :key="it.id" class="ship-pick-row">
+              <el-checkbox :value="it.id">
+                {{ it.skuSpecs || it.productName || it.skuCode || `商品#${it.id}` }}
+                <span class="muted">（可发 {{ it.remaining }}）</span>
+              </el-checkbox>
+            </div>
+          </el-checkbox-group>
+          <div class="hint">勾选本运单实际发出的商品；未勾选的仍为待发货。</div>
+        </el-form-item>
         <el-form-item label="快递公司" required>
           <el-select
             v-model="shipForm.expressCode"
@@ -563,6 +641,8 @@ onMounted(load)
 h3 { margin: 8px 0 0; font-size: 15px; color: #334155; }
 .hint { margin-left: 10px; color: #94a3b8; font-size: 12px; }
 .muted { color: #94a3b8; font-size: 12px; }
+.ship-pick-row { margin-bottom: 6px; }
+.ship-item-line { font-size: 12px; line-height: 1.5; }
 .addr-actions { margin-top: 6px; display: flex; gap: 8px; }
 .alloc-tip { margin: 0 0 12px 110px; color: #64748b; font-size: 12px; line-height: 1.5; }
 .remark-input { width: 100%; max-width: 220px; }

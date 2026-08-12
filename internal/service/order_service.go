@@ -1417,17 +1417,18 @@ func (s *OrderService) mapOrderToSelfLines(o *model.Order) []selfcore.SelfOrderI
 			unit = roundMoney(saleAmt / float64(qty))
 		}
 		out = append(out, selfcore.SelfOrderItemInput{
-			PimSkuID:      it.SkuID,
-			SkuCode:       it.SkuCode,
-			ProductName:   it.ProductName,
-			SkuSpecs:      it.SkuSpecs,
-			PicURL:        it.PicURL,
-			Qty:           qty,
-			SaleUnitPrice: unit,
-			SaleAmount:    saleAmt,
-			RefSoID:       o.ID,
-			RefOrderNo:    o.OrderNo,
-			Remark:        strings.TrimSpace(strings.Join([]string{o.Remark, o.SellerRemark}, " ")),
+			PimSkuID:       it.SkuID,
+			SkuCode:        it.SkuCode,
+			ProductName:    it.ProductName,
+			SkuSpecs:       it.SkuSpecs,
+			PicURL:         it.PicURL,
+			Qty:            qty,
+			SaleUnitPrice:  unit,
+			SaleAmount:     saleAmt,
+			RefSoID:        o.ID,
+			RefOrderItemID: it.ID,
+			RefOrderNo:     o.OrderNo,
+			Remark:         strings.TrimSpace(strings.Join([]string{o.Remark, o.SellerRemark}, " ")),
 		})
 	}
 	return out
@@ -2179,7 +2180,7 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 	if o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
 		return nil, fmt.Errorf("当前状态不可撤回分配")
 	}
-	if o.ShipStatus == model.ShipShipped {
+	if o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
 		return nil, fmt.Errorf("订单已发货，不可撤回分配")
 	}
 	if o.AllocType == "" && o.Status == model.StatusPendingAlloc {
@@ -2581,9 +2582,9 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	if o.Status == model.StatusClosed {
 		return nil, fmt.Errorf("订单已关闭")
 	}
-	alreadyShipped := o.ShipStatus == model.ShipShipped
-	// 已发货仍允许追加运单（一分多包裹 / 分商品发货）
-	if alreadyShipped {
+	fullyShipped := o.ShipStatus == model.ShipShipped
+	// 已全部发货仍允许追加运单（一分多包裹）；部分发货按剩余数量继续发
+	if fullyShipped {
 		if strings.TrimSpace(req.ExpressNo) == "" {
 			return nil, fmt.Errorf("物流单号不能为空")
 		}
@@ -2610,6 +2611,17 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		if strings.TrimSpace(req.ExpressNo) == "" {
 			return nil, fmt.Errorf("物流单号不能为空")
 		}
+	}
+
+	shipLines, err := s.resolveShipLines(o, req.Items)
+	if err != nil {
+		return nil, err
+	}
+	if fullyShipped && len(shipLines) > 0 {
+		return nil, fmt.Errorf("订单已全部发货，仅可追加无商品明细的包裹运单")
+	}
+	if !fullyShipped && len(o.Items) > 0 && len(shipLines) == 0 {
+		return nil, fmt.Errorf("请选择要发货的商品")
 	}
 
 	shipNo, err := s.repos.NextShipmentNo(tenantID)
@@ -2651,36 +2663,227 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	}
 
 	from := o.Status
+	newShipStatus := computeShipStatusAfter(o, shipLines)
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
 		if err := tx.CreateShipment(sh); err != nil {
 			return err
 		}
-		if alreadyShipped {
-			return tx.AddStatusLog(&model.OrderStatusLog{
-				TenantID:   tenantID,
-				OrderID:    orderID,
-				FromStatus: from,
-				ToStatus:   from,
-				Action:     "ship_append",
-				Remark:     fmt.Sprintf("追加运单 %s %s", req.ExpressCompany, req.ExpressNo),
-				OperatorID: operatorID,
+		items := make([]model.OrderShipmentItem, 0, len(shipLines))
+		for _, line := range shipLines {
+			items = append(items, model.OrderShipmentItem{
+				TenantID:    tenantID,
+				ShipmentID:  sh.ID,
+				OrderID:     orderID,
+				OrderItemID: line.OrderItemID,
+				Qty:         line.Qty,
+				SkuCode:     line.SkuCode,
+				ProductName: line.ProductName,
+				SkuSpecs:    line.SkuSpecs,
 			})
 		}
-		return tx.TransitionOrder(tenantID, orderID, map[string]any{
-			"ship_status": model.ShipShipped,
-			"shipped_at":  now,
-		}, &model.OrderStatusLog{
+		if err := tx.CreateShipmentItems(items); err != nil {
+			return err
+		}
+		action := "ship"
+		remark := fmt.Sprintf("发货状态→%s %s %s", shipStatusLabel(newShipStatus), req.ExpressCompany, req.ExpressNo)
+		if fullyShipped || (o.ShipStatus == model.ShipPartialShipped && newShipStatus == model.ShipPartialShipped) {
+			action = "ship_append"
+			remark = fmt.Sprintf("追加运单 %s %s", req.ExpressCompany, req.ExpressNo)
+			if len(shipLines) > 0 {
+				remark = fmt.Sprintf("部分发货追加 %s %s（%d 行）", req.ExpressCompany, req.ExpressNo, len(shipLines))
+			}
+		}
+		fields := map[string]any{
+			"ship_status": newShipStatus,
+		}
+		if newShipStatus == model.ShipShipped {
+			fields["shipped_at"] = now
+		}
+		return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
 			FromStatus: from,
-			ToStatus:   from, // 履约状态不变
-			Action:     "ship",
-			Remark:     fmt.Sprintf("发货状态→已发货 %s %s", req.ExpressCompany, req.ExpressNo),
+			ToStatus:   from,
+			Action:     action,
+			Remark:     remark,
 			OperatorID: operatorID,
 		})
 	})
 	if err != nil {
 		return nil, err
 	}
+	// 自营发货：发货中心/手工填单后自动同步到自营中心物流（不阻断主流程；扣库存后续再落地）
+	s.autoSyncSelfLogistics(ctx, o, bearerToken)
 	return s.repos.GetOrder(tenantID, orderID)
+}
+
+type resolvedShipLine struct {
+	OrderItemID uint64
+	Qty         int
+	SkuCode     string
+	ProductName string
+	SkuSpecs    string
+}
+
+func shipStatusLabel(v string) string {
+	switch v {
+	case model.ShipPartialShipped:
+		return "部分发货"
+	case model.ShipShipped:
+		return "已发货"
+	default:
+		return "待发货"
+	}
+}
+
+// autoSyncSelfLogistics 订单发货后，把运单同步到关联自营单。
+func (s *OrderService) autoSyncSelfLogistics(ctx context.Context, before *model.Order, bearerToken string) {
+	if before == nil || s.selfCore == nil || !s.selfCore.Enabled() || strings.TrimSpace(bearerToken) == "" {
+		return
+	}
+	if before.AllocType != model.AllocSelfShip && strings.TrimSpace(before.SelfOrderNo) == "" {
+		return
+	}
+	syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+	defer cancel()
+	if err := s.selfCore.SyncShipmentsByRefSoID(syncCtx, bearerToken, before.ID); err != nil {
+		log.Printf("[ordercore] auto sync self logistics orderID=%d: %v", before.ID, err)
+		return
+	}
+	log.Printf("[ordercore] auto synced self logistics orderID=%d orderNo=%s", before.ID, before.OrderNo)
+}
+
+// shippedQtyByItem 已发数量（按销售行）。历史无明细运单且订单已全部发货时，视为整单已发完。
+func shippedQtyByItem(o *model.Order) map[uint64]int {
+	out := map[uint64]int{}
+	if o == nil {
+		return out
+	}
+	hasItemRows := false
+	for _, sh := range o.Shipments {
+		if len(sh.Items) > 0 {
+			hasItemRows = true
+			for _, it := range sh.Items {
+				if it.OrderItemID == 0 || it.Qty <= 0 {
+					continue
+				}
+				out[it.OrderItemID] += it.Qty
+			}
+		}
+	}
+	if !hasItemRows && o.ShipStatus == model.ShipShipped {
+		for _, it := range o.Items {
+			out[it.ID] = it.Quantity
+		}
+	}
+	return out
+}
+
+func remainingQtyByItem(o *model.Order) map[uint64]int {
+	shipped := shippedQtyByItem(o)
+	out := map[uint64]int{}
+	for _, it := range o.Items {
+		left := it.Quantity - shipped[it.ID]
+		if left < 0 {
+			left = 0
+		}
+		out[it.ID] = left
+	}
+	return out
+}
+
+func (s *OrderService) resolveShipLines(o *model.Order, reqItems []dto.ShipItemInput) ([]resolvedShipLine, error) {
+	if o == nil {
+		return nil, fmt.Errorf("订单不存在")
+	}
+	if len(o.Items) == 0 {
+		if len(reqItems) > 0 {
+			return nil, fmt.Errorf("订单无商品明细，无法按行发货")
+		}
+		return nil, nil
+	}
+	itemByID := map[uint64]model.OrderItem{}
+	for _, it := range o.Items {
+		itemByID[it.ID] = it
+	}
+	remaining := remainingQtyByItem(o)
+
+	if len(reqItems) == 0 {
+		out := make([]resolvedShipLine, 0, len(o.Items))
+		for _, it := range o.Items {
+			left := remaining[it.ID]
+			if left <= 0 {
+				continue
+			}
+			out = append(out, resolvedShipLine{
+				OrderItemID: it.ID,
+				Qty:         left,
+				SkuCode:     it.SkuCode,
+				ProductName: it.ProductName,
+				SkuSpecs:    it.SkuSpecs,
+			})
+		}
+		return out, nil
+	}
+
+	out := make([]resolvedShipLine, 0, len(reqItems))
+	seen := map[uint64]int{}
+	for _, in := range reqItems {
+		if in.OrderItemID == 0 {
+			return nil, fmt.Errorf("orderItemId 无效")
+		}
+		it, ok := itemByID[in.OrderItemID]
+		if !ok {
+			return nil, fmt.Errorf("商品行 %d 不属于本订单", in.OrderItemID)
+		}
+		qty := in.Qty
+		if qty <= 0 {
+			return nil, fmt.Errorf("商品「%s」发货数量无效", firstNonEmpty(it.SkuSpecs, it.ProductName, it.SkuCode))
+		}
+		seen[in.OrderItemID] += qty
+		if seen[in.OrderItemID] > remaining[in.OrderItemID] {
+			return nil, fmt.Errorf("商品「%s」发货数量超过剩余可发 %d", firstNonEmpty(it.SkuSpecs, it.ProductName, it.SkuCode), remaining[in.OrderItemID])
+		}
+		out = append(out, resolvedShipLine{
+			OrderItemID: it.ID,
+			Qty:         qty,
+			SkuCode:     it.SkuCode,
+			ProductName: it.ProductName,
+			SkuSpecs:    it.SkuSpecs,
+		})
+	}
+	return out, nil
+}
+
+func computeShipStatusAfter(o *model.Order, lines []resolvedShipLine) string {
+	if o == nil {
+		return model.ShipWaitShip
+	}
+	if len(o.Items) == 0 {
+		return model.ShipShipped
+	}
+	remaining := remainingQtyByItem(o)
+	for _, line := range lines {
+		remaining[line.OrderItemID] -= line.Qty
+	}
+	totalLeft := 0
+	totalOrdered := 0
+	for _, it := range o.Items {
+		totalOrdered += it.Quantity
+		left := remaining[it.ID]
+		if left < 0 {
+			left = 0
+		}
+		totalLeft += left
+	}
+	if totalOrdered <= 0 {
+		return model.ShipShipped
+	}
+	if totalLeft <= 0 {
+		return model.ShipShipped
+	}
+	if totalLeft < totalOrdered {
+		return model.ShipPartialShipped
+	}
+	return model.ShipWaitShip
 }
 
 func (s *OrderService) callbackSource(ctx context.Context, o *model.Order, sh *model.OrderShipment, token string) (string, error) {

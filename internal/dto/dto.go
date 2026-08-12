@@ -162,6 +162,13 @@ type ShipRequest struct {
 	Remark         string `json:"remark"`
 	// 是否回传来源平台（电商→StoreSyncAgent 等）
 	Callback bool `json:"callback"`
+	// Items 本运单发货的销售行；空=剩余全部（无明细订单则整单发货）
+	Items []ShipItemInput `json:"items"`
+}
+
+type ShipItemInput struct {
+	OrderItemID uint64 `json:"orderItemId"`
+	Qty         int    `json:"qty"`
 }
 
 // UpdateRemarksRequest 订单详情手工维护备注。

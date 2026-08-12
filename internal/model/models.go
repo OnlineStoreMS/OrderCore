@@ -37,9 +37,13 @@ const (
 
 // 发货状态
 const (
-	ShipWaitShip = "wait_ship" // 待发货
-	ShipShipped  = "shipped"   // 已发货
+	ShipWaitShip         = "wait_ship"         // 待发货
+	ShipPartialShipped   = "partial_shipped"   // 部分发货（部分商品/数量已发）
+	ShipShipped          = "shipped"           // 已发货（全部完成）
 )
+
+// ShipNeedShipStatuses 待发货工作队列（含部分发货，仍可继续打单）
+var ShipNeedShipStatuses = []string{ShipWaitShip, ShipPartialShipped}
 
 // 分配类型
 const (
@@ -210,9 +214,27 @@ type OrderShipment struct {
 	ShippedAt       *time.Time `json:"shippedAt,omitempty"`
 	CreatedAt       time.Time  `json:"createdAt"`
 	UpdatedAt       time.Time  `json:"updatedAt"`
+
+	Items []OrderShipmentItem `gorm:"foreignKey:ShipmentID" json:"items,omitempty"`
 }
 
 func (OrderShipment) TableName() string { return "order_shipments" }
+
+// OrderShipmentItem 发货单明细：物流单号对应到具体销售行与数量。
+type OrderShipmentItem struct {
+	ID          uint64    `gorm:"primaryKey" json:"id"`
+	TenantID    uint64    `gorm:"index;not null" json:"tenantId"`
+	ShipmentID  uint64    `gorm:"index;not null" json:"shipmentId"`
+	OrderID     uint64    `gorm:"index;not null" json:"orderId"`
+	OrderItemID uint64    `gorm:"index;not null" json:"orderItemId"`
+	Qty         int       `gorm:"not null" json:"qty"`
+	SkuCode     string    `gorm:"size:64" json:"skuCode"`
+	ProductName string    `gorm:"size:512" json:"productName"`
+	SkuSpecs    string    `gorm:"size:256" json:"skuSpecs"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+func (OrderShipmentItem) TableName() string { return "order_shipment_items" }
 
 // SupplierSourceBinding OSMS 供应商 ↔ 来源平台厂家绑定
 type SupplierSourceBinding struct {

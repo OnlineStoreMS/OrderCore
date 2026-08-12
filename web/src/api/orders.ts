@@ -25,6 +25,15 @@ export interface OrderAddress {
   fullText?: string
 }
 
+export interface OrderShipmentItem {
+  id?: number
+  orderItemId: number
+  qty: number
+  skuCode?: string
+  productName?: string
+  skuSpecs?: string
+}
+
 export interface OrderShipment {
   id: number
   shipmentNo: string
@@ -34,6 +43,7 @@ export interface OrderShipment {
   callbackStatus: string
   callbackMessage?: string
   shippedAt?: string
+  items?: OrderShipmentItem[]
 }
 
 export interface Order {
@@ -169,6 +179,7 @@ const statusLabels: Record<string, string> = {
 
 const shipStatusLabels: Record<string, string> = {
   wait_ship: '待发货',
+  partial_shipped: '部分发货',
   shipped: '已发货',
 }
 

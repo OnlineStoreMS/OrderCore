@@ -44,6 +44,7 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.OrderAddress{},
 		&model.OrderStatusLog{},
 		&model.OrderShipment{},
+		&model.OrderShipmentItem{},
 		&model.SupplierSourceBinding{},
 		&model.AllocSettings{},
 		&model.SkuSupplierRule{},

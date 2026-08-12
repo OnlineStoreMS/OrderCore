@@ -338,6 +338,7 @@ async function copyOrderText(order: Order, ev?: Event) {
             @change="onFilterChange"
           >
             <el-option label="待发货" value="wait_ship" />
+            <el-option label="部分发货" value="partial_shipped" />
             <el-option label="已发货" value="shipped" />
           </el-select>
         </el-form-item>
@@ -549,7 +550,10 @@ async function copyOrderText(order: Order, ev?: Event) {
       </el-table-column>
       <el-table-column label="发货状态" width="90">
         <template #default="{ row }">
-          <el-tag size="small" :type="row.shipStatus === 'shipped' ? 'success' : 'warning'">
+          <el-tag
+            size="small"
+            :type="row.shipStatus === 'shipped' ? 'success' : row.shipStatus === 'partial_shipped' ? 'warning' : 'info'"
+          >
             {{ labelShipStatus(row.shipStatus) }}
           </el-tag>
         </template>

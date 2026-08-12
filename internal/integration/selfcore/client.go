@@ -41,6 +41,7 @@ type SelfOrderItemInput struct {
 	SaleUnitPrice float64 `json:"saleUnitPrice,omitempty"`
 	SaleAmount    float64 `json:"saleAmount,omitempty"`
 	RefSoID       uint64  `json:"refSoId,omitempty"`
+	RefOrderItemID uint64 `json:"refOrderItemId,omitempty"`
 	RefOrderNo    string  `json:"refOrderNo,omitempty"`
 	Remark        string  `json:"remark,omitempty"`
 }
@@ -152,6 +153,15 @@ func (c *Client) DeleteByRefSoID(ctx context.Context, bearerToken string, refSoI
 		return 0, err
 	}
 	return out.Deleted, nil
+}
+
+// SyncShipmentsByRefSoID 订单发货后自动把物流同步到自营单（best-effort）。
+func (c *Client) SyncShipmentsByRefSoID(ctx context.Context, bearerToken string, refSoID uint64) error {
+	if !c.Enabled() || refSoID == 0 {
+		return nil
+	}
+	body := map[string]any{"refSoId": refSoID}
+	return c.doJSON(ctx, http.MethodPost, bearerToken, "/api/v1/admin/self-orders/sync-shipments-by-ref-so", body, nil)
 }
 
 func (c *Client) doJSON(ctx context.Context, method, bearerToken, path string, body any, out any) error {
