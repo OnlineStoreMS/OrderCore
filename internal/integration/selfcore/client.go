@@ -57,6 +57,7 @@ type SelfOrderInput struct {
 	SourceChannel string               `json:"sourceChannel,omitempty"`
 	Platform      string               `json:"platform,omitempty"`
 	ShopName      string               `json:"shopName,omitempty"`
+	ManualSourceName string            `json:"manualSourceName,omitempty"`
 	BuyerRemark   string               `json:"buyerRemark,omitempty"`
 	SellerRemark  string               `json:"sellerRemark,omitempty"`
 	FenFaRemark   string               `json:"fenFaRemark,omitempty"`

@@ -212,6 +212,9 @@ func (s *OrderService) CreateManual(ctx context.Context, tenantID, operatorID ui
 		}
 		o.ManualSourceID = src.ID
 		o.ManualSourceName = src.Name
+		if strings.TrimSpace(o.ShopName) == "" {
+			o.ShopName = src.Name
+		}
 	}
 	if req.PlatformOrderNo != "" {
 		o.PlatformOrderID = strings.TrimSpace(req.PlatformOrderNo)
@@ -1353,7 +1356,8 @@ func (s *OrderService) ensureSelfOrder(ctx context.Context, o *model.Order, bear
 		Remark:        fmt.Sprintf("OMS自营 %s", o.OrderNo),
 		SourceChannel: o.SourceChannel,
 		Platform:      o.Platform,
-		ShopName:      o.ShopName,
+		ShopName:      firstNonEmpty(strings.TrimSpace(o.ShopName), strings.TrimSpace(o.ManualSourceName)),
+		ManualSourceName: strings.TrimSpace(o.ManualSourceName),
 		BuyerRemark:   o.Remark,
 		SellerRemark:  o.SellerRemark,
 		FenFaRemark:   o.FenFaRemark,
@@ -2539,30 +2543,35 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	if o.Status == model.StatusClosed {
 		return nil, fmt.Errorf("订单已关闭")
 	}
-	if o.ShipStatus == model.ShipShipped {
-		return nil, fmt.Errorf("订单已发货")
-	}
-	if o.ShipEntryLocked {
-		reason := o.ShipLockReason
-		if reason == "" {
-			reason = "当前订单已锁定填单号发货"
+	alreadyShipped := o.ShipStatus == model.ShipShipped
+	// 已发货仍允许追加运单（一分多包裹 / 分商品发货）
+	if alreadyShipped {
+		if strings.TrimSpace(req.ExpressNo) == "" {
+			return nil, fmt.Errorf("物流单号不能为空")
 		}
-		return nil, fmt.Errorf("%s", reason)
-	}
-	if blocked, reason := ecommerceBlocksFulfillment(o.EcommerceStatus, o.EcommerceStatusText, o.AfterSaleStatus, o.AfterSaleStatusText); blocked {
-		return nil, fmt.Errorf("%s", reason)
-	}
-	if o.AllocType == model.AllocDropship && o.DropshipMode == model.DropshipKDZSFactory {
-		return nil, fmt.Errorf("快递助手厂家代发由厂家发货，无需手工填单号")
-	}
-	if o.SourceChannel == model.SourceKDZS && o.PlatformStatus != model.KDZSWaitSend {
-		return nil, fmt.Errorf("仅快递助手「待发货」且自营单可填单号回传")
-	}
-	if o.AllocType == "" {
-		return nil, fmt.Errorf("请先完成分配再发货")
-	}
-	if strings.TrimSpace(req.ExpressNo) == "" {
-		return nil, fmt.Errorf("物流单号不能为空")
+	} else {
+		if o.ShipEntryLocked {
+			reason := o.ShipLockReason
+			if reason == "" {
+				reason = "当前订单已锁定填单号发货"
+			}
+			return nil, fmt.Errorf("%s", reason)
+		}
+		if blocked, reason := ecommerceBlocksFulfillment(o.EcommerceStatus, o.EcommerceStatusText, o.AfterSaleStatus, o.AfterSaleStatusText); blocked {
+			return nil, fmt.Errorf("%s", reason)
+		}
+		if o.AllocType == model.AllocDropship && o.DropshipMode == model.DropshipKDZSFactory {
+			return nil, fmt.Errorf("快递助手厂家代发由厂家发货，无需手工填单号")
+		}
+		if o.SourceChannel == model.SourceKDZS && o.PlatformStatus != model.KDZSWaitSend {
+			return nil, fmt.Errorf("仅快递助手「待发货」且自营单可填单号回传")
+		}
+		if o.AllocType == "" {
+			return nil, fmt.Errorf("请先完成分配再发货")
+		}
+		if strings.TrimSpace(req.ExpressNo) == "" {
+			return nil, fmt.Errorf("物流单号不能为空")
+		}
 	}
 
 	shipNo, err := s.repos.NextShipmentNo(tenantID)
@@ -2607,6 +2616,17 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
 		if err := tx.CreateShipment(sh); err != nil {
 			return err
+		}
+		if alreadyShipped {
+			return tx.AddStatusLog(&model.OrderStatusLog{
+				TenantID:   tenantID,
+				OrderID:    orderID,
+				FromStatus: from,
+				ToStatus:   from,
+				Action:     "ship_append",
+				Remark:     fmt.Sprintf("追加运单 %s %s", req.ExpressCompany, req.ExpressNo),
+				OperatorID: operatorID,
+			})
 		}
 		return tx.TransitionOrder(tenantID, orderID, map[string]any{
 			"ship_status": model.ShipShipped,
