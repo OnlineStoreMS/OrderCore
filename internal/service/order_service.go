@@ -650,7 +650,12 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			(existing.AllocType == model.AllocSelfShip || strings.TrimSpace(existing.SelfOrderNo) != "")
 		if needCancelSelf && strings.TrimSpace(bearerToken) != "" {
 			if err := s.cancelLinkedSelfOrders(ctx, existing.ID, bearerToken); err != nil {
-				return nil, false, fmt.Errorf("同步自营单取消失败: %w", err)
+				// 自营单已发货无法取消时不阻断同步（快递助手撤单/回待推单仍可回写订单中心）
+				if strings.Contains(err.Error(), "已发货") {
+					log.Printf("[ordercore] ingest clear alloc skip cancel shipped self orderID=%d: %v", existing.ID, err)
+				} else {
+					return nil, false, fmt.Errorf("同步自营单取消失败: %w", err)
+				}
 			}
 		}
 		err = s.repos.Transaction(func(tx *repo.Repos) error {
@@ -905,6 +910,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			s.queueOrCreateDropshipPO(ctx, tenantID, o, bearerToken)
 			o, _ = s.repos.GetOrder(tenantID, existing.ID)
 		}
+		o = s.ensureSelfOrderAfterIngest(ctx, tenantID, o, bearerToken)
 		s.autoSyncDropshipLogistics(ctx, o, req, bearerToken)
 		// 合单发货：分发备注只保留在第一单，其余清空（快递助手常复制到每单）
 		o = s.dedupeMergeShipFenFa(ctx, tenantID, o)
@@ -1038,6 +1044,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		s.queueOrCreateDropshipPO(ctx, tenantID, out, bearerToken)
 		out, _ = s.repos.GetOrder(tenantID, o.ID)
 	}
+	out = s.ensureSelfOrderAfterIngest(ctx, tenantID, out, bearerToken)
 	s.autoSyncDropshipLogistics(ctx, out, req, bearerToken)
 	out = s.dedupeMergeShipFenFa(ctx, tenantID, out)
 	return out, true, nil
@@ -1337,6 +1344,10 @@ func (s *OrderService) ensureSelfOrder(ctx context.Context, o *model.Order, bear
 	if o.OrderedAt != nil {
 		orderedAt = o.OrderedAt.Format("2006-01-02 15:04:05")
 	}
+	createdAt := ""
+	if o.AllocatedAt != nil {
+		createdAt = o.AllocatedAt.Format("2006-01-02 15:04:05")
+	}
 	payStatus := strings.TrimSpace(o.PayStatus)
 	paidAt := ""
 	if o.PayTime != nil {
@@ -1363,6 +1374,7 @@ func (s *OrderService) ensureSelfOrder(ctx context.Context, o *model.Order, bear
 		FenFaRemark:   o.FenFaRemark,
 		PrinterRemark: o.PrinterRemark,
 		OrderedAt:     orderedAt,
+		CreatedAt:     createdAt,
 		PayStatus:     payStatus,
 		PaidAt:        paidAt,
 		Items:         items,
@@ -1371,6 +1383,48 @@ func (s *OrderService) ensureSelfOrder(ctx context.Context, o *model.Order, bear
 		return "", fmt.Errorf("创建 SelfCore 自营单失败: %w", err)
 	}
 	return created.SoNo, nil
+}
+
+// ensureSelfOrderAfterIngest 快递助手同步写了自营分配后，补建 SelfCore 自营单（对齐代发补建采购单）。
+// 失败只记日志，不阻断同步主流程。
+func (s *OrderService) ensureSelfOrderAfterIngest(ctx context.Context, tenantID uint64, o *model.Order, bearerToken string) *model.Order {
+	if o == nil || o.AllocType != model.AllocSelfShip {
+		return o
+	}
+	if strings.TrimSpace(o.SelfOrderNo) != "" {
+		return o
+	}
+	if o.Status == model.StatusClosed {
+		return o
+	}
+	if s.selfCore == nil || !s.selfCore.Enabled() || strings.TrimSpace(bearerToken) == "" {
+		return o
+	}
+	if len(o.Items) == 0 {
+		return o
+	}
+	soNo, err := s.ensureSelfOrder(ctx, o, bearerToken)
+	if err != nil {
+		log.Printf("[ordercore] ingest ensure self order failed order=%s: %v", o.OrderNo, err)
+		return o
+	}
+	if soNo == "" {
+		return o
+	}
+	if err := s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{"self_order_no": soNo}); err != nil {
+		log.Printf("[ordercore] ingest save self_order_no failed order=%s so=%s: %v", o.OrderNo, soNo, err)
+		return o
+	}
+	o.SelfOrderNo = soNo
+	log.Printf("[ordercore] ingest ensured self order order=%s so=%s", o.OrderNo, soNo)
+	// 同步入库时已带物流：补推自营物流
+	if o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
+		s.autoSyncSelfLogistics(ctx, o, bearerToken)
+	}
+	if refreshed, err := s.repos.GetOrder(tenantID, o.ID); err == nil {
+		return refreshed
+	}
+	return o
 }
 
 func (s *OrderService) mapOrderToSelfLines(o *model.Order) []selfcore.SelfOrderItemInput {
