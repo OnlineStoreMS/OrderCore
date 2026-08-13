@@ -2836,8 +2836,26 @@ func (s *OrderService) UnshipByExpressNo(ctx context.Context, tenantID, operator
 	sh, err := s.repos.FindShipmentByExpressNo(tenantID, orderID, expressNo)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			// 幂等：运单已不在订单中心，仍尝试清自营侧物流并重算状态
+			// 幂等：运单已不在订单中心，仍重算发货状态并尝试清自营侧物流
 			s.removeSelfLogisticsByTracking(ctx, o, expressNo, bearerToken)
+			remaining := append([]model.OrderShipment(nil), o.Shipments...)
+			o.Shipments = remaining
+			newShipStatus := computeShipStatusAfter(o, nil)
+			if newShipStatus != o.ShipStatus {
+				fields := map[string]any{"ship_status": newShipStatus}
+				if newShipStatus == model.ShipWaitShip {
+					fields["shipped_at"] = nil
+				}
+				_ = s.repos.Transaction(func(tx *repo.Repos) error {
+					return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
+						FromStatus: o.Status,
+						ToStatus:   o.Status,
+						Action:     "unship",
+						Remark:     fmt.Sprintf("取消快递单（幂等重算）%s →%s", expressNo, shipStatusLabel(newShipStatus)),
+						OperatorID: operatorID,
+					})
+				})
+			}
 			return s.repos.GetOrder(tenantID, orderID)
 		}
 		return nil, err
@@ -2959,7 +2977,9 @@ func shippedQtyByItem(o *model.Order) map[uint64]int {
 			}
 		}
 	}
-	if !hasItemRows && o.ShipStatus == model.ShipShipped {
+	// 仅当仍有运单记录时启用历史兜底：无明细运单 + 已全部发货 ⇒ 视为整单已发。
+	// 取消最后一票后 Shipments 为空时绝不能走此分支，否则会把 wait_ship 误算回 shipped。
+	if !hasItemRows && len(o.Shipments) > 0 && o.ShipStatus == model.ShipShipped {
 		for _, it := range o.Items {
 			out[it.ID] = it.Quantity
 		}

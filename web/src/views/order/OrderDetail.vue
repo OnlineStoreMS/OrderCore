@@ -164,7 +164,8 @@ function shippedQtyMap(o: Order): Record<number, number> {
       }
     }
   }
-  if (!hasItemRows && o.shipStatus === 'shipped') {
+  // 与后端 shippedQtyByItem 一致：无运单时不可用「已全部发货」兜底
+  if (!hasItemRows && (o.shipments || []).length > 0 && o.shipStatus === 'shipped') {
     for (const it of o.items || []) {
       if (it.id) map[it.id] = it.quantity
     }
