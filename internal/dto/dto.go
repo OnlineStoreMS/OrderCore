@@ -171,6 +171,12 @@ type ShipItemInput struct {
 	Qty         int    `json:"qty"`
 }
 
+// UnshipRequest 取消快递单后回退订单发货：按运单号清除商品发货明细并重算发货状态。
+type UnshipRequest struct {
+	ExpressNo string `json:"expressNo"`
+	Remark    string `json:"remark"`
+}
+
 // UpdateRemarksRequest 订单详情手工维护备注。
 type UpdateRemarksRequest struct {
 	SellerRemark  string `json:"sellerRemark"`

@@ -415,6 +415,25 @@ func (h *Handlers) Ship(c *gin.Context) {
 	response.OK(c, o)
 }
 
+func (h *Handlers) Unship(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, "无效 ID")
+		return
+	}
+	var req dto.UnshipRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	o, err := h.orders.UnshipByExpressNo(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), id, req, authcontext.BearerToken(c))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, o)
+}
+
 func (h *Handlers) SyncKDZS(c *gin.Context) {
 	var req dto.SyncKDZSRequest
 	_ = c.ShouldBindJSON(&req)

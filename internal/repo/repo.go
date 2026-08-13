@@ -304,9 +304,20 @@ func (r *Repos) UpdateShipment(s *model.OrderShipment) error {
 	return r.db.Save(s).Error
 }
 
+func (r *Repos) DeleteShipmentItemsByShipmentID(tenantID, shipmentID uint64) error {
+	return r.db.Where("tenant_id = ? AND shipment_id = ?", tenantID, shipmentID).
+		Delete(&model.OrderShipmentItem{}).Error
+}
+
+func (r *Repos) DeleteShipmentByID(tenantID, shipmentID uint64) error {
+	return r.db.Where("tenant_id = ? AND id = ?", tenantID, shipmentID).
+		Delete(&model.OrderShipment{}).Error
+}
+
 func (r *Repos) FindShipmentByExpressNo(tenantID, orderID uint64, expressNo string) (*model.OrderShipment, error) {
 	var s model.OrderShipment
 	err := r.db.Where("tenant_id = ? AND order_id = ? AND express_no = ?", tenantID, orderID, strings.TrimSpace(expressNo)).
+		Preload("Items").
 		First(&s).Error
 	if err != nil {
 		return nil, err

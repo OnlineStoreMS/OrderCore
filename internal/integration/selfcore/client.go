@@ -166,6 +166,18 @@ func (c *Client) SyncShipmentsByRefSoID(ctx context.Context, bearerToken string,
 	return c.doJSON(ctx, http.MethodPost, bearerToken, "/api/v1/admin/self-orders/sync-shipments-by-ref-so", body, nil)
 }
 
+// RemoveShipmentsByTracking 取消快递单后按运单号清除自营物流（best-effort）。
+func (c *Client) RemoveShipmentsByTracking(ctx context.Context, bearerToken string, refSoID uint64, trackingNo string) error {
+	if !c.Enabled() || refSoID == 0 || strings.TrimSpace(trackingNo) == "" {
+		return nil
+	}
+	body := map[string]any{
+		"refSoId":    refSoID,
+		"trackingNo": strings.TrimSpace(trackingNo),
+	}
+	return c.doJSON(ctx, http.MethodPost, bearerToken, "/api/v1/admin/self-orders/remove-shipments-by-tracking", body, nil)
+}
+
 func (c *Client) doJSON(ctx context.Context, method, bearerToken, path string, body any, out any) error {
 	reqURL := c.baseURL + path
 	var reader io.Reader

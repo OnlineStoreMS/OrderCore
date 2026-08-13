@@ -2819,6 +2819,92 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	return s.repos.GetOrder(tenantID, orderID)
 }
 
+// UnshipByExpressNo 取消快递单后回退：删除该运单对应的订单发货明细，重算待发货/部分发货，并同步自营物流。
+func (s *OrderService) UnshipByExpressNo(ctx context.Context, tenantID, operatorID, orderID uint64, req dto.UnshipRequest, bearerToken string) (*model.Order, error) {
+	expressNo := strings.TrimSpace(req.ExpressNo)
+	if expressNo == "" {
+		return nil, fmt.Errorf("物流单号不能为空")
+	}
+	o, err := s.repos.GetOrder(tenantID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if o.Status == model.StatusClosed {
+		return nil, fmt.Errorf("订单已关闭，无法回退发货")
+	}
+
+	sh, err := s.repos.FindShipmentByExpressNo(tenantID, orderID, expressNo)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// 幂等：运单已不在订单中心，仍尝试清自营侧物流并重算状态
+			s.removeSelfLogisticsByTracking(ctx, o, expressNo, bearerToken)
+			return s.repos.GetOrder(tenantID, orderID)
+		}
+		return nil, err
+	}
+
+	from := o.Status
+	remaining := make([]model.OrderShipment, 0, len(o.Shipments))
+	for _, existing := range o.Shipments {
+		if existing.ID == sh.ID {
+			continue
+		}
+		remaining = append(remaining, existing)
+	}
+	o.Shipments = remaining
+	newShipStatus := computeShipStatusAfter(o, nil)
+
+	err = s.repos.Transaction(func(tx *repo.Repos) error {
+		if err := tx.DeleteShipmentItemsByShipmentID(tenantID, sh.ID); err != nil {
+			return err
+		}
+		if err := tx.DeleteShipmentByID(tenantID, sh.ID); err != nil {
+			return err
+		}
+		fields := map[string]any{
+			"ship_status": newShipStatus,
+		}
+		if newShipStatus == model.ShipWaitShip {
+			fields["shipped_at"] = nil
+		}
+		remark := strings.TrimSpace(req.Remark)
+		if remark == "" {
+			remark = fmt.Sprintf("取消快递单 %s %s →%s", sh.ExpressCompany, expressNo, shipStatusLabel(newShipStatus))
+		}
+		return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
+			FromStatus: from,
+			ToStatus:   from,
+			Action:     "unship",
+			Remark:     remark,
+			OperatorID: operatorID,
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	s.removeSelfLogisticsByTracking(ctx, o, expressNo, bearerToken)
+	return s.repos.GetOrder(tenantID, orderID)
+}
+
+// removeSelfLogisticsByTracking 取消运单后清掉自营单上对应物流（best-effort）。
+func (s *OrderService) removeSelfLogisticsByTracking(ctx context.Context, before *model.Order, trackingNo, bearerToken string) {
+	if before == nil || s.selfCore == nil || !s.selfCore.Enabled() || strings.TrimSpace(bearerToken) == "" {
+		return
+	}
+	trackingNo = strings.TrimSpace(trackingNo)
+	if trackingNo == "" || before.ID == 0 {
+		return
+	}
+	syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+	defer cancel()
+	if err := s.selfCore.RemoveShipmentsByTracking(syncCtx, bearerToken, before.ID, trackingNo); err != nil {
+		log.Printf("[ordercore] remove self logistics orderID=%d tracking=%s: %v", before.ID, trackingNo, err)
+		return
+	}
+	log.Printf("[ordercore] removed self logistics orderID=%d tracking=%s", before.ID, trackingNo)
+}
+
 type resolvedShipLine struct {
 	OrderItemID uint64
 	Qty         int
