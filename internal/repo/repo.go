@@ -136,7 +136,7 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 		return nil, 0, err
 	}
 	var list []model.Order
-	err := tx.Preload("Items").Preload("Address").Preload("Shipments").
+	err := tx.Preload("Items").Preload("Address").Preload("Shipments").Preload("Shipments.Items").
 		Order("COALESCE(ordered_at, created_at) DESC, id DESC").
 		Offset((q.Page - 1) * q.PageSize).Limit(q.PageSize).
 		Find(&list).Error
