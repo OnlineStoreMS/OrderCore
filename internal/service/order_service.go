@@ -2678,17 +2678,69 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		return nil, fmt.Errorf("请选择要发货的商品")
 	}
 
+	expressNo := strings.TrimSpace(req.ExpressNo)
+	now := time.Now()
+	from := o.Status
+	newShipStatus := computeShipStatusAfter(o, shipLines)
+
+	// 同一运单号再次发货：追加明细到已有运单（避免拆成两条同号运单，自营同步按单号去重会丢商品）
+	existingSh, findErr := s.repos.FindShipmentByExpressNo(tenantID, orderID, expressNo)
+	if findErr != nil && !errors.Is(findErr, gorm.ErrRecordNotFound) {
+		return nil, findErr
+	}
+	if existingSh != nil && len(shipLines) > 0 {
+		err := s.repos.Transaction(func(tx *repo.Repos) error {
+			items := make([]model.OrderShipmentItem, 0, len(shipLines))
+			for _, line := range shipLines {
+				items = append(items, model.OrderShipmentItem{
+					TenantID:    tenantID,
+					ShipmentID:  existingSh.ID,
+					OrderID:     orderID,
+					OrderItemID: line.OrderItemID,
+					Qty:         line.Qty,
+					SkuCode:     line.SkuCode,
+					ProductName: line.ProductName,
+					SkuSpecs:    line.SkuSpecs,
+				})
+			}
+			if err := tx.CreateShipmentItems(items); err != nil {
+				return err
+			}
+			if company := strings.TrimSpace(req.ExpressCompany); company != "" && existingSh.ExpressCompany == "" {
+				existingSh.ExpressCompany = company
+				if err := tx.UpdateShipment(existingSh); err != nil {
+					return err
+				}
+			}
+			fields := map[string]any{"ship_status": newShipStatus}
+			if newShipStatus == model.ShipShipped {
+				fields["shipped_at"] = now
+			}
+			return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
+				FromStatus: from,
+				ToStatus:   from,
+				Action:     "ship_append",
+				Remark:     fmt.Sprintf("同运单追加商品 %s %s（%d 行）→%s", req.ExpressCompany, expressNo, len(shipLines), shipStatusLabel(newShipStatus)),
+				OperatorID: operatorID,
+			})
+		})
+		if err != nil {
+			return nil, err
+		}
+		s.autoSyncSelfLogistics(ctx, o, bearerToken)
+		return s.repos.GetOrder(tenantID, orderID)
+	}
+
 	shipNo, err := s.repos.NextShipmentNo(tenantID)
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now()
 	sh := &model.OrderShipment{
 		TenantID:       tenantID,
 		OrderID:        orderID,
 		ShipmentNo:     shipNo,
 		ExpressCompany: req.ExpressCompany,
-		ExpressNo:      strings.TrimSpace(req.ExpressNo),
+		ExpressNo:      expressNo,
 		NeedTracking:   true,
 		CallbackStatus: model.CallbackPending,
 		Remark:         req.Remark,
@@ -2716,8 +2768,6 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		sh.CallbackMessage = "未回传来源平台"
 	}
 
-	from := o.Status
-	newShipStatus := computeShipStatusAfter(o, shipLines)
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
 		if err := tx.CreateShipment(sh); err != nil {
 			return err
@@ -2739,12 +2789,12 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 			return err
 		}
 		action := "ship"
-		remark := fmt.Sprintf("发货状态→%s %s %s", shipStatusLabel(newShipStatus), req.ExpressCompany, req.ExpressNo)
+		remark := fmt.Sprintf("发货状态→%s %s %s", shipStatusLabel(newShipStatus), req.ExpressCompany, expressNo)
 		if fullyShipped || (o.ShipStatus == model.ShipPartialShipped && newShipStatus == model.ShipPartialShipped) {
 			action = "ship_append"
-			remark = fmt.Sprintf("追加运单 %s %s", req.ExpressCompany, req.ExpressNo)
+			remark = fmt.Sprintf("追加运单 %s %s", req.ExpressCompany, expressNo)
 			if len(shipLines) > 0 {
-				remark = fmt.Sprintf("部分发货追加 %s %s（%d 行）", req.ExpressCompany, req.ExpressNo, len(shipLines))
+				remark = fmt.Sprintf("部分发货追加 %s %s（%d 行）", req.ExpressCompany, expressNo, len(shipLines))
 			}
 		}
 		fields := map[string]any{
