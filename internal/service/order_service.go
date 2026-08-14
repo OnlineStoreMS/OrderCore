@@ -1206,13 +1206,17 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 		if kdzsAction == "push_factory" {
 			fields["platform_status"] = model.KDZSWaitSend
 			fields["platform_status_text"] = "待发货"
-		} else if kdzsAction == "self_print" && o.PlatformStatus == model.KDZSWaitAudit {
-			// 推单后快递助手侧通常进入待发货；先乐观更新，下次同步校正
+		} else if strings.HasPrefix(kdzsAction, "self_print") {
+			// 自营打单：推单后按待发货解锁填单号（含 platform 曾被电商态污染为 order_paid 等）
 			fields["platform_status"] = model.KDZSWaitSend
 			fields["platform_status_text"] = "待发货"
 			locked2, reason2 := computeShipLock(o.SourceChannel, model.KDZSWaitSend, agentType, dropshipMode)
 			fields["ship_entry_locked"] = locked2
 			fields["ship_lock_reason"] = reason2
+		} else if allocType == model.AllocSelfShip {
+			// 未走快递助手推单时，自营分配也允许发货中心确认发货
+			fields["ship_entry_locked"] = false
+			fields["ship_lock_reason"] = ""
 		}
 		return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
 			FromStatus: from,
@@ -2643,7 +2647,9 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 			return nil, fmt.Errorf("物流单号不能为空")
 		}
 	} else {
-		if o.ShipEntryLocked {
+		selfShipOpen := o.AllocType == model.AllocSelfShip &&
+			(o.ShipStatus == model.ShipWaitShip || o.ShipStatus == model.ShipPartialShipped)
+		if o.ShipEntryLocked && !selfShipOpen {
 			reason := o.ShipLockReason
 			if reason == "" {
 				reason = "当前订单已锁定填单号发货"
@@ -2656,7 +2662,8 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		if o.AllocType == model.AllocDropship && o.DropshipMode == model.DropshipKDZSFactory {
 			return nil, fmt.Errorf("快递助手厂家代发由厂家发货，无需手工填单号")
 		}
-		if o.SourceChannel == model.SourceKDZS && o.PlatformStatus != model.KDZSWaitSend {
+		// 自营已分配且待发货：允许发货中心确认发货（platform_status 可能仍是电商态污染值）
+		if o.SourceChannel == model.SourceKDZS && o.PlatformStatus != model.KDZSWaitSend && !selfShipOpen {
 			return nil, fmt.Errorf("仅快递助手「待发货」且自营单可填单号回传")
 		}
 		if o.AllocType == "" {
