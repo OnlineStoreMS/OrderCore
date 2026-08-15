@@ -152,7 +152,7 @@ type RelinkPurchaseOrderRequest struct {
 type UnlinkDropshipPORequest struct {
 	OrderIDs   []uint64 `json:"orderIds"`
 	OrderNos   []string `json:"orderNos"`
-	ClearAlloc bool     `json:"clearAlloc"` // true：恢复待分配（不调快递助手撤单）
+	ClearAlloc bool     `json:"clearAlloc"` // true：恢复待分配；快递助手单会尽量先撤推单再标待推单
 	Remark     string   `json:"remark"`
 }
 

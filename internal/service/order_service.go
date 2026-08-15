@@ -2012,8 +2012,9 @@ func (s *OrderService) RelinkPurchaseOrder(ctx context.Context, tenantID uint64,
 	return s.repos.RelinkPurchaseOrderIDs(tenantID, fromPoNos, strings.TrimSpace(toPoNo))
 }
 
-// UnlinkDropshipPO 供应链侧解绑后回写：清空采购单号；clearAlloc 时恢复待分配（不调用快递助手）。
-func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorID uint64, req dto.UnlinkDropshipPORequest) (int, error) {
+// UnlinkDropshipPO 供应链侧解绑后回写：清空采购单号；clearAlloc 时恢复待分配。
+// 快递助手订单：尽量先撤推单再标待推单；撤单失败则保留原 platform_status，避免本地虚标待推单导致再次推单报「非待推单」。
+func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorID uint64, req dto.UnlinkDropshipPORequest, bearerToken string) (int, error) {
 	ids := make([]uint64, 0, len(req.OrderIDs)+len(req.OrderNos))
 	seen := map[uint64]struct{}{}
 	for _, id := range req.OrderIDs {
@@ -2071,6 +2072,7 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 		}
 		fields := map[string]any{"purchase_order_id": ""}
 		toStatus := o.Status
+		logRemark := remark
 		if req.ClearAlloc && o.ShipStatus != model.ShipShipped {
 			fields["alloc_type"] = ""
 			fields["dropship_mode"] = ""
@@ -2085,10 +2087,39 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 			fields["agent_type"] = model.AgentTypeSelf
 			fields["skip_auto_alloc"] = true
 			if o.SourceChannel == model.SourceKDZS {
-				fields["platform_status"] = model.KDZSWaitAudit
-				fields["platform_status_text"] = "待推单"
-				fields["ship_entry_locked"] = true
-				fields["ship_lock_reason"] = "快递助手待推单，请先分配；仅自营待发货可填单号"
+				kdzsBackToAudit := false
+				if strings.TrimSpace(bearerToken) != "" && s.storeSync != nil {
+					// 先按本地态撤；失败再按待发货撤（本地可能已虚标待推单）
+					cerr := s.cancelKDZSPush(ctx, o, bearerToken)
+					if cerr != nil && o.PlatformStatus != model.KDZSWaitSend {
+						o2 := *o
+						o2.PlatformStatus = model.KDZSWaitSend
+						cerr = s.cancelKDZSPush(ctx, &o2, bearerToken)
+					}
+					if cerr == nil {
+						kdzsBackToAudit = true
+					} else {
+						logRemark = remark + "（快递助手撤推单失败: " + cerr.Error() + "，保留原平台状态）"
+					}
+				}
+				if kdzsBackToAudit || o.PlatformStatus == model.KDZSWaitAudit || o.PlatformStatus == "" {
+					fields["platform_status"] = model.KDZSWaitAudit
+					fields["platform_status_text"] = "待推单"
+					fields["ship_entry_locked"] = true
+					fields["ship_lock_reason"] = "快递助手待推单，请先分配；仅自营待发货可填单号"
+				} else {
+					// 撤单未成功：不要虚标待推单，否则下次推单会报「非待推单」
+					fields["platform_status"] = o.PlatformStatus
+					fields["platform_status_text"] = o.PlatformStatusText
+					if o.PlatformStatus == model.KDZSWaitSend {
+						fields["ship_entry_locked"] = false
+						fields["ship_lock_reason"] = ""
+						fields["platform_status_text"] = "待发货"
+					} else {
+						fields["ship_entry_locked"] = true
+						fields["ship_lock_reason"] = "快递助手状态待确认，请先同步订单"
+					}
+				}
 			} else {
 				fields["ship_entry_locked"] = false
 				fields["ship_lock_reason"] = ""
@@ -2101,7 +2132,7 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 				FromStatus: from,
 				ToStatus:   toStatus,
 				Action:     "unlink_dropship_po",
-				Remark:     remark,
+				Remark:     logRemark,
 				OperatorID: operatorID,
 			})
 		}); err != nil {
@@ -2442,7 +2473,27 @@ func (s *OrderService) setKDZSAgentType(ctx context.Context, o *model.Order, act
 	if tid != "" && tid != sysTid {
 		req.Tids = []string{tid}
 	}
-	return s.storeSync.SetOrderAgentType(ctx, token, req)
+	err := s.storeSync.SetOrderAgentType(ctx, token, req)
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	// 本地虚标「待推单」但助手侧已是「待发货」：按待发货再试；自营打单已推过则幂等成功
+	if !strings.Contains(msg, "非待推单") {
+		return err
+	}
+	if tradeStatus != model.KDZSWaitSend {
+		req2 := req
+		req2.TradeStatus = model.KDZSWaitSend
+		if err2 := s.storeSync.SetOrderAgentType(ctx, token, req2); err2 == nil {
+			return nil
+		}
+	}
+	if action == "self_print" {
+		// 已在待发货自营：无需再推
+		return nil
+	}
+	return fmt.Errorf("%s（订单中心状态可能滞后，请先同步快递助手或撤回推单后再推厂家）", msg)
 }
 
 func (s *OrderService) UpdateRemarks(ctx context.Context, tenantID, operatorID, orderID uint64, req dto.UpdateRemarksRequest, bearerToken string) (*model.Order, error) {

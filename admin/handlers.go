@@ -309,7 +309,7 @@ func (h *Handlers) UnlinkDropshipPO(c *gin.Context) {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	n, err := h.orders.UnlinkDropshipPO(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), req)
+	n, err := h.orders.UnlinkDropshipPO(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), req, authcontext.BearerToken(c))
 	if err != nil {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return
