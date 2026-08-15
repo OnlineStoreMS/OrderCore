@@ -2741,49 +2741,82 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	from := o.Status
 	newShipStatus := computeShipStatusAfter(o, shipLines)
 
+	doCallback := req.Callback
+	if !doCallback {
+		// 默认：电商/小程序订单自动回传
+		doCallback = o.SourceChannel == model.SourceKDZS || o.SourceChannel == model.SourceWXMall
+	}
+
 	// 同一运单号再次发货：追加明细到已有运单（避免拆成两条同号运单，自营同步按单号去重会丢商品）
 	existingSh, findErr := s.repos.FindShipmentByExpressNo(tenantID, orderID, expressNo)
 	if findErr != nil && !errors.Is(findErr, gorm.ErrRecordNotFound) {
 		return nil, findErr
 	}
-	if existingSh != nil && len(shipLines) > 0 {
-		err := s.repos.Transaction(func(tx *repo.Repos) error {
-			items := make([]model.OrderShipmentItem, 0, len(shipLines))
-			for _, line := range shipLines {
-				items = append(items, model.OrderShipmentItem{
-					TenantID:    tenantID,
-					ShipmentID:  existingSh.ID,
-					OrderID:     orderID,
-					OrderItemID: line.OrderItemID,
-					Qty:         line.Qty,
-					SkuCode:     line.SkuCode,
-					ProductName: line.ProductName,
-					SkuSpecs:    line.SkuSpecs,
-				})
-			}
-			if err := tx.CreateShipmentItems(items); err != nil {
-				return err
-			}
-			if company := strings.TrimSpace(req.ExpressCompany); company != "" && existingSh.ExpressCompany == "" {
-				existingSh.ExpressCompany = company
-				if err := tx.UpdateShipment(existingSh); err != nil {
+	if existingSh != nil {
+		if len(shipLines) > 0 {
+			err := s.repos.Transaction(func(tx *repo.Repos) error {
+				items := make([]model.OrderShipmentItem, 0, len(shipLines))
+				for _, line := range shipLines {
+					items = append(items, model.OrderShipmentItem{
+						TenantID:    tenantID,
+						ShipmentID:  existingSh.ID,
+						OrderID:     orderID,
+						OrderItemID: line.OrderItemID,
+						Qty:         line.Qty,
+						SkuCode:     line.SkuCode,
+						ProductName: line.ProductName,
+						SkuSpecs:    line.SkuSpecs,
+					})
+				}
+				if err := tx.CreateShipmentItems(items); err != nil {
 					return err
 				}
-			}
-			fields := map[string]any{"ship_status": newShipStatus}
-			if newShipStatus == model.ShipShipped {
-				fields["shipped_at"] = now
-			}
-			return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
-				FromStatus: from,
-				ToStatus:   from,
-				Action:     "ship_append",
-				Remark:     fmt.Sprintf("同运单追加商品 %s %s（%d 行）→%s", req.ExpressCompany, expressNo, len(shipLines), shipStatusLabel(newShipStatus)),
-				OperatorID: operatorID,
+				if company := strings.TrimSpace(req.ExpressCompany); company != "" && existingSh.ExpressCompany == "" {
+					existingSh.ExpressCompany = company
+					if err := tx.UpdateShipment(existingSh); err != nil {
+						return err
+					}
+				}
+				fields := map[string]any{"ship_status": newShipStatus}
+				if newShipStatus == model.ShipShipped {
+					fields["shipped_at"] = now
+				}
+				return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
+					FromStatus: from,
+					ToStatus:   from,
+					Action:     "ship_append",
+					Remark:     fmt.Sprintf("同运单追加商品 %s %s（%d 行）→%s", req.ExpressCompany, expressNo, len(shipLines), shipStatusLabel(newShipStatus)),
+					OperatorID: operatorID,
+				})
 			})
-		})
-		if err != nil {
-			return nil, err
+			if err != nil {
+				return nil, err
+			}
+		} else if !fullyShipped {
+			return nil, fmt.Errorf("请选择要发货的商品")
+		}
+		// 同运单再次「回传」：失败/未成功时重试平台回传，并把原始报错写回发货单
+		needRetryCB := doCallback && existingSh.CallbackStatus != model.CallbackSucceeded
+		if needRetryCB {
+			if company := strings.TrimSpace(req.ExpressCompany); company != "" {
+				existingSh.ExpressCompany = company
+			}
+			if remark := strings.TrimSpace(req.Remark); remark != "" {
+				existingSh.Remark = remark
+			}
+			msg, cbErr := s.callbackSource(ctx, o, existingSh, bearerToken)
+			if cbErr != nil {
+				existingSh.CallbackStatus = model.CallbackFailed
+				existingSh.CallbackMessage = truncate(cbErr.Error(), 500)
+				existingSh.CallbackAt = nil
+			} else {
+				existingSh.CallbackStatus = model.CallbackSucceeded
+				existingSh.CallbackMessage = truncate(msg, 500)
+				existingSh.CallbackAt = &now
+			}
+			if err := s.repos.UpdateShipment(existingSh); err != nil {
+				return nil, err
+			}
 		}
 		s.autoSyncSelfLogistics(ctx, o, bearerToken)
 		return s.repos.GetOrder(tenantID, orderID)
@@ -2803,12 +2836,6 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		CallbackStatus: model.CallbackPending,
 		Remark:         req.Remark,
 		ShippedAt:      &now,
-	}
-
-	doCallback := req.Callback
-	if !doCallback {
-		// 默认：电商/小程序订单自动回传
-		doCallback = o.SourceChannel == model.SourceKDZS || o.SourceChannel == model.SourceWXMall
 	}
 
 	if doCallback {

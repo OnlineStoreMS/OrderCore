@@ -352,7 +352,21 @@ async function submitShip() {
       callback: shipForm.callback,
       items,
     })
-    ElMessage.success(order.value.shipStatus === 'partial_shipped' ? '已记录部分发货' : '发货已记录')
+    const expressNo = String(shipForm.expressNo || '').trim()
+    const list = order.value.shipments || []
+    const sh = list.find((s) => (s.expressNo || '').trim() === expressNo)
+      || [...list].sort((a, b) => b.id - a.id)[0]
+    const cbStatus = (sh?.callbackStatus || '').toLowerCase()
+    const cbMsg = (sh?.callbackMessage || '').trim()
+    if (shipForm.callback && cbStatus === 'failed') {
+      await ElMessageBox.alert(cbMsg || '平台回传失败（无详细报错）', '回传失败（快递助手/平台原始报错）', {
+        type: 'error',
+        confirmButtonText: '知道了',
+      })
+    } else {
+      const base = order.value.shipStatus === 'partial_shipped' ? '已记录部分发货' : '发货已记录'
+      ElMessage.success(cbMsg && cbStatus === 'succeeded' ? `${base}：${cbMsg}` : base)
+    }
     shipVisible.value = false
   } catch (e: any) {
     ElMessage.error(e.message || '发货失败')
