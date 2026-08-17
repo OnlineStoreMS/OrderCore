@@ -160,8 +160,8 @@ type ShipRequest struct {
 	ExpressCompany string `json:"expressCompany"`
 	ExpressNo      string `json:"expressNo"`
 	Remark         string `json:"remark"`
-	// 是否回传来源平台（电商→StoreSyncAgent 等）
-	Callback bool `json:"callback"`
+	// 是否回传来源平台；nil=电商/小程序默认回传，false=明确跳过（如快递助手侧已打单）
+	Callback *bool `json:"callback"`
 	// Items 本运单发货的销售行；空=剩余全部（无明细订单则整单发货）
 	Items []ShipItemInput `json:"items"`
 }

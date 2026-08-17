@@ -150,3 +150,93 @@ func (c *Client) DeleteShipmentsByOrderCore(ctx context.Context, token string, o
 	}
 	return wrap.Data.Deleted, nil
 }
+
+// SyncShippedAtByMailNo 对齐发货中心运单发货时间（快递助手同步后回写）。
+func (c *Client) SyncShippedAtByMailNo(ctx context.Context, token string, orderCoreOrderID uint64, mailNo string, shippedAt time.Time) (int, error) {
+	if !c.Enabled() {
+		return 0, fmt.Errorf("shippingcore 未配置")
+	}
+	mailNo = strings.TrimSpace(mailNo)
+	if mailNo == "" || shippedAt.IsZero() {
+		return 0, fmt.Errorf("mailNo 与 shippedAt 必填")
+	}
+	body := map[string]any{
+		"orderCoreOrderId": orderCoreOrderID,
+		"mailNo":           mailNo,
+		"shippedAt":        shippedAt.Format(time.RFC3339),
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/admin/shipments/sync-shipped-at", bytes.NewReader(payload))
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimPrefix(token, "Bearer "))
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("shippingcore http %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var wrap struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			Updated int `json:"updated"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &wrap); err != nil {
+		return 0, fmt.Errorf("decode shippingcore: %w", err)
+	}
+	if wrap.Code != 0 && wrap.Code != 200 {
+		return 0, fmt.Errorf("shippingcore: %s", firstNonEmpty(wrap.Message, "请求失败"))
+	}
+	return wrap.Data.Updated, nil
+}
+
+// UpsertKdzsFromSync 订单中心同步快递助手已发货后补建/对齐发货中心发货单。
+func (c *Client) UpsertKdzsFromSync(ctx context.Context, token string, body map[string]any) error {
+	if !c.Enabled() {
+		return fmt.Errorf("shippingcore 未配置")
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/v1/admin/shipments/upsert-kdzs-from-sync", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+strings.TrimPrefix(token, "Bearer "))
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("shippingcore http %d: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	var wrap struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &wrap); err != nil {
+		return fmt.Errorf("decode shippingcore: %w", err)
+	}
+	if wrap.Code != 0 && wrap.Code != 200 {
+		return fmt.Errorf("shippingcore: %s", firstNonEmpty(wrap.Message, "请求失败"))
+	}
+	return nil
+}

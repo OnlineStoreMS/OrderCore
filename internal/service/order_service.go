@@ -912,6 +912,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		}
 		o = s.ensureSelfOrderAfterIngest(ctx, tenantID, o, bearerToken)
 		s.autoSyncDropshipLogistics(ctx, o, req, bearerToken)
+		s.syncShippingShippedAtFromOrder(ctx, o, bearerToken)
 		// 合单发货：分发备注只保留在第一单，其余清空（快递助手常复制到每单）
 		o = s.dedupeMergeShipFenFa(ctx, tenantID, o)
 		// 分发备注变更或合单去重后，补写未付款代发采购小计
@@ -1046,6 +1047,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	}
 	out = s.ensureSelfOrderAfterIngest(ctx, tenantID, out, bearerToken)
 	s.autoSyncDropshipLogistics(ctx, out, req, bearerToken)
+	s.syncShippingShippedAtFromOrder(ctx, out, bearerToken)
 	out = s.dedupeMergeShipFenFa(ctx, tenantID, out)
 	return out, true, nil
 }
@@ -2729,21 +2731,17 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	if err != nil {
 		return nil, err
 	}
-	if fullyShipped && len(shipLines) > 0 {
-		return nil, fmt.Errorf("订单已全部发货，仅可追加无商品明细的包裹运单")
-	}
-	if !fullyShipped && len(o.Items) > 0 && len(shipLines) == 0 {
-		return nil, fmt.Errorf("请选择要发货的商品")
-	}
 
 	expressNo := strings.TrimSpace(req.ExpressNo)
 	now := time.Now()
 	from := o.Status
 	newShipStatus := computeShipStatusAfter(o, shipLines)
 
-	doCallback := req.Callback
-	if !doCallback {
-		// 默认：电商/小程序订单自动回传
+	doCallback := false
+	if req.Callback != nil {
+		doCallback = *req.Callback
+	} else {
+		// 默认：电商/小程序订单自动回传（顺丰等填单）；快递助手侧已发货请显式传 callback=false
 		doCallback = o.SourceChannel == model.SourceKDZS || o.SourceChannel == model.SourceWXMall
 	}
 
@@ -2752,11 +2750,24 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	if findErr != nil && !errors.Is(findErr, gorm.ErrRecordNotFound) {
 		return nil, findErr
 	}
+	// 已全部发货：允许无明细追加新运单；同号再确认视为幂等成功（同步已写入后发货中心再点确认）
+	if fullyShipped && len(shipLines) > 0 && existingSh == nil {
+		return nil, fmt.Errorf("订单已全部发货，仅可追加无商品明细的包裹运单")
+	}
+	if !fullyShipped && len(o.Items) > 0 && len(shipLines) == 0 {
+		return nil, fmt.Errorf("请选择要发货的商品")
+	}
+
 	if existingSh != nil {
-		if len(shipLines) > 0 {
+		appendLines := shipLines
+		if fullyShipped && len(existingSh.Items) > 0 {
+			// 同号已有明细 → 幂等确认成功，不再追加避免重复行
+			appendLines = nil
+		}
+		if len(appendLines) > 0 {
 			err := s.repos.Transaction(func(tx *repo.Repos) error {
-				items := make([]model.OrderShipmentItem, 0, len(shipLines))
-				for _, line := range shipLines {
+				items := make([]model.OrderShipmentItem, 0, len(appendLines))
+				for _, line := range appendLines {
 					items = append(items, model.OrderShipmentItem{
 						TenantID:    tenantID,
 						ShipmentID:  existingSh.ID,
@@ -2781,11 +2792,17 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 				if newShipStatus == model.ShipShipped {
 					fields["shipped_at"] = now
 				}
+				action := "ship_append"
+				remark := fmt.Sprintf("同运单追加商品 %s %s（%d 行）→%s", req.ExpressCompany, expressNo, len(appendLines), shipStatusLabel(newShipStatus))
+				if fullyShipped {
+					action = "ship_confirm"
+					remark = fmt.Sprintf("同运单确认补明细 %s %s（%d 行）", req.ExpressCompany, expressNo, len(appendLines))
+				}
 				return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
 					FromStatus: from,
 					ToStatus:   from,
-					Action:     "ship_append",
-					Remark:     fmt.Sprintf("同运单追加商品 %s %s（%d 行）→%s", req.ExpressCompany, expressNo, len(shipLines), shipStatusLabel(newShipStatus)),
+					Action:     action,
+					Remark:     remark,
 					OperatorID: operatorID,
 				})
 			})
@@ -2794,9 +2811,19 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 			}
 		} else if !fullyShipped {
 			return nil, fmt.Errorf("请选择要发货的商品")
+		} else if fullyShipped && len(shipLines) > 0 {
+			_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+				TenantID:   tenantID,
+				OrderID:    orderID,
+				FromStatus: from,
+				ToStatus:   from,
+				Action:     "ship_confirm",
+				Remark:     fmt.Sprintf("同运单幂等确认 %s %s（同步已存在）", req.ExpressCompany, expressNo),
+				OperatorID: operatorID,
+			})
 		}
-		// 同运单再次「回传」：失败/未成功时重试平台回传，并把原始报错写回发货单
-		needRetryCB := doCallback && existingSh.CallbackStatus != model.CallbackSucceeded
+		// 同运单再次「回传」：仅失败态重试；skipped（如快递助手同步/无需回传）不重复打平台
+		needRetryCB := doCallback && existingSh.CallbackStatus != model.CallbackSucceeded && existingSh.CallbackStatus != model.CallbackSkipped
 		if needRetryCB {
 			if company := strings.TrimSpace(req.ExpressCompany); company != "" {
 				existingSh.ExpressCompany = company
@@ -2850,7 +2877,11 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		}
 	} else {
 		sh.CallbackStatus = model.CallbackSkipped
-		sh.CallbackMessage = "未回传来源平台"
+		if o.SourceChannel == model.SourceKDZS {
+			sh.CallbackMessage = "快递助手侧已发货，无需回传"
+		} else {
+			sh.CallbackMessage = "未回传来源平台"
+		}
 	}
 
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
@@ -4068,7 +4099,8 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 			ExpressCompany: firstNonEmpty(lg.CompanyName, lg.Company),
 			ExpressCode:    lg.Company,
 			ExpressNo:      no,
-			ShippedAt:      firstNonEmpty(lg.ShipTime, t.ShippedAt),
+			// 与快递助手界面一致：优先订单级 consignTime/shippedAt；包裹 shipTime 偶发差 1 秒
+			ShippedAt: firstNonEmpty(t.ShippedAt, lg.ShipTime),
 		})
 	}
 	return dto.IngestOrderRequest{
@@ -4528,6 +4560,95 @@ func (s *OrderService) autoSyncDropshipLogistics(ctx context.Context, o *model.O
 		return
 	}
 	log.Printf("[ordercore] auto synced logistics PO=%s order=%s", poNo, o.OrderNo)
+}
+
+// syncShippingShippedAtFromOrder 快递助手同步已发货后：补建/对齐发货中心发货单。
+// 发货时间用订单中心运单时间（已优先对齐助手 consignTime）；打印时间不写。
+func (s *OrderService) syncShippingShippedAtFromOrder(ctx context.Context, o *model.Order, bearerToken string) {
+	if o == nil || s.shipping == nil || !s.shipping.Enabled() || strings.TrimSpace(bearerToken) == "" {
+		return
+	}
+	// 自营走快递助手打单：同步后要在发货中心可查；代发不建发货中心单
+	if o.AllocType != model.AllocSelfShip {
+		return
+	}
+	if len(o.Shipments) == 0 {
+		return
+	}
+	snap := mapOrderToShippingSnapshot(o)
+	for _, sh := range o.Shipments {
+		no := strings.TrimSpace(sh.ExpressNo)
+		if no == "" {
+			continue
+		}
+		body := map[string]any{
+			"orderId":        o.ID,
+			"expressNo":      no,
+			"expressCompany": strings.TrimSpace(sh.ExpressCompany),
+			"order":          snap,
+		}
+		if sh.ShippedAt != nil && !sh.ShippedAt.IsZero() {
+			body["shippedAt"] = sh.ShippedAt.Format(time.RFC3339)
+		} else if o.ShippedAt != nil && !o.ShippedAt.IsZero() {
+			body["shippedAt"] = o.ShippedAt.Format(time.RFC3339)
+		}
+		if err := s.shipping.UpsertKdzsFromSync(ctx, bearerToken, body); err != nil {
+			log.Printf("[ordercore] upsert shipping kdzs orderID=%d mailNo=%s: %v (best-effort)", o.ID, no, err)
+		}
+	}
+}
+
+func mapOrderToShippingSnapshot(o *model.Order) map[string]any {
+	if o == nil {
+		return map[string]any{}
+	}
+	goods := make([]map[string]any, 0, len(o.Items))
+	for _, it := range o.Items {
+		qty := it.Quantity
+		if qty <= 0 {
+			qty = 1
+		}
+		goods = append(goods, map[string]any{
+			"orderItemId": it.ID,
+			"title":       it.ProductName,
+			"skuName":     it.SkuSpecs,
+			"num":         qty,
+			"outerId":     it.SkuCode,
+			"price":       it.Price,
+		})
+	}
+	recvName, recvMobile, province, city, county, addr := "", "", "", "", "", ""
+	if o.Address != nil {
+		recvName = o.Address.Name
+		recvMobile = o.Address.Phone
+		province = o.Address.Province
+		city = o.Address.City
+		county = o.Address.District
+		addr = firstNonEmpty(o.Address.Address, o.Address.FullText)
+	}
+	if recvName == "" {
+		recvName = o.BuyerName
+	}
+	if recvMobile == "" {
+		recvMobile = o.BuyerPhone
+	}
+	return map[string]any{
+		"platform":         o.Platform,
+		"shopId":           o.ShopID,
+		"shopName":         o.ShopName,
+		"sourceChannel":    o.SourceChannel,
+		"manualSourceName": o.ManualSourceName,
+		"orderNo":          o.OrderNo,
+		"sysTid":           o.PlatformSysTid,
+		"sourceTid":        o.PlatformOrderID,
+		"receiverName":     recvName,
+		"receiverMobile":   recvMobile,
+		"receiverProvince": province,
+		"receiverCity":     city,
+		"receiverCounty":   county,
+		"receiverAddress":  addr,
+		"goods":            goods,
+	}
 }
 
 // dedupeMergeShipFenFa 合单发货（同运单号）时，分发备注只保留在销售单 ID 最小的一单，其余清空。
