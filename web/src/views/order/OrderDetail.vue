@@ -198,7 +198,7 @@ const remainingShipItems = computed(() => {
     .filter((it) => it.remaining > 0)
 })
 
-/** 商品明细树形行：根行 + |—— 拆分子行 */
+/** 商品明细树形行：根行 + └ 拆分子行 */
 type ItemTreeRow = {
   key: string
   item: NonNullable<Order['items']>[number]
@@ -602,7 +602,7 @@ onMounted(load)
         <el-table-column label="商品" min-width="220">
           <template #default="{ row }">
             <div :class="{ 'split-child': row.isSplitChild || row.fullGroupHeader }">
-              <span v-if="row.isSplitChild" class="split-prefix">|—— </span>
+              <span v-if="row.isSplitChild" class="split-prefix">└ </span>
               <span v-if="row.fullGroupHeader" class="split-group">整单拆分</span>
               <template v-else>
                 {{ row.item.productName || row.item.skuCode || '商品' }}
@@ -768,7 +768,7 @@ h3 { margin: 8px 0 0; font-size: 15px; color: #334155; }
 .hint { margin-left: 10px; color: #94a3b8; font-size: 12px; }
 .muted { color: #94a3b8; font-size: 12px; }
 .split-child { color: #475569; }
-.split-prefix { color: #94a3b8; font-family: ui-monospace, monospace; }
+.split-prefix { color: #8f959e; }
 .split-tag { margin-left: 6px; vertical-align: middle; }
 .split-group { font-weight: 600; color: #64748b; }
 .ship-pick-row { margin-bottom: 6px; }

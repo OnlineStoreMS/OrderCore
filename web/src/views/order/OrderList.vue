@@ -528,7 +528,7 @@ async function copyOrderText(order: Order, ev?: Event) {
                 <div v-else class="goods-pic goods-pic-empty" @click.stop>无图</div>
                 <div class="goods-info">
                   <div class="goods-title">
-                    <span v-if="node.isSplitChild" class="split-prefix">|—— </span>
+                    <span v-if="node.isSplitChild" class="split-prefix">└ </span>
                     {{ node.item.productName || node.item.skuCode || '商品' }}
                     <span v-if="node.isSplitChild" class="split-badge">拆分</span>
                     <span v-else-if="node.isSplitParent" class="split-badge muted-badge">已拆分</span>
@@ -701,7 +701,7 @@ async function copyOrderText(order: Order, ev?: Event) {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
-.split-prefix { color: #94a3b8; font-family: ui-monospace, monospace; }
+.split-prefix { color: #8f959e; }
 .split-badge {
   margin-left: 4px;
   font-size: 11px;
