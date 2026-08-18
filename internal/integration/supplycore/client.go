@@ -56,6 +56,7 @@ type PurchaseOrderItemInput struct {
 	UnitPrice       float64 `json:"unitPrice"`
 	RefSoID         uint64  `json:"refSoId,omitempty"`
 	RefOrderNo      string  `json:"refOrderNo,omitempty"`
+	RefOrderItemID  uint64  `json:"refOrderItemId,omitempty"`
 	Remark          string  `json:"remark,omitempty"`
 }
 

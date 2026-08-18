@@ -1614,18 +1614,19 @@ func (s *OrderService) mapOrderToPOLines(ctx context.Context, bearerToken string
 		}
 		remark := strings.Join(parts, "；")
 		out = append(out, supplycore.PurchaseOrderItemInput{
-			SkuID:         skuID,
-			ProductName:   it.ProductName,
-			SkuCode:       skuCode,
-			SkuSpecs:      it.SkuSpecs,
-			PicURL:        it.PicURL,
-			Qty:           qty,
-			SaleUnitPrice: saleUnit,
-			SaleAmount:    saleAmt,
-			UnitPrice:     unitPrice,
-			RefSoID:       o.ID,
-			RefOrderNo:    o.OrderNo,
-			Remark:        remark,
+			SkuID:          skuID,
+			ProductName:    it.ProductName,
+			SkuCode:        skuCode,
+			SkuSpecs:       it.SkuSpecs,
+			PicURL:         it.PicURL,
+			Qty:            qty,
+			SaleUnitPrice:  saleUnit,
+			SaleAmount:     saleAmt,
+			UnitPrice:      unitPrice,
+			RefSoID:        o.ID,
+			RefOrderNo:     o.OrderNo,
+			RefOrderItemID: it.ID,
+			Remark:         remark,
 		})
 	}
 	return out
