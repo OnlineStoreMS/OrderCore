@@ -27,6 +27,7 @@ func RegisterRoutes(g *gin.RouterGroup, h *Handlers, sh *SettingsHandlers) {
 	g.PUT("/orders/:id/payment", h.UpdatePayment)
 	g.POST("/orders/:id/ship", h.Ship)
 	g.POST("/orders/:id/unship", h.Unship)
+	g.PUT("/orders/:id/split-items", h.SyncSplitItems)
 	g.POST("/orders/:id/push", sh.PushOrder)
 
 	g.POST("/sync/kdzs", h.SyncKDZS)

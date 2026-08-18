@@ -434,6 +434,25 @@ func (h *Handlers) Unship(c *gin.Context) {
 	response.OK(c, o)
 }
 
+func (h *Handlers) SyncSplitItems(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, "无效 ID")
+		return
+	}
+	var req dto.SyncSplitItemsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	data, err := h.orders.SyncSplitItems(authcontext.TenantID(c), id, req)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, data)
+}
+
 func (h *Handlers) SyncKDZS(c *gin.Context) {
 	var req dto.SyncKDZSRequest
 	_ = c.ShouldBindJSON(&req)

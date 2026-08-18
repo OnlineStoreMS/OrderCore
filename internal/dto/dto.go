@@ -171,6 +171,33 @@ type ShipItemInput struct {
 	Qty         int    `json:"qty"`
 }
 
+// SyncSplitItemsRequest 发货中心保存拆分计划后同步销售子行。
+type SyncSplitItemsRequest struct {
+	Mode  string               `json:"mode"` // partial | full
+	Lines []SplitItemLineInput `json:"lines"`
+}
+
+type SplitItemLineInput struct {
+	ParentOrderItemID uint64 `json:"parentOrderItemId"`
+	SkuName           string `json:"skuName"`
+	Qty               int    `json:"qty"`
+	ShipPlanLineID    uint64 `json:"shipPlanLineId"`
+}
+
+type SplitItemLineResult struct {
+	ID                uint64 `json:"id"`
+	ParentOrderItemID uint64 `json:"parentOrderItemId"`
+	SkuName           string `json:"skuName"`
+	Qty               int    `json:"qty"`
+	ShipPlanLineID    uint64 `json:"shipPlanLineId"`
+	SplitKind         string `json:"splitKind"`
+}
+
+type SyncSplitItemsResult struct {
+	Mode  string                 `json:"mode"`
+	Lines []SplitItemLineResult  `json:"lines"`
+}
+
 // UnshipRequest 取消快递单后回退订单发货：按运单号清除商品发货明细并重算发货状态。
 type UnshipRequest struct {
 	ExpressNo string `json:"expressNo"`

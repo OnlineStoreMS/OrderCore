@@ -13,6 +13,9 @@ export interface OrderItem {
   quantity: number
   price: number
   totalAmount?: number
+  parentOrderItemId?: number
+  splitKind?: '' | 'partial' | 'full'
+  shipPlanLineId?: number
 }
 
 export interface OrderAddress {

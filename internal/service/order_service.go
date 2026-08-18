@@ -3075,6 +3075,283 @@ func (s *OrderService) autoSyncSelfLogistics(ctx context.Context, before *model.
 	log.Printf("[ordercore] auto synced self logistics orderID=%d orderNo=%s", before.ID, before.OrderNo)
 }
 
+// SyncSplitItems 同步发货中心拆分计划为销售子行；已发运的子行保留，未发子行按 lines 重建。
+func (s *OrderService) SyncSplitItems(tenantID, orderID uint64, req dto.SyncSplitItemsRequest) (*dto.SyncSplitItemsResult, error) {
+	mode := strings.TrimSpace(req.Mode)
+	if mode != "" && mode != model.SplitKindPartial && mode != model.SplitKindFull {
+		return nil, fmt.Errorf("mode 须为 partial 或 full")
+	}
+	if len(req.Lines) > 0 && mode == "" {
+		return nil, fmt.Errorf("mode 不能为空")
+	}
+	o, err := s.repos.GetOrder(tenantID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	if o == nil {
+		return nil, fmt.Errorf("订单不存在")
+	}
+
+	rootByID := map[uint64]model.OrderItem{}
+	maxLineNo := 0
+	for _, it := range o.Items {
+		if it.LineNo > maxLineNo {
+			maxLineNo = it.LineNo
+		}
+		if strings.TrimSpace(it.SplitKind) == "" && it.ParentOrderItemID == 0 {
+			rootByID[it.ID] = it
+		}
+	}
+
+	shippedItemIDs := map[uint64]struct{}{}
+	for _, sh := range o.Shipments {
+		for _, si := range sh.Items {
+			if si.OrderItemID > 0 {
+				shippedItemIDs[si.OrderItemID] = struct{}{}
+			}
+		}
+	}
+
+	type existingChild struct {
+		item     model.OrderItem
+		shipped  bool
+	}
+	byPlanLine := map[uint64]*existingChild{}
+	var unshippedIDs []uint64
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) == "" {
+			continue
+		}
+		_, shipped := shippedItemIDs[it.ID]
+		ec := &existingChild{item: it, shipped: shipped}
+		if it.ShipPlanLineID > 0 {
+			byPlanLine[it.ShipPlanLineID] = ec
+		}
+		if !shipped {
+			unshippedIDs = append(unshippedIDs, it.ID)
+		}
+	}
+
+	for i, line := range req.Lines {
+		sku := strings.TrimSpace(line.SkuName)
+		if sku == "" {
+			return nil, fmt.Errorf("第 %d 行规格名称不能为空", i+1)
+		}
+		if line.Qty <= 0 {
+			return nil, fmt.Errorf("第 %d 行数量须大于 0", i+1)
+		}
+		if line.ShipPlanLineID == 0 {
+			return nil, fmt.Errorf("第 %d 行 shipPlanLineId 无效", i+1)
+		}
+		if mode == model.SplitKindPartial {
+			if line.ParentOrderItemID == 0 {
+				return nil, fmt.Errorf("第 %d 行 parentOrderItemId 无效", i+1)
+			}
+			if _, ok := rootByID[line.ParentOrderItemID]; !ok {
+				return nil, fmt.Errorf("第 %d 行父商品不属于本订单", i+1)
+			}
+		}
+	}
+
+	keepPlanLine := map[uint64]struct{}{}
+	for _, line := range req.Lines {
+		keepPlanLine[line.ShipPlanLineID] = struct{}{}
+	}
+
+	err = s.repos.Transaction(func(tx *repo.Repos) error {
+		// 删除未发且不在本次计划中的子行；同 planLineId 的未发行稍后更新
+		toDelete := make([]uint64, 0)
+		for _, id := range unshippedIDs {
+			var it model.OrderItem
+			found := false
+			for _, x := range o.Items {
+				if x.ID == id {
+					it = x
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+			if it.ShipPlanLineID > 0 {
+				if _, keep := keepPlanLine[it.ShipPlanLineID]; keep {
+					continue
+				}
+			}
+			toDelete = append(toDelete, id)
+		}
+		if len(toDelete) > 0 {
+			if err := tx.DB().Where("tenant_id = ? AND order_id = ? AND id IN ?", tenantID, orderID, toDelete).
+				Delete(&model.OrderItem{}).Error; err != nil {
+				return err
+			}
+		}
+
+		for _, line := range req.Lines {
+			sku := strings.TrimSpace(line.SkuName)
+			parentID := uint64(0)
+			if mode == model.SplitKindPartial {
+				parentID = line.ParentOrderItemID
+			}
+			splitKind := mode
+			if ec, ok := byPlanLine[line.ShipPlanLineID]; ok && !ec.shipped {
+				updates := map[string]any{
+					"product_name":         sku,
+					"sku_specs":            sku,
+					"quantity":             line.Qty,
+					"parent_order_item_id": parentID,
+					"split_kind":           splitKind,
+					"ship_plan_line_id":    line.ShipPlanLineID,
+				}
+				if parent, ok := rootByID[parentID]; ok {
+					updates["sku_code"] = parent.SkuCode
+					updates["sku_id"] = parent.SkuID
+					updates["pic_url"] = parent.PicURL
+					updates["platform_sku_id"] = parent.PlatformSkuID
+					updates["platform_item_id"] = parent.PlatformItemID
+				}
+				if err := tx.DB().Model(&model.OrderItem{}).
+					Where("tenant_id = ? AND id = ?", tenantID, ec.item.ID).
+					Updates(updates).Error; err != nil {
+					return err
+				}
+				ec.item.ProductName = sku
+				ec.item.SkuSpecs = sku
+				ec.item.Quantity = line.Qty
+				ec.item.ParentOrderItemID = parentID
+				ec.item.SplitKind = splitKind
+				continue
+			}
+			if ec, ok := byPlanLine[line.ShipPlanLineID]; ok && ec.shipped {
+				// 已发子行：保留，仅允许更新名称与计划数量（不低于已发件数由发货侧控制）
+				updates := map[string]any{
+					"product_name": sku,
+					"sku_specs":    sku,
+					"quantity":     line.Qty,
+				}
+				if line.Qty < ec.item.Quantity {
+					// 已发过：数量不得小于当前记录（避免破坏已发口径）；若传入更小则保持
+					shippedQty := shippedQtyByItem(o)[ec.item.ID]
+					minQty := shippedQty
+					if minQty < 1 {
+						minQty = 1
+					}
+					if line.Qty < minQty {
+						updates["quantity"] = minQty
+					}
+				}
+				if err := tx.DB().Model(&model.OrderItem{}).
+					Where("tenant_id = ? AND id = ?", tenantID, ec.item.ID).
+					Updates(updates).Error; err != nil {
+					return err
+				}
+				continue
+			}
+
+			maxLineNo++
+			child := model.OrderItem{
+				TenantID:          tenantID,
+				OrderID:           orderID,
+				LineNo:            maxLineNo,
+				ProductName:       sku,
+				SkuSpecs:          sku,
+				Quantity:          line.Qty,
+				ParentOrderItemID: parentID,
+				SplitKind:         splitKind,
+				ShipPlanLineID:    line.ShipPlanLineID,
+			}
+			if parent, ok := rootByID[parentID]; ok {
+				child.SkuID = parent.SkuID
+				child.SkuCode = parent.SkuCode
+				child.PicURL = parent.PicURL
+				child.PlatformSkuID = parent.PlatformSkuID
+				child.PlatformItemID = parent.PlatformItemID
+			}
+			if err := tx.DB().Create(&child).Error; err != nil {
+				return err
+			}
+			byPlanLine[line.ShipPlanLineID] = &existingChild{item: child, shipped: false}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	fresh, err := s.repos.GetOrder(tenantID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	out := &dto.SyncSplitItemsResult{Mode: mode, Lines: make([]dto.SplitItemLineResult, 0, len(req.Lines))}
+	childByPlan := map[uint64]model.OrderItem{}
+	for _, it := range fresh.Items {
+		if strings.TrimSpace(it.SplitKind) == "" {
+			continue
+		}
+		if it.ShipPlanLineID > 0 {
+			childByPlan[it.ShipPlanLineID] = it
+		}
+	}
+	for _, line := range req.Lines {
+		it, ok := childByPlan[line.ShipPlanLineID]
+		if !ok {
+			continue
+		}
+		out.Lines = append(out.Lines, dto.SplitItemLineResult{
+			ID:                it.ID,
+			ParentOrderItemID: it.ParentOrderItemID,
+			SkuName:           firstNonEmpty(it.SkuSpecs, it.ProductName),
+			Qty:               it.Quantity,
+			ShipPlanLineID:    it.ShipPlanLineID,
+			SplitKind:         it.SplitKind,
+		})
+	}
+	return out, nil
+}
+
+func isSplitChildItem(it model.OrderItem) bool {
+	return strings.TrimSpace(it.SplitKind) != ""
+}
+
+func orderHasFullSplitChildren(o *model.Order) bool {
+	if o == nil {
+		return false
+	}
+	for _, it := range o.Items {
+		if it.SplitKind == model.SplitKindFull {
+			return true
+		}
+	}
+	return false
+}
+
+func parentHasPartialSplitChildren(o *model.Order, parentID uint64) bool {
+	if o == nil || parentID == 0 {
+		return false
+	}
+	for _, it := range o.Items {
+		if it.ParentOrderItemID == parentID && it.SplitKind == model.SplitKindPartial {
+			return true
+		}
+	}
+	return false
+}
+
+// isShippableOrderItem 有拆分子行时原行不可发；整单拆分时仅子行可发。
+func isShippableOrderItem(o *model.Order, it model.OrderItem) bool {
+	if isSplitChildItem(it) {
+		return true
+	}
+	if orderHasFullSplitChildren(o) {
+		return false
+	}
+	if parentHasPartialSplitChildren(o, it.ID) {
+		return false
+	}
+	return true
+}
+
 // shippedQtyByItem 已发数量（按销售行）。历史无明细运单且订单已全部发货时，视为整单已发完。
 func shippedQtyByItem(o *model.Order) map[uint64]int {
 	out := map[uint64]int{}
@@ -3097,6 +3374,9 @@ func shippedQtyByItem(o *model.Order) map[uint64]int {
 	// 取消最后一票后 Shipments 为空时绝不能走此分支，否则会把 wait_ship 误算回 shipped。
 	if !hasItemRows && len(o.Shipments) > 0 && o.ShipStatus == model.ShipShipped {
 		for _, it := range o.Items {
+			if !isShippableOrderItem(o, it) {
+				continue
+			}
 			out[it.ID] = it.Quantity
 		}
 	}
@@ -3107,6 +3387,10 @@ func remainingQtyByItem(o *model.Order) map[uint64]int {
 	shipped := shippedQtyByItem(o)
 	out := map[uint64]int{}
 	for _, it := range o.Items {
+		if !isShippableOrderItem(o, it) {
+			out[it.ID] = 0
+			continue
+		}
 		left := it.Quantity - shipped[it.ID]
 		if left < 0 {
 			left = 0
@@ -3193,6 +3477,9 @@ func computeShipStatusAfter(o *model.Order, lines []resolvedShipLine) string {
 	totalLeft := 0
 	totalOrdered := 0
 	for _, it := range o.Items {
+		if !isShippableOrderItem(o, it) {
+			continue
+		}
 		totalOrdered += it.Quantity
 		left := remaining[it.ID]
 		if left < 0 {

@@ -177,13 +177,96 @@ const remainingShipItems = computed(() => {
   const o = order.value
   if (!o?.items?.length) return []
   const shipped = shippedQtyMap(o)
+  const hasFull = (o.items || []).some((it) => it.splitKind === 'full')
+  const parentsWithPartial = new Set(
+    (o.items || [])
+      .filter((it) => it.splitKind === 'partial' && it.parentOrderItemId)
+      .map((it) => it.parentOrderItemId!),
+  )
   return o.items
     .filter((it) => it.id)
+    .filter((it) => {
+      if (it.splitKind === 'partial' || it.splitKind === 'full') return true
+      if (hasFull) return false
+      if (parentsWithPartial.has(it.id!)) return false
+      return true
+    })
     .map((it) => {
       const left = Math.max(0, (it.quantity || 0) - (shipped[it.id!] || 0))
       return { ...it, remaining: left }
     })
     .filter((it) => it.remaining > 0)
+})
+
+/** 商品明细树形行：根行 + |—— 拆分子行 */
+type ItemTreeRow = {
+  key: string
+  item: NonNullable<Order['items']>[number]
+  depth: number
+  isSplitChild: boolean
+  isSplitParent: boolean
+  fullGroupHeader?: boolean
+}
+
+const itemTreeRows = computed((): ItemTreeRow[] => {
+  const items = order.value?.items || []
+  if (!items.length) return []
+  const childrenByParent = new Map<number, typeof items>()
+  const fullChildren: typeof items = []
+  const roots: typeof items = []
+  for (const it of items) {
+    if (it.splitKind === 'full') {
+      fullChildren.push(it)
+      continue
+    }
+    if (it.splitKind === 'partial' && it.parentOrderItemId) {
+      const list = childrenByParent.get(it.parentOrderItemId) || []
+      list.push(it)
+      childrenByParent.set(it.parentOrderItemId, list)
+      continue
+    }
+    roots.push(it)
+  }
+  const out: ItemTreeRow[] = []
+  for (const root of roots) {
+    const kids = childrenByParent.get(root.id || 0) || []
+    out.push({
+      key: `root-${root.id}`,
+      item: root,
+      depth: 0,
+      isSplitChild: false,
+      isSplitParent: kids.length > 0,
+    })
+    for (const ch of kids) {
+      out.push({
+        key: `child-${ch.id}`,
+        item: ch,
+        depth: 1,
+        isSplitChild: true,
+        isSplitParent: false,
+      })
+    }
+  }
+  if (fullChildren.length) {
+    out.push({
+      key: 'full-header',
+      item: { quantity: 0, price: 0, productName: '整单拆分' },
+      depth: 0,
+      isSplitChild: false,
+      isSplitParent: false,
+      fullGroupHeader: true,
+    })
+    for (const ch of fullChildren) {
+      out.push({
+        key: `full-${ch.id}`,
+        item: ch,
+        depth: 1,
+        isSplitChild: true,
+        isSplitParent: false,
+      })
+    }
+  }
+  return out
 })
 
 const shipItemIds = ref<number[]>([])
@@ -497,31 +580,59 @@ onMounted(load)
       </el-descriptions>
 
       <h3>商品明细</h3>
-      <el-table :data="order.items || []" size="small">
+      <el-table :data="itemTreeRows" size="small" row-key="key">
         <el-table-column label="图片" width="72">
           <template #default="{ row }">
-            <el-image
-              v-if="row.picUrl"
-              :src="row.picUrl"
-              :preview-src-list="[row.picUrl]"
-              fit="cover"
-              style="width: 48px; height: 48px; border-radius: 4px"
-              preview-teleported
-            />
-            <span v-else class="muted">-</span>
+            <template v-if="row.fullGroupHeader">
+              <span class="muted">—</span>
+            </template>
+            <template v-else>
+              <el-image
+                v-if="row.item.picUrl"
+                :src="row.item.picUrl"
+                :preview-src-list="[row.item.picUrl]"
+                fit="cover"
+                style="width: 48px; height: 48px; border-radius: 4px"
+                preview-teleported
+              />
+              <span v-else class="muted">-</span>
+            </template>
           </template>
         </el-table-column>
-        <el-table-column prop="productName" label="商品" min-width="200" />
-        <el-table-column prop="skuSpecs" label="规格" width="140" />
+        <el-table-column label="商品" min-width="220">
+          <template #default="{ row }">
+            <div :class="{ 'split-child': row.isSplitChild || row.fullGroupHeader }">
+              <span v-if="row.isSplitChild" class="split-prefix">|—— </span>
+              <span v-if="row.fullGroupHeader" class="split-group">整单拆分</span>
+              <template v-else>
+                {{ row.item.productName || row.item.skuCode || '商品' }}
+                <el-tag v-if="row.isSplitChild" size="small" type="warning" class="split-tag">拆分</el-tag>
+                <el-tag v-else-if="row.isSplitParent" size="small" type="info" class="split-tag">已拆分</el-tag>
+              </template>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="规格" width="140">
+          <template #default="{ row }">
+            <span v-if="row.fullGroupHeader">—</span>
+            <span v-else>{{ row.item.skuSpecs || '—' }}</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="platformSkuId" label="平台SKU" width="130" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.platformSkuId || '—' }}</template>
+          <template #default="{ row }">{{ row.fullGroupHeader ? '—' : (row.item.platformSkuId || '—') }}</template>
         </el-table-column>
-        <el-table-column prop="skuCode" label="商家编码" width="140">
-          <template #default="{ row }">{{ row.skuCode || '—' }}</template>
+        <el-table-column label="商家编码" width="140">
+          <template #default="{ row }">{{ row.fullGroupHeader ? '—' : (row.item.skuCode || '—') }}</template>
         </el-table-column>
-        <el-table-column prop="quantity" label="数量" width="80" />
-        <el-table-column prop="price" label="单价" width="90" />
-        <el-table-column prop="totalAmount" label="小计" width="90" />
+        <el-table-column label="数量" width="80">
+          <template #default="{ row }">{{ row.fullGroupHeader ? '—' : row.item.quantity }}</template>
+        </el-table-column>
+        <el-table-column label="单价" width="90">
+          <template #default="{ row }">{{ row.fullGroupHeader || row.isSplitChild ? '—' : row.item.price }}</template>
+        </el-table-column>
+        <el-table-column label="小计" width="90">
+          <template #default="{ row }">{{ row.fullGroupHeader || row.isSplitChild ? '—' : row.item.totalAmount }}</template>
+        </el-table-column>
       </el-table>
 
       <h3>发货记录</h3>
@@ -656,6 +767,10 @@ onMounted(load)
 h3 { margin: 8px 0 0; font-size: 15px; color: #334155; }
 .hint { margin-left: 10px; color: #94a3b8; font-size: 12px; }
 .muted { color: #94a3b8; font-size: 12px; }
+.split-child { color: #475569; }
+.split-prefix { color: #94a3b8; font-family: ui-monospace, monospace; }
+.split-tag { margin-left: 6px; vertical-align: middle; }
+.split-group { font-weight: 600; color: #64748b; }
 .ship-pick-row { margin-bottom: 6px; }
 .ship-item-line { font-size: 12px; line-height: 1.5; }
 .addr-actions { margin-top: 6px; display: flex; gap: 8px; }

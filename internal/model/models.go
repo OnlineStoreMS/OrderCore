@@ -161,11 +161,22 @@ type OrderItem struct {
 	Quantity       int       `gorm:"not null" json:"quantity"`
 	Price          float64   `gorm:"type:decimal(12,2)" json:"price"`
 	TotalAmount    float64   `gorm:"type:decimal(12,2)" json:"totalAmount"`
+	// ParentOrderItemID 拆分子行指向原销售行；整单拆分子行为 0
+	ParentOrderItemID uint64 `gorm:"index;default:0" json:"parentOrderItemId"`
+	// SplitKind 拆分子行：partial=按商品 / full=整单；根行为空
+	SplitKind string `gorm:"size:16;index" json:"splitKind,omitempty"`
+	// ShipPlanLineID 对应发货中心拆分计划行，同步幂等
+	ShipPlanLineID uint64    `gorm:"index;default:0" json:"shipPlanLineId,omitempty"`
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 func (OrderItem) TableName() string { return "order_items" }
+
+const (
+	SplitKindPartial = "partial"
+	SplitKindFull    = "full"
+)
 
 type OrderAddress struct {
 	ID        uint64    `gorm:"primaryKey" json:"id"`
