@@ -1441,9 +1441,19 @@ func (s *OrderService) mapOrderToSelfLines(o *model.Order) []selfcore.SelfOrderI
 	if pay <= 0 {
 		pay = o.TotalAmount
 	}
-	weights := make([]float64, len(o.Items))
+	rootItems := make([]model.OrderItem, 0, len(o.Items))
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" {
+			continue
+		}
+		rootItems = append(rootItems, it)
+	}
+	if len(rootItems) == 0 {
+		rootItems = append(rootItems, o.Items...)
+	}
+	weights := make([]float64, len(rootItems))
 	var sumW float64
-	for i, it := range o.Items {
+	for i, it := range rootItems {
 		w := it.TotalAmount
 		if w <= 0 {
 			qty := it.Quantity
@@ -1458,15 +1468,15 @@ func (s *OrderService) mapOrderToSelfLines(o *model.Order) []selfcore.SelfOrderI
 		weights[i] = w
 		sumW += w
 	}
-	out := make([]selfcore.SelfOrderItemInput, 0, len(o.Items))
+	out := make([]selfcore.SelfOrderItemInput, 0, len(rootItems))
 	allocated := 0.0
-	for i, it := range o.Items {
+	for i, it := range rootItems {
 		qty := it.Quantity
 		if qty <= 0 {
 			qty = 1
 		}
 		var saleAmt float64
-		if i == len(o.Items)-1 {
+		if i == len(rootItems)-1 {
 			saleAmt = roundMoney(pay - allocated)
 		} else if sumW > 0 {
 			saleAmt = roundMoney(pay * weights[i] / sumW)
@@ -1500,13 +1510,23 @@ func (s *OrderService) mapOrderToPOLines(ctx context.Context, bearerToken string
 	if o == nil || len(o.Items) == 0 {
 		return nil
 	}
+	items := make([]model.OrderItem, 0, len(o.Items))
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" {
+			continue
+		}
+		items = append(items, it)
+	}
+	if len(items) == 0 {
+		items = append(items, o.Items...)
+	}
 	pay := o.PayAmount
 	if pay <= 0 {
 		pay = o.TotalAmount
 	}
-	weights := make([]float64, len(o.Items))
+	weights := make([]float64, len(items))
 	var sumW float64
-	for i, it := range o.Items {
+	for i, it := range items {
 		w := it.TotalAmount
 		if w <= 0 {
 			qty := it.Quantity
@@ -1524,7 +1544,7 @@ func (s *OrderService) mapOrderToPOLines(ctx context.Context, bearerToken string
 
 	purchaseTotal, hasPurchase := parseRemarkPurchaseAmount(orderRemarkBySyncSource(o, syncFrom))
 	totalQty := 0
-	for _, it := range o.Items {
+	for _, it := range items {
 		q := it.Quantity
 		if q <= 0 {
 			q = 1
@@ -1532,13 +1552,13 @@ func (s *OrderService) mapOrderToPOLines(ctx context.Context, bearerToken string
 		totalQty += q
 	}
 	if totalQty <= 0 {
-		totalQty = len(o.Items)
+		totalQty = len(items)
 	}
 
-	out := make([]supplycore.PurchaseOrderItemInput, 0, len(o.Items))
+	out := make([]supplycore.PurchaseOrderItemInput, 0, len(items))
 	var allocated float64
 	var purchaseAllocated float64
-	for i, it := range o.Items {
+	for i, it := range items {
 		qty := it.Quantity
 		if qty <= 0 {
 			qty = 1
@@ -1551,7 +1571,7 @@ func (s *OrderService) mapOrderToPOLines(ctx context.Context, bearerToken string
 			}
 		}
 		var saleAmt float64
-		if i == len(o.Items)-1 {
+		if i == len(items)-1 {
 			saleAmt = roundMoney(pay - allocated)
 		} else if sumW > 0 {
 			saleAmt = roundMoney(pay * weights[i] / sumW)
@@ -1567,7 +1587,7 @@ func (s *OrderService) mapOrderToPOLines(ctx context.Context, bearerToken string
 		unitPrice := 0.0
 		if hasPurchase {
 			var lineAmt float64
-			if i == len(o.Items)-1 {
+			if i == len(items)-1 {
 				lineAmt = roundMoney(purchaseTotal - purchaseAllocated)
 			} else {
 				lineAmt = roundMoney(purchaseTotal * float64(qty) / float64(totalQty))
@@ -3308,6 +3328,31 @@ func (s *OrderService) SyncSplitItems(tenantID, orderID uint64, req dto.SyncSpli
 		})
 	}
 	return out, nil
+}
+
+// PushSplitItemsToSelfCore 拆分同步后推送到自营中心（best-effort）。
+func (s *OrderService) PushSplitItemsToSelfCore(ctx context.Context, bearerToken string, orderID uint64, result *dto.SyncSplitItemsResult) {
+	if s.selfCore == nil || !s.selfCore.Enabled() || orderID == 0 || result == nil {
+		return
+	}
+	lines := make([]map[string]any, 0, len(result.Lines))
+	for _, l := range result.Lines {
+		lines = append(lines, map[string]any{
+			"refOrderItemId":       l.ID,
+			"parentRefOrderItemId": l.ParentOrderItemID,
+			"skuName":              l.SkuName,
+			"qty":                  l.Qty,
+			"shipPlanLineId":       l.ShipPlanLineID,
+			"splitKind":            l.SplitKind,
+		})
+	}
+	syncCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := s.selfCore.SyncSplitItemsByRefSo(syncCtx, bearerToken, orderID, result.Mode, lines); err != nil {
+		log.Printf("[ordercore] sync split to selfcore orderID=%d: %v", orderID, err)
+		return
+	}
+	log.Printf("[ordercore] synced split to selfcore orderID=%d lines=%d", orderID, len(lines))
 }
 
 func isSplitChildItem(it model.OrderItem) bool {

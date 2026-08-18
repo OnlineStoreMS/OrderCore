@@ -450,6 +450,7 @@ func (h *Handlers) SyncSplitItems(c *gin.Context) {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	h.orders.PushSplitItemsToSelfCore(c.Request.Context(), authcontext.BearerToken(c), id, data)
 	response.OK(c, data)
 }
 
