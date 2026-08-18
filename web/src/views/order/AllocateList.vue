@@ -24,7 +24,6 @@ import {
   listSuppliers,
   revokeAllocateOrder,
   type Order,
-  type OrderItem,
   type SupplierBinding,
   type SupplierItem,
 } from '../../api/orders'
@@ -32,6 +31,11 @@ import SellerFlag from '../../components/SellerFlag.vue'
 import { dateShortcuts, dateRangeDefaultTime, formatDateTimeLocal } from '../../utils/date'
 import { copyToClipboard } from '../../utils/clipboard'
 import { bindTableShiftWheel, useTableFillHeight } from '../../composables/useTableFillHeight'
+import {
+  listItemMeta,
+  listItemTitle,
+  listOrderRootItems,
+} from '../../utils/orderItemTree'
 
 const router = useRouter()
 const route = useRoute()
@@ -448,24 +452,30 @@ onMounted(load)
       </el-table-column>
       <el-table-column label="商品" min-width="260">
         <template #default="{ row }">
-          <div v-if="row.items?.length" class="goods-list">
-            <div v-for="(it, idx) in row.items" :key="it.id || idx" class="goods-row">
+          <div v-if="listOrderRootItems(row.items).length" class="goods-list">
+            <div
+              v-for="(it, idx) in listOrderRootItems(row.items)"
+              :key="it.id || idx"
+              class="goods-row"
+            >
               <el-image
                 v-if="it.picUrl"
                 :src="it.picUrl"
-                :preview-src-list="(row.items as OrderItem[]).map((x) => x.picUrl).filter(Boolean) as string[]"
-                :initial-index="(row.items as OrderItem[]).slice(0, idx).filter((x) => x.picUrl).length"
+                :preview-src-list="listOrderRootItems(row.items).map((x) => x.picUrl).filter(Boolean) as string[]"
+                :initial-index="listOrderRootItems(row.items).slice(0, idx).filter((x) => x.picUrl).length"
                 fit="cover"
                 class="goods-pic"
                 preview-teleported
               />
               <div v-else class="goods-pic goods-pic-empty">无图</div>
               <div class="goods-info">
-                <div class="goods-title">{{ it.productName || it.skuCode || '商品' }}</div>
-                <div v-if="it.skuSpecs || it.skuCode" class="goods-meta">
-                  <span v-if="it.skuSpecs">{{ it.skuSpecs }}</span>
-                  <span v-if="it.skuCode">SKU {{ it.skuCode }}</span>
-                </div>
+                <div class="goods-title">{{ listItemTitle(it) }}</div>
+                <template v-for="meta in [listItemMeta(it)]" :key="`${it.id || idx}-meta`">
+                  <div v-if="meta.spec || meta.sku" class="goods-meta">
+                    <span v-if="meta.spec">{{ meta.spec }}</span>
+                    <span v-if="meta.sku">SKU {{ meta.sku }}</span>
+                  </div>
+                </template>
                 <div class="goods-meta">×{{ it.quantity || 1 }}</div>
               </div>
             </div>
@@ -655,6 +665,7 @@ onMounted(load)
   -webkit-box-orient: vertical;
 }
 .goods-meta { font-size: 12px; color: #909399; }
+.goods-meta span + span::before { content: ' · '; }
 .addr-cell { line-height: 1.4; }
 .addr-text { font-size: 13px; white-space: normal; word-break: break-all; }
 .addr-actions { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }

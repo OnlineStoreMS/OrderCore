@@ -605,7 +605,11 @@ onMounted(load)
               <span v-if="row.isSplitChild" class="split-prefix">└ </span>
               <span v-if="row.fullGroupHeader" class="split-group">整单拆分</span>
               <template v-else>
-                {{ row.item.productName || row.item.skuCode || '商品' }}
+                {{
+                  row.isSplitChild
+                    ? (row.item.skuSpecs || row.item.productName || row.item.skuCode || '规格')
+                    : (row.item.productName || row.item.skuCode || '商品')
+                }}
                 <el-tag v-if="row.isSplitChild" size="small" type="warning" class="split-tag">拆分</el-tag>
                 <el-tag v-else-if="row.isSplitParent" size="small" type="info" class="split-tag">已拆分</el-tag>
               </template>
@@ -614,8 +618,9 @@ onMounted(load)
         </el-table-column>
         <el-table-column label="规格" width="140">
           <template #default="{ row }">
-            <span v-if="row.fullGroupHeader">—</span>
-            <span v-else>{{ row.item.skuSpecs || '—' }}</span>
+            <span v-if="row.fullGroupHeader || row.isSplitChild">—</span>
+            <span v-else-if="row.item.skuSpecs && row.item.skuSpecs !== row.item.productName">{{ row.item.skuSpecs }}</span>
+            <span v-else>—</span>
           </template>
         </el-table-column>
         <el-table-column prop="platformSkuId" label="平台SKU" width="130" show-overflow-tooltip>

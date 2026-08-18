@@ -21,76 +21,16 @@ import {
   orderTypeOptions,
   platformOptions,
   type Order,
-  type OrderItem,
 } from '../../api/orders'
 import { dateShortcuts, dateRangeDefaultTime, formatDateTimeLocal } from '../../utils/date'
 import { copyToClipboard } from '../../utils/clipboard'
 import { bindTableShiftWheel, useTableFillHeight } from '../../composables/useTableFillHeight'
 import SellerFlag from '../../components/SellerFlag.vue'
-
-type ItemTreeRow = {
-  key: string
-  item: OrderItem
-  isSplitChild: boolean
-  isSplitParent: boolean
-  fullGroupHeader?: boolean
-}
-
-function buildItemTreeRows(items: OrderItem[] | undefined): ItemTreeRow[] {
-  if (!items?.length) return []
-  const childrenByParent = new Map<number, OrderItem[]>()
-  const fullChildren: OrderItem[] = []
-  const roots: OrderItem[] = []
-  for (const it of items) {
-    if (it.splitKind === 'full') {
-      fullChildren.push(it)
-      continue
-    }
-    if (it.splitKind === 'partial' && it.parentOrderItemId) {
-      const list = childrenByParent.get(it.parentOrderItemId) || []
-      list.push(it)
-      childrenByParent.set(it.parentOrderItemId, list)
-      continue
-    }
-    roots.push(it)
-  }
-  const out: ItemTreeRow[] = []
-  for (const root of roots) {
-    const kids = childrenByParent.get(root.id || 0) || []
-    out.push({
-      key: `root-${root.id}`,
-      item: root,
-      isSplitChild: false,
-      isSplitParent: kids.length > 0,
-    })
-    for (const ch of kids) {
-      out.push({
-        key: `child-${ch.id}`,
-        item: ch,
-        isSplitChild: true,
-        isSplitParent: false,
-      })
-    }
-  }
-  if (fullChildren.length) {
-    out.push({
-      key: 'full-header',
-      item: { quantity: 0, price: 0, productName: '整单拆分' },
-      isSplitChild: false,
-      isSplitParent: false,
-      fullGroupHeader: true,
-    })
-    for (const ch of fullChildren) {
-      out.push({
-        key: `full-${ch.id}`,
-        item: ch,
-        isSplitChild: true,
-        isSplitParent: false,
-      })
-    }
-  }
-  return out
-}
+import {
+  listItemMeta,
+  listItemTitle,
+  listOrderRootItems,
+} from '../../utils/orderItemTree'
 
 const router = useRouter()
 const route = useRoute()
@@ -498,48 +438,36 @@ async function copyOrderText(order: Order, ev?: Event) {
       <el-table-column label="商品" min-width="260">
         <template #default="{ row }">
           <div
-            v-if="row.items?.length"
+            v-if="listOrderRootItems(row.items).length"
             class="goods-list goods-link"
             @click="router.push(`/orders/${row.id}`)"
           >
             <div
-              v-for="(node, idx) in buildItemTreeRows(row.items)"
-              :key="node.key"
+              v-for="(it, idx) in listOrderRootItems(row.items)"
+              :key="it.id || idx"
               class="goods-row"
-              :class="{ 'goods-row-split': node.isSplitChild || node.fullGroupHeader }"
             >
-              <template v-if="node.fullGroupHeader">
-                <div class="goods-pic goods-pic-empty" @click.stop>—</div>
-                <div class="goods-info">
-                  <div class="goods-title split-group">整单拆分</div>
-                </div>
-              </template>
-              <template v-else>
-                <el-image
-                  v-if="node.item.picUrl"
-                  :src="node.item.picUrl"
-                  :preview-src-list="(row.items as OrderItem[]).map((x) => x.picUrl).filter(Boolean) as string[]"
-                  :initial-index="(row.items as OrderItem[]).slice(0, idx).filter((x) => x.picUrl).length"
-                  fit="cover"
-                  class="goods-pic"
-                  preview-teleported
-                  @click.stop
-                />
-                <div v-else class="goods-pic goods-pic-empty" @click.stop>无图</div>
-                <div class="goods-info">
-                  <div class="goods-title">
-                    <span v-if="node.isSplitChild" class="split-prefix">└ </span>
-                    {{ node.item.productName || node.item.skuCode || '商品' }}
-                    <span v-if="node.isSplitChild" class="split-badge">拆分</span>
-                    <span v-else-if="node.isSplitParent" class="split-badge muted-badge">已拆分</span>
+              <el-image
+                v-if="it.picUrl"
+                :src="it.picUrl"
+                :preview-src-list="listOrderRootItems(row.items).map((x) => x.picUrl).filter(Boolean) as string[]"
+                :initial-index="listOrderRootItems(row.items).slice(0, idx).filter((x) => x.picUrl).length"
+                fit="cover"
+                class="goods-pic"
+                preview-teleported
+                @click.stop
+              />
+              <div v-else class="goods-pic goods-pic-empty" @click.stop>无图</div>
+              <div class="goods-info">
+                <div class="goods-title">{{ listItemTitle(it) }}</div>
+                <template v-for="meta in [listItemMeta(it)]" :key="`${it.id || idx}-meta`">
+                  <div v-if="meta.spec || meta.sku" class="goods-meta">
+                    <span v-if="meta.spec">{{ meta.spec }}</span>
+                    <span v-if="meta.sku">SKU {{ meta.sku }}</span>
                   </div>
-                  <div v-if="node.item.skuSpecs || node.item.skuCode" class="goods-meta">
-                    <span v-if="node.item.skuSpecs">{{ node.item.skuSpecs }}</span>
-                    <span v-if="node.item.skuCode && !node.isSplitChild">SKU {{ node.item.skuCode }}</span>
-                  </div>
-                  <div class="goods-meta">×{{ node.item.quantity || 1 }}</div>
-                </div>
-              </template>
+                </template>
+                <div class="goods-meta">×{{ it.quantity || 1 }}</div>
+              </div>
             </div>
           </div>
           <span
@@ -686,7 +614,6 @@ async function copyOrderText(order: Order, ev?: Event) {
 .goods-link:hover .goods-title { color: var(--el-color-primary); }
 .goods-list { display: flex; flex-direction: column; gap: 8px; }
 .goods-row { display: flex; gap: 8px; align-items: flex-start; }
-.goods-row-split { padding-left: 4px; }
 .goods-pic { width: 48px; height: 48px; border-radius: 4px; flex-shrink: 0; background: #f5f5f5; }
 .goods-pic-empty {
   display: flex; align-items: center; justify-content: center;
@@ -701,15 +628,6 @@ async function copyOrderText(order: Order, ev?: Event) {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
-.split-prefix { color: #8f959e; }
-.split-badge {
-  margin-left: 4px;
-  font-size: 11px;
-  color: #d97706;
-  font-weight: 500;
-}
-.muted-badge { color: #94a3b8; }
-.split-group { font-weight: 600; color: #64748b; font-size: 12px; }
 .goods-meta { font-size: 12px; color: #909399; }
 .goods-meta span + span::before { content: ' · '; }
 .kdzs-meta { margin-top: 4px; font-size: 12px; color: #909399; }
