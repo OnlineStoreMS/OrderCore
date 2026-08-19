@@ -172,9 +172,12 @@ type ShipItemInput struct {
 }
 
 // SyncSplitItemsRequest 发货中心保存拆分计划后同步销售子行。
+// Lines 为空表示取消拆分：mode=full 或未指定 ParentOrderItemID 时清整单未发子行；
+// mode=partial 且 ParentOrderItemID>0 时仅清该父行下的未发子行。
 type SyncSplitItemsRequest struct {
-	Mode  string               `json:"mode"` // partial | full
-	Lines []SplitItemLineInput `json:"lines"`
+	Mode              string               `json:"mode"` // partial | full
+	ParentOrderItemID uint64               `json:"parentOrderItemId,omitempty"`
+	Lines             []SplitItemLineInput `json:"lines"`
 }
 
 type SplitItemLineInput struct {

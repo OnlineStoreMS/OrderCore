@@ -3171,6 +3171,20 @@ func (s *OrderService) SyncSplitItems(tenantID, orderID uint64, req dto.SyncSpli
 		keepPlanLine[line.ShipPlanLineID] = struct{}{}
 	}
 
+	// partial：只动本次涉及的父行，避免供应链按商品拆分时误删其他父行子行
+	scopeParents := map[uint64]struct{}{}
+	scopePartial := mode == model.SplitKindPartial
+	if scopePartial {
+		if req.ParentOrderItemID > 0 {
+			scopeParents[req.ParentOrderItemID] = struct{}{}
+		}
+		for _, line := range req.Lines {
+			if line.ParentOrderItemID > 0 {
+				scopeParents[line.ParentOrderItemID] = struct{}{}
+			}
+		}
+	}
+
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
 		// 删除未发且不在本次计划中的子行；同 planLineId 的未发行稍后更新
 		toDelete := make([]uint64, 0)
@@ -3186,6 +3200,11 @@ func (s *OrderService) SyncSplitItems(tenantID, orderID uint64, req dto.SyncSpli
 			}
 			if !found {
 				continue
+			}
+			if scopePartial && len(scopeParents) > 0 {
+				if _, ok := scopeParents[it.ParentOrderItemID]; !ok {
+					continue
+				}
 			}
 			if it.ShipPlanLineID > 0 {
 				if _, keep := keepPlanLine[it.ShipPlanLineID]; keep {
