@@ -639,14 +639,16 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	if existing != nil {
 		fromStatus := existing.Status
 		terminalPre := existing.Status == model.StatusCompleted || existing.Status == model.StatusClosed
-		needDetachPO := !terminalPre && (hint.ClearAlloc || status == model.StatusClosed) &&
+		// 仅「待推单/明确 ClearAlloc」才同步撤回代发/自营单。
+		// 电商取消/退款关单默认保留分配与采购单，避免误撤供应商履约。
+		needDetachPO := !terminalPre && hint.ClearAlloc &&
 			(existing.AllocType == model.AllocDropship || strings.TrimSpace(existing.PurchaseOrderID) != "")
 		if needDetachPO && strings.TrimSpace(bearerToken) != "" {
 			if err := s.cancelLinkedDropshipPOs(ctx, tenantID, existing.ID, existing.PurchaseOrderID, bearerToken); err != nil {
 				return nil, false, fmt.Errorf("同步代发单撤回失败: %w", err)
 			}
 		}
-		needCancelSelf := !terminalPre && (hint.ClearAlloc || status == model.StatusClosed) &&
+		needCancelSelf := !terminalPre && hint.ClearAlloc &&
 			(existing.AllocType == model.AllocSelfShip || strings.TrimSpace(existing.SelfOrderNo) != "")
 		if needCancelSelf && strings.TrimSpace(bearerToken) != "" {
 			if err := s.cancelLinkedSelfOrders(ctx, existing.ID, bearerToken); err != nil {
@@ -717,19 +719,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 
 			statusChanged := false
 			terminal := existing.Status == model.StatusCompleted || existing.Status == model.StatusClosed
-			// 退款成功/交易关闭：同步关闭并清空分配
+			// 退款成功/交易关闭：同步关单，但默认保留履约分配与代发采购单（人工撤回除外）
 			if !terminal && status == model.StatusClosed {
 				fields["status"] = status
-				fields["alloc_type"] = ""
-				fields["dropship_mode"] = ""
-				fields["supplier_id"] = 0
-				fields["supplier_name"] = ""
-				fields["factory_id"] = ""
-				fields["factory_name"] = ""
-				fields["purchase_order_id"] = ""
-				fields["self_order_no"] = ""
-				fields["alloc_remark"] = ""
-				fields["allocated_at"] = nil
 				// 关闭且未真实发货：不要继续占「待发货」队列
 				if existing.ShipStatus != model.ShipShipped {
 					fields["ship_status"] = ""
@@ -4676,10 +4668,9 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 
 func applyClosedHint(h *kdzsIngestHint, reason string) kdzsIngestHint {
 	h.Status = model.StatusClosed
-	h.AllocType = ""
-	h.DropshipMode = ""
+	// 关单默认不 ClearAlloc：保留本地分配/代发单，便于售后对账；待推单回退仍走 ClearAlloc=true
 	h.ApplySyncAlloc = false
-	h.ClearAlloc = true
+	h.ClearAlloc = false
 	h.ShipStatus = "" // 关闭时不改发货历史
 	h.ShipEntryLocked = true
 	h.ShipLockReason = reason

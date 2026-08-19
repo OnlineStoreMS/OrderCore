@@ -109,8 +109,23 @@ func TestDeriveKDZSOrderCancelled(t *testing.T) {
 		EcommerceStatusText: "ORDER_CANCELLED",
 		AgentType:           1,
 	})
-	if h.Status != model.StatusClosed || h.ApplySyncAlloc || !h.ClearAlloc {
-		t.Fatalf("cancelled should close, hint=%+v", h)
+	if h.Status != model.StatusClosed || h.ApplySyncAlloc || h.ClearAlloc {
+		t.Fatalf("cancelled should close but keep alloc (ClearAlloc=false), hint=%+v", h)
+	}
+}
+
+func TestDeriveKDZSRefundFinishKeepsAlloc(t *testing.T) {
+	h := deriveKDZSIngest(model.SourceKDZS, dto.IngestOrderRequest{
+		PlatformStatus:      "wait_send",
+		EcommerceStatus:     "ORDER_CANCELLED",
+		EcommerceStatusText: "交易关闭",
+		AfterSaleStatus:     "REFUND_MONEY_FINISH",
+		AgentType:           2,
+		FactoryID:           "800931",
+		FactoryName:         "18956949877",
+	})
+	if h.Status != model.StatusClosed || h.ClearAlloc {
+		t.Fatalf("refund/cancel close must not auto clear alloc, hint=%+v", h)
 	}
 }
 
