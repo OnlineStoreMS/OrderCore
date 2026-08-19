@@ -236,19 +236,153 @@ func (r *Repos) UpdateOrderFields(tenantID, id uint64, fields map[string]interfa
 	return nil
 }
 
+// ReplaceItems 用平台同步明细更新根行，尽量保留原 id；拆分子行不删除、不覆盖。
+// 旧实现全删全建会导致拆分行丢失，且采购/发货侧 refOrderItemId 失效。
 func (r *Repos) ReplaceItems(tenantID, orderID uint64, items []model.OrderItem) error {
-	if err := r.db.Where("tenant_id = ? AND order_id = ?", tenantID, orderID).Delete(&model.OrderItem{}).Error; err != nil {
+	var existing []model.OrderItem
+	if err := r.db.Where("tenant_id = ? AND order_id = ?", tenantID, orderID).
+		Order("id ASC").Find(&existing).Error; err != nil {
 		return err
 	}
-	if len(items) == 0 {
-		return nil
+
+	var roots []model.OrderItem
+	var children []model.OrderItem
+	for _, it := range existing {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			children = append(children, it)
+			continue
+		}
+		roots = append(roots, it)
 	}
+
+	used := map[uint64]struct{}{}
+	parentHasChildren := map[uint64]struct{}{}
+	for _, ch := range children {
+		if ch.ParentOrderItemID > 0 {
+			parentHasChildren[ch.ParentOrderItemID] = struct{}{}
+		}
+	}
+
 	for i := range items {
-		items[i].TenantID = tenantID
-		items[i].OrderID = orderID
-		items[i].ID = 0
+		it := &items[i]
+		it.TenantID = tenantID
+		it.OrderID = orderID
+		it.ParentOrderItemID = 0
+		it.SplitKind = ""
+		it.ShipPlanLineID = 0
+		if it.LineNo <= 0 {
+			it.LineNo = i + 1
+		}
+
+		matched := matchExistingRoot(roots, *it, used)
+		if matched == nil {
+			it.ID = 0
+			if err := r.db.Create(it).Error; err != nil {
+				return err
+			}
+			continue
+		}
+		used[matched.ID] = struct{}{}
+		it.ID = matched.ID
+		it.CreatedAt = matched.CreatedAt
+		// 保留 OSMS 已维护的 sku（与 preserveOSMSSKUFields 一致，双保险）
+		if it.SkuID == 0 && matched.SkuID > 0 {
+			it.SkuID = matched.SkuID
+		}
+		if strings.TrimSpace(it.SkuCode) == "" && strings.TrimSpace(matched.SkuCode) != "" {
+			it.SkuCode = matched.SkuCode
+		}
+		if err := r.db.Model(&model.OrderItem{}).
+			Where("tenant_id = ? AND id = ?", tenantID, matched.ID).
+			Select("line_no", "sku_id", "sku_code", "platform_sku_id", "platform_item_id",
+				"product_name", "sku_specs", "pic_url", "quantity", "price", "total_amount", "updated_at").
+			Updates(map[string]any{
+				"line_no":          it.LineNo,
+				"sku_id":           it.SkuID,
+				"sku_code":         it.SkuCode,
+				"platform_sku_id":  it.PlatformSkuID,
+				"platform_item_id": it.PlatformItemID,
+				"product_name":     it.ProductName,
+				"sku_specs":        it.SkuSpecs,
+				"pic_url":          it.PicURL,
+				"quantity":         it.Quantity,
+				"price":            it.Price,
+				"total_amount":     it.TotalAmount,
+				"updated_at":       time.Now(),
+			}).Error; err != nil {
+			return err
+		}
 	}
-	return r.db.Create(&items).Error
+
+	for _, root := range roots {
+		if _, ok := used[root.ID]; ok {
+			continue
+		}
+		// 仍有拆分子行挂靠的父行：保留，避免拆分树断裂
+		if _, ok := parentHasChildren[root.ID]; ok {
+			continue
+		}
+		if err := r.db.Where("tenant_id = ? AND id = ?", tenantID, root.ID).
+			Delete(&model.OrderItem{}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func matchExistingRoot(roots []model.OrderItem, want model.OrderItem, used map[uint64]struct{}) *model.OrderItem {
+	key := func(platformItemID, platformSkuID, productName, skuSpecs string) string {
+		return strings.TrimSpace(platformItemID) + "\x00" +
+			strings.TrimSpace(platformSkuID) + "\x00" +
+			strings.TrimSpace(productName) + "\x00" +
+			strings.TrimSpace(skuSpecs)
+	}
+	// 1) 平台子单号
+	if pid := strings.TrimSpace(want.PlatformItemID); pid != "" {
+		for i := range roots {
+			if _, ok := used[roots[i].ID]; ok {
+				continue
+			}
+			if strings.TrimSpace(roots[i].PlatformItemID) == pid {
+				return &roots[i]
+			}
+		}
+	}
+	// 2) 平台 SKU
+	if ps := strings.TrimSpace(want.PlatformSkuID); ps != "" {
+		for i := range roots {
+			if _, ok := used[roots[i].ID]; ok {
+				continue
+			}
+			if strings.TrimSpace(roots[i].PlatformSkuID) == ps {
+				return &roots[i]
+			}
+		}
+	}
+	// 3) 行号
+	if want.LineNo > 0 {
+		for i := range roots {
+			if _, ok := used[roots[i].ID]; ok {
+				continue
+			}
+			if roots[i].LineNo == want.LineNo {
+				return &roots[i]
+			}
+		}
+	}
+	// 4) 品名+规格
+	wantKey := key("", "", want.ProductName, want.SkuSpecs)
+	if strings.TrimSpace(want.ProductName) != "" || strings.TrimSpace(want.SkuSpecs) != "" {
+		for i := range roots {
+			if _, ok := used[roots[i].ID]; ok {
+				continue
+			}
+			if key("", "", roots[i].ProductName, roots[i].SkuSpecs) == wantKey {
+				return &roots[i]
+			}
+		}
+	}
+	return nil
 }
 
 func (r *Repos) UpsertAddress(addr *model.OrderAddress) error {
