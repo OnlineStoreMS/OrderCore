@@ -904,6 +904,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		}
 		o = s.ensureSelfOrderAfterIngest(ctx, tenantID, o, bearerToken)
 		s.autoSyncDropshipLogistics(ctx, o, req, bearerToken)
+		s.autoSyncSelfLogisticsFromIngest(ctx, o, req, bearerToken)
 		s.syncShippingShippedAtFromOrder(ctx, o, bearerToken)
 		// 合单发货：分发备注只保留在第一单，其余清空（快递助手常复制到每单）
 		o = s.dedupeMergeShipFenFa(ctx, tenantID, o)
@@ -1039,6 +1040,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	}
 	out = s.ensureSelfOrderAfterIngest(ctx, tenantID, out, bearerToken)
 	s.autoSyncDropshipLogistics(ctx, out, req, bearerToken)
+	s.autoSyncSelfLogisticsFromIngest(ctx, out, req, bearerToken)
 	s.syncShippingShippedAtFromOrder(ctx, out, bearerToken)
 	out = s.dedupeMergeShipFenFa(ctx, tenantID, out)
 	return out, true, nil
@@ -1415,10 +1417,7 @@ func (s *OrderService) ensureSelfOrderAfterIngest(ctx context.Context, tenantID 
 	}
 	o.SelfOrderNo = soNo
 	log.Printf("[ordercore] ingest ensured self order order=%s so=%s", o.OrderNo, soNo)
-	// 同步入库时已带物流：补推自营物流
-	if o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
-		s.autoSyncSelfLogistics(ctx, o, bearerToken)
-	}
+	// 物流推送由 ingest 末尾 autoSyncSelfLogisticsFromIngest 统一处理
 	if refreshed, err := s.repos.GetOrder(tenantID, o.ID); err == nil {
 		return refreshed
 	}
@@ -3086,6 +3085,18 @@ func (s *OrderService) autoSyncSelfLogistics(ctx context.Context, before *model.
 		return
 	}
 	log.Printf("[ordercore] auto synced self logistics orderID=%d orderNo=%s", before.ID, before.OrderNo)
+}
+
+// autoSyncSelfLogisticsFromIngest 快递助手/同步写入物流后，自动推到关联自营单（对齐代发）。
+func (s *OrderService) autoSyncSelfLogisticsFromIngest(ctx context.Context, o *model.Order, req dto.IngestOrderRequest, bearerToken string) {
+	if o == nil || o.AllocType != model.AllocSelfShip {
+		return
+	}
+	if !ingestHasLogistics(req) && !orderHasExpressShipments(o) &&
+		o.ShipStatus != model.ShipShipped && o.ShipStatus != model.ShipPartialShipped {
+		return
+	}
+	s.autoSyncSelfLogistics(ctx, o, bearerToken)
 }
 
 // SyncSplitItems 同步发货中心拆分计划为销售子行；已发运的子行保留，未发子行按 lines 重建。
