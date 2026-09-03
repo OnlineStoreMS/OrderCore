@@ -139,3 +139,18 @@ func TestDeriveKDZSRefundMoneyFinish(t *testing.T) {
 		t.Fatalf("refund finish should close, hint=%+v", h)
 	}
 }
+
+func TestCloseDetachReason(t *testing.T) {
+	if got := closeDetachReason(dto.IngestOrderRequest{
+		EcommerceStatus: "REFUND_MONEY_FINISH",
+		AfterSaleStatus: "REFUND_MONEY_FINISH",
+	}); got != "退款完成" {
+		t.Fatalf("want 退款完成 got %q", got)
+	}
+	if got := closeDetachReason(dto.IngestOrderRequest{
+		EcommerceStatus:     "ORDER_CANCELLED",
+		EcommerceStatusText: "交易关闭",
+	}); got != "交易关闭" {
+		t.Fatalf("want 交易关闭 got %q", got)
+	}
+}

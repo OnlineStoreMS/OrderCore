@@ -890,6 +890,18 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		if err != nil {
 			return nil, false, err
 		}
+		closingNow := !terminalPre && status == model.StatusClosed
+		if closingNow && strings.TrimSpace(bearerToken) != "" {
+			poNo := strings.TrimSpace(existing.PurchaseOrderID)
+			if poNo != "" {
+				reason := closeDetachReason(req)
+				if err := s.detachDropshipPOOnClose(ctx, tenantID, existing.ID, existing.OrderNo, poNo, reason, bearerToken); err != nil {
+					log.Printf("[ordercore] auto detach dropship on close order=%s po=%s: %v", existing.OrderNo, poNo, err)
+				} else {
+					o, _ = s.repos.GetOrder(tenantID, existing.ID)
+				}
+			}
+		}
 		hadDropshipAlloc := existing.AllocType == model.AllocDropship && existing.SupplierID > 0
 		s.TryAutoAllocateBySKU(ctx, tenantID, operatorID, o, bearerToken)
 		o, _ = s.repos.GetOrder(tenantID, existing.ID)
@@ -2155,6 +2167,44 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 		updated++
 	}
 	return updated, nil
+}
+
+// detachDropshipPOOnClose 退款完成/交易关闭：代发采购单划线解绑，订单中心仅清采购单号（保留分配痕迹）。
+func (s *OrderService) detachDropshipPOOnClose(ctx context.Context, tenantID, orderID uint64, orderNo, poNo, reason, bearerToken string) error {
+	if s.supply == nil || strings.TrimSpace(poNo) == "" {
+		return nil
+	}
+	if _, err := s.supply.DetachSalesOrder(ctx, bearerToken, poNo, orderNo, orderID, reason); err != nil && !isSupplyNotFound(err) {
+		return err
+	}
+	_, err := s.UnlinkDropshipPO(ctx, tenantID, 0, dto.UnlinkDropshipPORequest{
+		OrderIDs:   []uint64{orderID},
+		Remark:     reason,
+		ClearAlloc: false,
+	}, bearerToken)
+	return err
+}
+
+func closeDetachReason(req dto.IngestOrderRequest) string {
+	if closed, reason := ecommerceShouldClose(req.EcommerceStatus, req.EcommerceStatusText, req.AfterSaleStatus); closed {
+		as := strings.ToUpper(strings.TrimSpace(req.AfterSaleStatus))
+		code := strings.ToUpper(strings.TrimSpace(req.EcommerceStatus))
+		if strings.Contains(as, "REFUND") && (strings.Contains(as, "SUCCESS") || strings.Contains(as, "FINISH") || strings.Contains(as, "DONE")) {
+			return "退款完成"
+		}
+		if strings.Contains(code, "REFUND") && (strings.Contains(code, "SUCCESS") || strings.Contains(code, "FINISH") || strings.Contains(code, "DONE")) {
+			return "退款完成"
+		}
+		text := strings.TrimSpace(req.EcommerceStatusText)
+		if strings.Contains(text, "退款") || strings.Contains(strings.TrimSpace(req.AfterSaleStatusText), "退款") {
+			return "退款完成"
+		}
+		if strings.Contains(text, "交易关闭") || strings.Contains(reason, "关闭") || strings.Contains(reason, "取消") {
+			return "交易关闭"
+		}
+		return "订单关闭"
+	}
+	return "订单关闭"
 }
 
 func (s *OrderService) rollbackDropshipPurchaseOrder(ctx context.Context, bearerToken string, poID uint64) error {
