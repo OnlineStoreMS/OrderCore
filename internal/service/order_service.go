@@ -892,14 +892,23 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		}
 		closingNow := !terminalPre && status == model.StatusClosed
 		if closingNow && strings.TrimSpace(bearerToken) != "" {
+			reason := closeDetachReason(req)
 			poNo := strings.TrimSpace(existing.PurchaseOrderID)
 			if poNo != "" {
-				reason := closeDetachReason(req)
 				if err := s.detachDropshipPOOnClose(ctx, tenantID, existing.ID, existing.OrderNo, poNo, reason, bearerToken); err != nil {
 					log.Printf("[ordercore] auto detach dropship on close order=%s po=%s: %v", existing.OrderNo, poNo, err)
 				} else {
 					o, _ = s.repos.GetOrder(tenantID, existing.ID)
 				}
+			}
+		}
+		// 销售单已关闭（本轮关单或历史已关）：关联自营单改为已取消
+		if strings.TrimSpace(bearerToken) != "" && o != nil && o.Status == model.StatusClosed &&
+			(o.AllocType == model.AllocSelfShip || strings.TrimSpace(o.SelfOrderNo) != "" ||
+				existing.AllocType == model.AllocSelfShip || strings.TrimSpace(existing.SelfOrderNo) != "") {
+			reason := closeDetachReason(req)
+			if err := s.cancelLinkedSelfOrdersOnClose(ctx, existing.ID, reason, bearerToken); err != nil {
+				log.Printf("[ordercore] auto cancel self on close order=%s: %v", existing.OrderNo, err)
 			}
 		}
 		hadDropshipAlloc := existing.AllocType == model.AllocDropship && existing.SupplierID > 0
@@ -2432,6 +2441,30 @@ func (s *OrderService) cancelLinkedSelfOrders(ctx context.Context, orderID uint6
 		}
 		return fmt.Errorf("同步自营单取消失败: %w", err)
 	}
+	return nil
+}
+
+// cancelLinkedSelfOrdersOnClose 销售单关闭/退款完成时取消关联自营单。
+// force=true：跳过已发货/部分发货/已完成，仅取消待发货等可取消单据。
+func (s *OrderService) cancelLinkedSelfOrdersOnClose(ctx context.Context, orderID uint64, reason, bearerToken string) error {
+	if s.selfCore == nil || !s.selfCore.Enabled() || strings.TrimSpace(bearerToken) == "" {
+		return nil
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "订单关闭"
+	}
+	syncCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 45*time.Second)
+	defer cancel()
+	_, err := s.selfCore.CancelByRefSoIDOpt(syncCtx, bearerToken, orderID, reason, true)
+	if err != nil {
+		if isSupplyNotFound(err) {
+			log.Printf("[ordercore] cancel self on close missing orderID=%d: %v (skip)", orderID, err)
+			return nil
+		}
+		return err
+	}
+	log.Printf("[ordercore] cancelled self orders on close orderID=%d reason=%s", orderID, reason)
 	return nil
 }
 

@@ -119,6 +119,11 @@ func (c *Client) CreateSelfOrder(ctx context.Context, bearerToken string, in Sel
 
 // CancelByRefSoID 按销售单取消关联自营单（撤回分配）。
 func (c *Client) CancelByRefSoID(ctx context.Context, bearerToken string, refSoID uint64, reason string) ([]SelfOrderDetail, error) {
+	return c.CancelByRefSoIDOpt(ctx, bearerToken, refSoID, reason, false)
+}
+
+// CancelByRefSoIDOpt 按销售单取消；force=true 为关单/退款（跳过已发货等，只取消可取消单据）。
+func (c *Client) CancelByRefSoIDOpt(ctx context.Context, bearerToken string, refSoID uint64, reason string, force bool) ([]SelfOrderDetail, error) {
 	if !c.Enabled() {
 		return nil, fmt.Errorf("SelfCore 未配置")
 	}
@@ -128,6 +133,7 @@ func (c *Client) CancelByRefSoID(ctx context.Context, bearerToken string, refSoI
 	body := map[string]any{
 		"refSoId": refSoID,
 		"reason":  reason,
+		"force":   force,
 	}
 	var out []SelfOrderDetail
 	if err := c.doJSON(ctx, http.MethodPost, bearerToken, "/api/v1/admin/self-orders/cancel-by-ref-so", body, &out); err != nil {
