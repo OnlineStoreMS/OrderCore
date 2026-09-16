@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"ordercore/internal/config"
@@ -36,6 +37,7 @@ func main() {
 			tenantID = n
 		}
 	}
+	orderNo := strings.TrimSpace(os.Getenv("ORDER_NO"))
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -62,14 +64,22 @@ func main() {
 	bearer := "Bearer " + token
 
 	var ids []uint64
-	err = db.Model(&model.Order{}).
-		Where("tenant_id = ? AND alloc_type = ? AND supplier_id > 0 AND ship_status = ? AND status IN ?",
-			tenantID, model.AllocDropship, model.ShipWaitShip,
-			[]string{model.StatusAllocated, model.StatusPendingShip}).
-		Where("purchase_order_id IS NULL OR btrim(purchase_order_id) = ''").
-		Pluck("id", &ids).Error
-	if err != nil {
-		log.Fatal(err)
+	if orderNo != "" {
+		var o model.Order
+		if err := db.Where("tenant_id = ? AND order_no = ?", tenantID, orderNo).First(&o).Error; err != nil {
+			log.Fatalf("order %s: %v", orderNo, err)
+		}
+		ids = []uint64{o.ID}
+	} else {
+		err = db.Model(&model.Order{}).
+			Where("tenant_id = ? AND alloc_type = ? AND supplier_id > 0 AND ship_status = ? AND status IN ?",
+				tenantID, model.AllocDropship, model.ShipWaitShip,
+				[]string{model.StatusAllocated, model.StatusPendingShip}).
+			Where("purchase_order_id IS NULL OR btrim(purchase_order_id) = ''").
+			Pluck("id", &ids).Error
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 	if len(ids) == 0 {
 		fmt.Println("nothing to backfill")
@@ -82,11 +92,29 @@ func main() {
 			log.Printf("get order %d: %v", id, err)
 			continue
 		}
-		fmt.Printf("backfill %s supplier=%d %s\n", o.OrderNo, o.SupplierID, o.SupplierName)
+		fmt.Printf("backfill %s supplier=%d %s po=%q ship=%s\n", o.OrderNo, o.SupplierID, o.SupplierName, o.PurchaseOrderID, o.ShipStatus)
 		ptrs = append(ptrs, o)
 	}
 	if err := svc.BackfillDropshipPOs(context.Background(), tenantID, ptrs, bearer); err != nil {
 		log.Fatal(err)
+	}
+	// 已发货订单：把订单物流同步进新建的代发单
+	for _, o := range ptrs {
+		fresh, err := repos.GetOrder(tenantID, o.ID)
+		if err != nil || fresh == nil || strings.TrimSpace(fresh.PurchaseOrderID) == "" {
+			continue
+		}
+		list, _, err := supply.ListPurchaseOrdersEx(context.Background(), bearer, 0, "dropship", fresh.PurchaseOrderID, 1, 5)
+		if err != nil || len(list) == 0 {
+			log.Printf("lookup po %s: %v", fresh.PurchaseOrderID, err)
+			continue
+		}
+		poID := list[0].ID
+		if err := supply.SyncShipmentsFromOrders(context.Background(), bearer, poID, fresh.ID); err != nil {
+			log.Printf("sync shipments order=%s po=%s: %v", fresh.OrderNo, fresh.PurchaseOrderID, err)
+			continue
+		}
+		fmt.Printf("synced shipments order=%s -> po=%s (id=%d)\n", fresh.OrderNo, fresh.PurchaseOrderID, poID)
 	}
 	fmt.Printf("done, %d orders\n", len(ptrs))
 }
