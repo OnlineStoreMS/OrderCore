@@ -331,6 +331,45 @@ func (h *Handlers) DecryptOrders(c *gin.Context) {
 	response.OK(c, gin.H{"items": list, "success": len(list)})
 }
 
+func (h *Handlers) StartDecryptPhone(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, "无效 ID")
+		return
+	}
+	res, err := h.orders.StartDoudianDecryptPhone(authcontext.TenantID(c), id)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, res)
+}
+
+func (h *Handlers) PollDecryptPhone(c *gin.Context) {
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, "无效 ID")
+		return
+	}
+	jobID, err := parseID(c.Query("jobId"))
+	if err != nil || jobID == 0 {
+		response.Fail(c, http.StatusBadRequest, "jobId 必填")
+		return
+	}
+	status, order, err := h.orders.PollDoudianDecryptPhone(authcontext.TenantID(c), id, jobID)
+	if err != nil {
+		response.Fail(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	response.OK(c, gin.H{
+		"jobId":        status.JobID,
+		"status":       status.Status,
+		"errorMessage": status.ErrorMessage,
+		"applied":      status.Applied,
+		"order":        order,
+	})
+}
+
 func (h *Handlers) RevokeAllocate(c *gin.Context) {
 	id, err := parseID(c.Param("id"))
 	if err != nil {

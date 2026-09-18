@@ -4,7 +4,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   buildOrderCopyText,
+  canDecryptRealPhone,
   decryptOrders,
+  decryptRealPhone,
   deleteManualOrder,
   formatAddress,
   formatDateTime,
@@ -195,6 +197,7 @@ watch(
 
 const decrypting = ref(false)
 const decryptRow = reactive<Record<number, boolean>>({})
+const decryptPhoneRow = reactive<Record<number, boolean>>({})
 
 function canDecrypt(order: Order) {
   return order.sourceChannel === 'kdzs' && !!order.platformSysTid
@@ -220,6 +223,24 @@ async function decryptOne(order: Order, ev?: Event) {
     ElMessage.error(e.message || '解密失败')
   } finally {
     decryptRow[order.id] = false
+  }
+}
+
+async function decryptPhoneOne(order: Order, ev?: Event) {
+  ev?.stopPropagation()
+  if (!canDecryptRealPhone(order)) {
+    ElMessage.warning('仅抖店订单可解密真实手机号')
+    return
+  }
+  decryptPhoneRow[order.id] = true
+  try {
+    const updated = await decryptRealPhone(order.id)
+    applyDecryptedOrders([updated])
+    ElMessage.success('真实手机号解密成功')
+  } catch (e: any) {
+    ElMessage.error(e.message || '解密真实手机号失败')
+  } finally {
+    decryptPhoneRow[order.id] = false
   }
 }
 
@@ -496,9 +517,9 @@ async function copyOrderText(order: Order, ev?: Event) {
         <template #default="{ row }">
           <div class="addr-cell" @click.stop>
             <div class="addr-text">{{ formatAddress(row.address) }}</div>
-            <div v-if="canDecrypt(row)" class="addr-actions">
+            <div v-if="canDecrypt(row) || canDecryptRealPhone(row)" class="addr-actions">
               <el-button
-                v-if="isMaskedReceiver(row)"
+                v-if="canDecrypt(row) && isMaskedReceiver(row)"
                 link
                 type="warning"
                 size="small"
@@ -506,20 +527,28 @@ async function copyOrderText(order: Order, ev?: Event) {
                 @click="decryptOne(row, $event)"
               >解密</el-button>
               <el-button
-                v-else
+                v-else-if="canDecrypt(row)"
                 link
                 type="primary"
                 size="small"
                 @click="copyOrderText(row, $event)"
               >复制</el-button>
               <el-button
-                v-if="!isMaskedReceiver(row)"
+                v-if="canDecrypt(row) && !isMaskedReceiver(row)"
                 link
                 type="warning"
                 size="small"
                 :loading="decryptRow[row.id]"
                 @click="decryptOne(row, $event)"
               >重新解密</el-button>
+              <el-button
+                v-if="canDecryptRealPhone(row)"
+                link
+                type="warning"
+                size="small"
+                :loading="decryptPhoneRow[row.id]"
+                @click="decryptPhoneOne(row, $event)"
+              >解密真实手机号</el-button>
             </div>
           </div>
         </template>

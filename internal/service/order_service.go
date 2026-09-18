@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ordercore/internal/dto"
+	"ordercore/internal/integration/agentscenter"
 	"ordercore/internal/integration/customercore"
 	"ordercore/internal/integration/productcore"
 	"ordercore/internal/integration/selfcore"
@@ -78,11 +79,12 @@ type OrderService struct {
 	product      *productcore.Client
 	customerCore *customercore.Client
 	shipping     *shippingcore.Client
+	agents       *agentscenter.Client
 	onAllocated  func(tenantID, orderID uint64)
 }
 
-func NewOrderService(repos *repo.Repos, storeSync *storesync.Client, storeCore *storecore.Client, supply *supplycore.Client, selfCore *selfcore.Client, product *productcore.Client, customer *customercore.Client, shipping *shippingcore.Client) *OrderService {
-	return &OrderService{repos: repos, storeSync: storeSync, storeCore: storeCore, supply: supply, selfCore: selfCore, product: product, customerCore: customer, shipping: shipping}
+func NewOrderService(repos *repo.Repos, storeSync *storesync.Client, storeCore *storecore.Client, supply *supplycore.Client, selfCore *selfcore.Client, product *productcore.Client, customer *customercore.Client, shipping *shippingcore.Client, agents *agentscenter.Client) *OrderService {
+	return &OrderService{repos: repos, storeSync: storeSync, storeCore: storeCore, supply: supply, selfCore: selfCore, product: product, customerCore: customer, shipping: shipping, agents: agents}
 }
 
 func (s *OrderService) SetOnAllocated(fn func(tenantID, orderID uint64)) {
@@ -4209,6 +4211,181 @@ func decryptTradeStatuses(preferred string) []string {
 		add(s)
 	}
 	return out
+}
+
+const agentsJobDecryptPhone = "doudian.order.decrypt-phone"
+
+// StartDoudianDecryptPhone 下发抖店后台「解密真实手机号」任务到 AgentsCenter / WindowsAgent。
+func (s *OrderService) StartDoudianDecryptPhone(tenantID, orderID uint64) (*dto.DecryptPhoneStartResult, error) {
+	if s.agents == nil {
+		return nil, fmt.Errorf("AgentsCenter 未配置")
+	}
+	o, err := s.repos.GetOrder(tenantID, orderID)
+	if err != nil {
+		return nil, err
+	}
+	platform := agentsPlatformFromOrder(o.Platform)
+	if platform != "doudian" {
+		return nil, fmt.Errorf("仅支持抖店订单")
+	}
+	shopID := strings.TrimSpace(o.ShopID)
+	orderNo := strings.TrimSpace(o.PlatformOrderID)
+	if shopID == "" {
+		return nil, fmt.Errorf("缺少店铺 ID")
+	}
+	if orderNo == "" {
+		return nil, fmt.Errorf("缺少平台订单号")
+	}
+	params, _ := json.Marshal(map[string]string{
+		"orderNo":        orderNo,
+		"platformShopId": shopID,
+		"browserChannel": "msedge",
+	})
+	job, err := s.agents.CreateJob(
+		tenantID,
+		agentsJobDecryptPhone,
+		platform,
+		shopID,
+		strings.TrimSpace(o.ShopName),
+		string(params),
+		"ordercore",
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &dto.DecryptPhoneStartResult{
+		JobID:   job.ID,
+		OrderID: orderID,
+		OrderNo: orderNo,
+	}, nil
+}
+
+// PollDoudianDecryptPhone 查询解密任务；成功时把手机号与完整地址写回订单。
+func (s *OrderService) PollDoudianDecryptPhone(tenantID, orderID, jobID uint64) (*dto.DecryptPhoneStatusResult, *model.Order, error) {
+	if s.agents == nil {
+		return nil, nil, fmt.Errorf("AgentsCenter 未配置")
+	}
+	if jobID == 0 {
+		return nil, nil, fmt.Errorf("jobId 必填")
+	}
+	if _, err := s.repos.GetOrder(tenantID, orderID); err != nil {
+		return nil, nil, err
+	}
+	jobs, err := s.agents.GetJobs(tenantID, []uint64{jobID})
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(jobs) == 0 {
+		return nil, nil, fmt.Errorf("任务不存在")
+	}
+	j := jobs[0]
+	out := &dto.DecryptPhoneStatusResult{
+		JobID:        j.ID,
+		Status:       j.Status,
+		ErrorMessage: strings.TrimSpace(j.ErrorMessage),
+	}
+	if j.Status != "succeeded" {
+		return out, nil, nil
+	}
+	name, phone, addr, err := parseDecryptPhoneResultJSON(j.ResultJSON)
+	if err != nil {
+		out.Status = "failed"
+		out.ErrorMessage = err.Error()
+		return out, nil, nil
+	}
+	if phone == "" && addr == "" && name == "" {
+		out.Status = "failed"
+		out.ErrorMessage = "解密结果为空"
+		return out, nil, nil
+	}
+	existing, err := s.repos.GetOrder(tenantID, orderID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if name == "" && existing.Address != nil {
+		name = strings.TrimSpace(existing.Address.Name)
+	}
+	if name == "" {
+		name = strings.TrimSpace(existing.BuyerName)
+	}
+	if phone == "" && existing.Address != nil {
+		phone = strings.TrimSpace(existing.Address.Phone)
+	}
+	if phone == "" {
+		phone = strings.TrimSpace(existing.BuyerPhone)
+	}
+	if addr == "" && existing.Address != nil {
+		addr = strings.TrimSpace(existing.Address.Address)
+	}
+	full := strings.TrimSpace(strings.Join([]string{name, phone, addr}, " "))
+	province, city, district := "", "", ""
+	if existing.Address != nil {
+		province = existing.Address.Province
+		city = existing.Address.City
+		district = existing.Address.District
+	}
+	err = s.repos.Transaction(func(tx *repo.Repos) error {
+		fields := map[string]any{}
+		if name != "" {
+			fields["buyer_name"] = name
+		}
+		if phone != "" {
+			fields["buyer_phone"] = phone
+		}
+		if len(fields) > 0 {
+			if err := tx.UpdateOrderFields(tenantID, orderID, fields); err != nil {
+				return err
+			}
+		}
+		return tx.UpsertAddress(&model.OrderAddress{
+			TenantID: tenantID,
+			OrderID:  orderID,
+			Name:     name,
+			Phone:    phone,
+			Province: province,
+			City:     city,
+			District: district,
+			Address:  addr,
+			FullText: full,
+		})
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	o, err := s.repos.GetOrder(tenantID, orderID)
+	if err != nil {
+		return nil, nil, err
+	}
+	out.Applied = true
+	return out, o, nil
+}
+
+func agentsPlatformFromOrder(platform string) string {
+	switch strings.ToUpper(strings.TrimSpace(platform)) {
+	case "FXG", "DOUDIAN":
+		return "doudian"
+	default:
+		return strings.ToLower(strings.TrimSpace(platform))
+	}
+}
+
+func parseDecryptPhoneResultJSON(raw string) (name, phone, addr string, err error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", "", fmt.Errorf("任务未回传结果")
+	}
+	var payload struct {
+		ReceiverName    string `json:"receiverName"`
+		ReceiverPhone   string `json:"receiverPhone"`
+		ReceiverAddress string `json:"receiverAddress"`
+	}
+	if e := json.Unmarshal([]byte(raw), &payload); e != nil {
+		return "", "", "", fmt.Errorf("解析解密结果失败: %w", e)
+	}
+	return strings.TrimSpace(payload.ReceiverName),
+		strings.TrimSpace(payload.ReceiverPhone),
+		strings.TrimSpace(payload.ReceiverAddress),
+		nil
 }
 
 // ---- bindings ----

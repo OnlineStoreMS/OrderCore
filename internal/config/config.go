@@ -33,13 +33,15 @@ type AuthConfig struct {
 }
 
 type IntegrationsConfig struct {
-	ProductCoreAPIURL    string `mapstructure:"productcore_api_url"`
-	SupplyCoreAPIURL     string `mapstructure:"supplycore_api_url"`
-	SelfCoreAPIURL       string `mapstructure:"selfcore_api_url"`
-	StoreSyncAgentAPIURL string `mapstructure:"storesyncagent_api_url"`
-	StoreCoreAPIURL      string `mapstructure:"storecore_api_url"`
-	CustomerCoreAPIURL   string `mapstructure:"customercore_api_url"`
-	ShippingCoreAPIURL   string `mapstructure:"shippingcore_api_url"`
+	ProductCoreAPIURL         string `mapstructure:"productcore_api_url"`
+	SupplyCoreAPIURL          string `mapstructure:"supplycore_api_url"`
+	SelfCoreAPIURL            string `mapstructure:"selfcore_api_url"`
+	StoreSyncAgentAPIURL      string `mapstructure:"storesyncagent_api_url"`
+	StoreCoreAPIURL           string `mapstructure:"storecore_api_url"`
+	CustomerCoreAPIURL        string `mapstructure:"customercore_api_url"`
+	ShippingCoreAPIURL        string `mapstructure:"shippingcore_api_url"`
+	AgentsCenterAPIURL        string `mapstructure:"agentscenter_api_url"`
+	AgentsCenterInternalToken string `mapstructure:"agentscenter_internal_token"`
 }
 
 type StorageConfig struct {
@@ -111,6 +113,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Integrations.ShippingCoreAPIURL == "" {
 		cfg.Integrations.ShippingCoreAPIURL = "http://127.0.0.1:8096"
+	}
+	if cfg.Integrations.AgentsCenterAPIURL == "" {
+		cfg.Integrations.AgentsCenterAPIURL = "http://127.0.0.1:8107"
 	}
 	if cfg.Storage.LocalPath == "" {
 		cfg.Storage.LocalPath = "./data/uploads"

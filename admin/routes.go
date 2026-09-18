@@ -19,6 +19,8 @@ func RegisterRoutes(g *gin.RouterGroup, h *Handlers, sh *SettingsHandlers) {
 	g.POST("/orders/relink-purchase-order", h.RelinkPurchaseOrder)
 	g.POST("/orders/unlink-dropship-po", h.UnlinkDropshipPO)
 	g.POST("/orders/decrypt", h.DecryptOrders)
+	g.POST("/orders/:id/decrypt-phone", h.StartDecryptPhone)
+	g.GET("/orders/:id/decrypt-phone", h.PollDecryptPhone)
 	g.GET("/orders/:id", h.GetOrder)
 	g.DELETE("/orders/:id", h.DeleteManualOrder)
 	g.POST("/orders/:id/allocate", h.Allocate)

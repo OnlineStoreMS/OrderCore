@@ -5,7 +5,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   allocateOrder,
   buildOrderCopyText,
+  canDecryptRealPhone,
   decryptOrders,
+  decryptRealPhone,
   formatAddress,
   revokeAllocateOrder,
   formatDateTime,
@@ -38,10 +40,16 @@ const id = Number(route.params.id)
 const loading = ref(false)
 const order = ref<Order | null>(null)
 const decrypting = ref(false)
+const decryptingPhone = ref(false)
 
 const canDecrypt = computed(() => {
   const o = order.value
   return !!o && o.sourceChannel === 'kdzs' && !!o.platformSysTid
+})
+
+const canDecryptPhone = computed(() => {
+  const o = order.value
+  return !!o && canDecryptRealPhone(o)
 })
 
 async function onDecrypt() {
@@ -55,6 +63,20 @@ async function onDecrypt() {
     ElMessage.error(e.message || '解密失败')
   } finally {
     decrypting.value = false
+  }
+}
+
+async function onDecryptPhone() {
+  if (!order.value || !canDecryptPhone.value) return
+  decryptingPhone.value = true
+  try {
+    const updated = await decryptRealPhone(order.value.id)
+    order.value = updated
+    ElMessage.success('真实手机号解密成功')
+  } catch (e: any) {
+    ElMessage.error(e.message || '解密真实手机号失败')
+  } finally {
+    decryptingPhone.value = false
   }
 }
 
@@ -479,6 +501,9 @@ onMounted(load)
         <el-button v-if="canDecrypt" type="warning" plain :loading="decrypting" @click="onDecrypt">
           {{ order && isMaskedReceiver(order) ? '解密地址' : '重新解密' }}
         </el-button>
+        <el-button v-if="canDecryptPhone" type="warning" :loading="decryptingPhone" @click="onDecryptPhone">
+          解密真实手机号
+        </el-button>
         <el-button v-if="order && formatAddress(order.address) !== '-'" @click="onCopyReceiver">复制地址规格</el-button>
         <el-button v-if="canAllocate" type="primary" @click="openAllocate">分配</el-button>
         <el-button v-if="canRevokeAllocate" @click="onRevokeAllocate">撤回分配</el-button>
@@ -522,8 +547,9 @@ onMounted(load)
         <el-descriptions-item label="买家">{{ order.buyerName || order.buyerNick || '-' }} {{ order.buyerPhone || '' }}</el-descriptions-item>
         <el-descriptions-item label="地址" :span="2">
           <div>{{ order.address?.fullText || order.address?.address || '-' }}</div>
-          <div v-if="canDecrypt || (order.address?.fullText || order.address?.address)" class="addr-actions">
+          <div v-if="canDecrypt || canDecryptPhone || (order.address?.fullText || order.address?.address)" class="addr-actions">
             <el-button v-if="canDecrypt && isMaskedReceiver(order)" link type="warning" size="small" :loading="decrypting" @click="onDecrypt">解密</el-button>
+            <el-button v-if="canDecryptPhone" link type="warning" size="small" :loading="decryptingPhone" @click="onDecryptPhone">解密真实手机号</el-button>
             <el-button v-if="formatAddress(order.address) !== '-'" link type="primary" size="small" @click="onCopyReceiver">复制</el-button>
           </div>
         </el-descriptions-item>

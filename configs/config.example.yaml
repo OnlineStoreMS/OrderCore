@@ -17,6 +17,9 @@ integrations:
   storesyncagent_api_url: "http://127.0.0.1:8097"
   storecore_api_url: "http://127.0.0.1:8094"
   customercore_api_url: "http://127.0.0.1:8099"
+  shippingcore_api_url: "http://127.0.0.1:8096"
+  agentscenter_api_url: "http://127.0.0.1:8107"
+  agentscenter_internal_token: "CHANGE_ME"
 
 cors:
   allow_origins:

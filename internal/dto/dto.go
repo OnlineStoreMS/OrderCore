@@ -271,3 +271,18 @@ type SyncStoreRequest struct {
 type DecryptOrdersRequest struct {
 	OrderIDs []uint64 `json:"orderIds" binding:"required,min=1"`
 }
+
+// DecryptPhoneStartResult 抖店 WA 解密真实手机号：下发任务结果
+type DecryptPhoneStartResult struct {
+	JobID   uint64 `json:"jobId"`
+	OrderID uint64 `json:"orderId"`
+	OrderNo string `json:"orderNo"`
+}
+
+// DecryptPhoneStatusResult 抖店 WA 解密任务轮询结果
+type DecryptPhoneStatusResult struct {
+	JobID        uint64 `json:"jobId"`
+	Status       string `json:"status"`
+	ErrorMessage string `json:"errorMessage,omitempty"`
+	Applied      bool   `json:"applied"`
+}

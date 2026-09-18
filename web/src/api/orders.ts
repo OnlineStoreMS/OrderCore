@@ -329,6 +329,48 @@ export async function decryptOrders(orderIds: number[]) {
   return unwrap<{ items: Order[]; success: number }>(await client.post('/orders/decrypt', { orderIds }))
 }
 
+/** 是否可下发抖店 WA「解密真实手机号」 */
+export function canDecryptRealPhone(order: Pick<Order, 'platform' | 'shopId' | 'platformOrderId'>) {
+  const p = (order.platform || '').trim().toUpperCase()
+  return (p === 'FXG' || p === 'DOUDIAN') && !!order.shopId?.trim() && !!order.platformOrderId?.trim()
+}
+
+export async function startDecryptPhone(orderId: number) {
+  return unwrap<{ jobId: number; orderId: number; orderNo: string }>(
+    await client.post(`/orders/${orderId}/decrypt-phone`),
+  )
+}
+
+export async function pollDecryptPhone(orderId: number, jobId: number) {
+  return unwrap<{
+    jobId: number
+    status: string
+    errorMessage?: string
+    applied?: boolean
+    order?: Order | null
+  }>(await client.get(`/orders/${orderId}/decrypt-phone`, { params: { jobId } }))
+}
+
+/** 下发并轮询抖店解密真实手机号，成功后返回写回后的订单 */
+export async function decryptRealPhone(orderId: number, opts?: { intervalMs?: number; timeoutMs?: number }) {
+  const intervalMs = opts?.intervalMs ?? 2000
+  const timeoutMs = opts?.timeoutMs ?? 180_000
+  const started = await startDecryptPhone(orderId)
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs))
+    const st = await pollDecryptPhone(orderId, started.jobId)
+    if (st.status === 'succeeded') {
+      if (st.order) return st.order
+      throw new Error('解密成功但未返回订单')
+    }
+    if (st.status === 'failed' || st.status === 'cancelled') {
+      throw new Error(st.errorMessage || '解密任务失败')
+    }
+  }
+  throw new Error('解密超时，请稍后在 Agents 中心查看任务')
+}
+
 export function formatRemark(order: Pick<Order, 'remark' | 'sellerRemark' | 'fenFaRemark' | 'printerRemark'>) {
   const parts: string[] = []
   if (order.remark?.trim()) parts.push(`买家留言：${order.remark.trim()}`)

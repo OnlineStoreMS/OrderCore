@@ -54,7 +54,7 @@ func main() {
 	product := productcore.NewClient(cfg.Integrations.ProductCoreAPIURL)
 	ss := storesync.NewClient(cfg.Integrations.StoreSyncAgentAPIURL)
 	sc := storecore.NewClient(cfg.Integrations.StoreCoreAPIURL)
-	svc := service.NewOrderService(repos, ss, sc, supply, nil, product, nil, nil)
+	svc := service.NewOrderService(repos, ss, sc, supply, nil, product, nil, nil, nil)
 
 	jwt := jwtmgr.NewManager(cfg.Auth.JWTSecret)
 	token, err := jwt.IssueServiceToken(tenantID, 30*time.Minute)
