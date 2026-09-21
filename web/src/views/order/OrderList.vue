@@ -99,6 +99,7 @@ const filters = reactive({
   allocType: '',
   salesChannel: '',
   keyword: '',
+  platformOrderId: '',
   orderedRange: null as [string, string] | null,
   shippedRange: null as [string, string] | null,
   payRange: null as [string, string] | null,
@@ -129,6 +130,7 @@ function applyFiltersFromRoute() {
     filters.allocType = ''
   }
   filters.keyword = typeof q.keyword === 'string' ? q.keyword : ''
+  filters.platformOrderId = typeof q.platformOrderId === 'string' ? q.platformOrderId : ''
   const orderedFromQuery = rangeFromQueryDates(q.orderedAtStart, q.orderedAtEnd)
   const shippedFromQuery = rangeFromQueryDates(q.shippedAtStart, q.shippedAtEnd)
   filters.orderedRange = orderedFromQuery || (menu ? last7DaysRange() : null)
@@ -150,6 +152,7 @@ async function load() {
       allocType: filters.salesChannel ? undefined : filters.allocType || undefined,
       salesChannel: filters.salesChannel || undefined,
       keyword: filters.keyword || undefined,
+      platformOrderId: filters.platformOrderId || undefined,
     }
     if (filters.orderedRange?.length === 2) {
       params.orderedAtStart = filters.orderedRange[0]
@@ -424,6 +427,9 @@ async function copyOrderText(order: Order, ev?: Event) {
             @change="onFilterChange"
           />
         </el-form-item>
+        <el-form-item label="平台单号">
+          <el-input v-model="filters.platformOrderId" clearable placeholder="淘宝/抖店等单号" style="width: 200px" @keyup.enter="onFilterChange" />
+        </el-form-item>
         <el-form-item>
           <el-input v-model="filters.keyword" clearable placeholder="单号/买家/手机" style="width: 180px" @keyup.enter="onFilterChange" />
         </el-form-item>
@@ -450,6 +456,9 @@ async function copyOrderText(order: Order, ev?: Event) {
         </template>
       </el-table-column>
       <el-table-column prop="orderNo" label="订单号" min-width="150" width="160" show-overflow-tooltip />
+      <el-table-column prop="platformOrderId" label="平台单号" min-width="180" width="200" show-overflow-tooltip>
+        <template #default="{ row }">{{ row.platformOrderId || '-' }}</template>
+      </el-table-column>
       <el-table-column label="平台" min-width="180" show-overflow-tooltip>
         <template #default="{ row }">{{ formatPlatformShop(row) }}</template>
       </el-table-column>

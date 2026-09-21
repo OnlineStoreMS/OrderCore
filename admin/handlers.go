@@ -57,6 +57,7 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
 	keyword := strings.TrimSpace(c.Query("keyword"))
+	platformOrderID := strings.TrimSpace(c.Query("platformOrderId"))
 	q := repo.OrderListQuery{
 		SourceChannel:     c.Query("sourceChannel"),
 		Status:            c.Query("status"),
@@ -64,6 +65,7 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 		AllocType:         c.Query("allocType"),
 		Keyword:           keyword,
 		Platform:          c.Query("platform"),
+		PlatformOrderID:   platformOrderID,
 		PlatformSysTid:    c.Query("platformSysTid"),
 		SalesChannel:      c.Query("salesChannel"),
 		EcommerceWaitShip: c.Query("ecommerceWaitShip") == "1" || c.Query("ecommerceWaitShip") == "true",
@@ -77,19 +79,30 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 		PageSize:          pageSize,
 	}
 	// 按单号搜索时放宽时间窗，避免日期筛选把补拉订单挡住
-	if keyword != "" {
+	if keyword != "" || platformOrderID != "" {
 		q.OrderedAtStart, q.OrderedAtEnd = nil, nil
 		q.ShippedAtStart, q.ShippedAtEnd = nil, nil
 		q.PayTimeStart, q.PayTimeEnd = nil, nil
+	}
+	// 按平台单号定位时，默认「待发货」会把已发货单滤掉
+	if platformOrderID != "" || looksLikePlatformOrderID(keyword) {
+		q.Status = ""
+		q.ShipStatus = ""
+		q.AllocType = ""
+		q.SalesChannel = ""
 	}
 	list, total, err := h.orders.List(authcontext.TenantID(c), q)
 	if err != nil {
 		response.Fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
+	lookupID := platformOrderID
+	if lookupID == "" {
+		lookupID = keyword
+	}
 	// 本地没有且像平台单号时，尝试从快递助手补拉后再查一次
-	if total == 0 && looksLikePlatformOrderID(keyword) {
-		if err := h.orders.EnsureKDZSOrderByPlatformID(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), keyword, authcontext.BearerToken(c)); err == nil {
+	if total == 0 && looksLikePlatformOrderID(lookupID) {
+		if err := h.orders.EnsureKDZSOrderByPlatformID(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), lookupID, authcontext.BearerToken(c)); err == nil {
 			list, total, err = h.orders.List(authcontext.TenantID(c), q)
 			if err != nil {
 				response.Fail(c, http.StatusInternalServerError, err.Error())

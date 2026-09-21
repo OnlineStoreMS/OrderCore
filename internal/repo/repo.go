@@ -39,6 +39,7 @@ type OrderListQuery struct {
 	AllocType         string
 	Keyword           string
 	Platform          string
+	PlatformOrderID   string
 	PlatformSysTid    string
 	EcommerceWaitShip bool // 兼容：按电商订单「待发货」筛选
 	SalesChannel      string // self | dropship，与工作台自营/代发口径一致
@@ -89,6 +90,13 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	if tid := strings.TrimSpace(q.PlatformSysTid); tid != "" {
 		tx = tx.Where("platform_sys_tid = ?", tid)
 	}
+	if oid := strings.TrimSpace(q.PlatformOrderID); oid != "" {
+		like := "%" + strings.ToLower(oid) + "%"
+		tx = tx.Where(
+			"LOWER(platform_order_id) LIKE ? OR LOWER(platform_sys_tid) LIKE ?",
+			like, like,
+		)
+	}
 	switch strings.ToLower(strings.TrimSpace(q.SalesChannel)) {
 	case "self":
 		tx = tx.Where("NOT " + sqlIsDropship)
@@ -127,8 +135,8 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	if kw := strings.TrimSpace(q.Keyword); kw != "" {
 		like := "%" + strings.ToLower(kw) + "%"
 		tx = tx.Where(
-			"LOWER(order_no) LIKE ? OR LOWER(platform_order_id) LIKE ? OR LOWER(buyer_name) LIKE ? OR LOWER(buyer_phone) LIKE ? OR LOWER(buyer_nick) LIKE ?",
-			like, like, like, like, like,
+			"LOWER(order_no) LIKE ? OR LOWER(platform_order_id) LIKE ? OR LOWER(platform_sys_tid) LIKE ? OR LOWER(buyer_name) LIKE ? OR LOWER(buyer_phone) LIKE ? OR LOWER(buyer_nick) LIKE ?",
+			like, like, like, like, like, like,
 		)
 	}
 	var total int64
