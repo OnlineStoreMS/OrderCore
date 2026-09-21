@@ -41,7 +41,7 @@ type OrderListQuery struct {
 	Platform          string
 	PlatformOrderID   string
 	PlatformSysTid    string
-	EcommerceWaitShip bool // 兼容：按电商订单「待发货」筛选
+	EcommerceWaitShip bool   // 兼容：按电商订单「待发货」筛选
 	SalesChannel      string // self | dropship，与工作台自营/代发口径一致
 	OrderedAtStart    *time.Time
 	OrderedAtEnd      *time.Time
@@ -164,6 +164,51 @@ func (r *Repos) GetOrder(tenantID, id uint64) (*model.Order, error) {
 		return nil, err
 	}
 	return &o, nil
+}
+
+func (r *Repos) FenFaRemarksByOrderNos(tenantID uint64, orderNos []string) (map[string]string, error) {
+	seen := map[string]struct{}{}
+	nos := make([]string, 0, len(orderNos))
+	for _, raw := range orderNos {
+		n := strings.TrimSpace(raw)
+		if n == "" {
+			continue
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		nos = append(nos, n)
+	}
+	out := map[string]string{}
+	if len(nos) == 0 {
+		return out, nil
+	}
+	const chunk = 300
+	for i := 0; i < len(nos); i += chunk {
+		end := i + chunk
+		if end > len(nos) {
+			end = len(nos)
+		}
+		part := nos[i:end]
+		var list []model.Order
+		err := r.db.Select("order_no, platform_order_id, fen_fa_remark").
+			Where("tenant_id = ? AND (order_no IN ? OR platform_order_id IN ?)", tenantID, part, part).
+			Find(&list).Error
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range list {
+			remark := strings.TrimSpace(o.FenFaRemark)
+			if o.OrderNo != "" {
+				out[o.OrderNo] = remark
+			}
+			if o.PlatformOrderID != "" {
+				out[o.PlatformOrderID] = remark
+			}
+		}
+	}
+	return out, nil
 }
 
 func (r *Repos) FindByOrderNo(tenantID uint64, orderNo string) (*model.Order, error) {
@@ -564,7 +609,7 @@ func (r *Repos) NextShipmentNo(tenantID uint64) (string, error) {
 // nextSeqFromLast 取当日最大单号序号 +1，避免 COUNT+1 在删单留洞时撞唯一索引。
 func nextSeqFromLast(q *gorm.DB, col, prefix string) (int, error) {
 	var last string
-	if err := q.Order(col + " DESC").Limit(1).Pluck(col, &last).Error; err != nil {
+	if err := q.Order(col+" DESC").Limit(1).Pluck(col, &last).Error; err != nil {
 		return 0, err
 	}
 	seq := 1

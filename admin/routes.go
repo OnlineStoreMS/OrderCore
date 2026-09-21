@@ -6,6 +6,7 @@ func RegisterRoutes(g *gin.RouterGroup, h *Handlers, sh *SettingsHandlers) {
 	g.GET("/dashboard", h.Dashboard)
 
 	g.GET("/orders", h.ListOrders)
+	g.POST("/orders/fenfa-remarks", h.FenFaRemarks)
 	g.POST("/orders/manual", h.CreateManual)
 	g.POST("/orders/manual/batch", h.CreateManualBatch)
 	g.POST("/orders/manual/parse-address", h.ParseManualAddress)

@@ -126,6 +126,10 @@ func (s *OrderService) List(tenantID uint64, q repo.OrderListQuery) ([]model.Ord
 	return s.repos.ListOrders(tenantID, q)
 }
 
+func (s *OrderService) FenFaRemarks(tenantID uint64, orderNos []string) (map[string]string, error) {
+	return s.repos.FenFaRemarksByOrderNos(tenantID, orderNos)
+}
+
 func (s *OrderService) Get(tenantID, id uint64) (*model.Order, error) {
 	return s.repos.GetOrder(tenantID, id)
 }
@@ -1381,26 +1385,26 @@ func (s *OrderService) ensureSelfOrder(ctx context.Context, o *model.Order, bear
 		payStatus = "paid"
 	}
 	created, err := s.selfCore.CreateSelfOrder(ctx, bearerToken, selfcore.SelfOrderInput{
-		RefSoID:       o.ID,
-		RefTraceID:    o.OrderNo,
-		SaleAmount:    roundMoney(saleTotal),
-		BuyerName:     buyerName,
-		BuyerPhone:    buyerPhone,
-		Address:       addr,
-		Remark:        fmt.Sprintf("OMS自营 %s", o.OrderNo),
-		SourceChannel: o.SourceChannel,
-		Platform:      o.Platform,
-		ShopName:      firstNonEmpty(strings.TrimSpace(o.ShopName), strings.TrimSpace(o.ManualSourceName)),
+		RefSoID:          o.ID,
+		RefTraceID:       o.OrderNo,
+		SaleAmount:       roundMoney(saleTotal),
+		BuyerName:        buyerName,
+		BuyerPhone:       buyerPhone,
+		Address:          addr,
+		Remark:           fmt.Sprintf("OMS自营 %s", o.OrderNo),
+		SourceChannel:    o.SourceChannel,
+		Platform:         o.Platform,
+		ShopName:         firstNonEmpty(strings.TrimSpace(o.ShopName), strings.TrimSpace(o.ManualSourceName)),
 		ManualSourceName: strings.TrimSpace(o.ManualSourceName),
-		BuyerRemark:   o.Remark,
-		SellerRemark:  o.SellerRemark,
-		FenFaRemark:   o.FenFaRemark,
-		PrinterRemark: o.PrinterRemark,
-		OrderedAt:     orderedAt,
-		CreatedAt:     createdAt,
-		PayStatus:     payStatus,
-		PaidAt:        paidAt,
-		Items:         items,
+		BuyerRemark:      o.Remark,
+		SellerRemark:     o.SellerRemark,
+		FenFaRemark:      o.FenFaRemark,
+		PrinterRemark:    o.PrinterRemark,
+		OrderedAt:        orderedAt,
+		CreatedAt:        createdAt,
+		PayStatus:        payStatus,
+		PaidAt:           paidAt,
+		Items:            items,
 	})
 	if err != nil {
 		return "", fmt.Errorf("创建 SelfCore 自营单失败: %w", err)
@@ -3222,8 +3226,8 @@ func (s *OrderService) SyncSplitItems(tenantID, orderID uint64, req dto.SyncSpli
 	}
 
 	type existingChild struct {
-		item     model.OrderItem
-		shipped  bool
+		item    model.OrderItem
+		shipped bool
 	}
 	byPlanLine := map[uint64]*existingChild{}
 	var unshippedIDs []uint64
