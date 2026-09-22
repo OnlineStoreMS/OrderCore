@@ -901,7 +901,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			reason := closeDetachReason(req)
 			poNo := strings.TrimSpace(existing.PurchaseOrderID)
 			if poNo != "" {
-				if err := s.detachDropshipPOOnClose(ctx, tenantID, existing.ID, existing.OrderNo, poNo, reason, bearerToken); err != nil {
+				// 发货前：仅划线提醒待人工解绑；已发货/部分发货：仍自动划线解绑
+				beforeShip := existing.ShipStatus != model.ShipShipped && existing.ShipStatus != model.ShipPartialShipped
+				if err := s.detachDropshipPOOnClose(ctx, tenantID, existing.ID, existing.OrderNo, poNo, reason, beforeShip, bearerToken); err != nil {
 					log.Printf("[ordercore] auto detach dropship on close order=%s po=%s: %v", existing.OrderNo, poNo, err)
 				} else {
 					o, _ = s.repos.GetOrder(tenantID, existing.ID)
@@ -2184,9 +2186,25 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 	return updated, nil
 }
 
-// detachDropshipPOOnClose 退款完成/交易关闭：代发采购单划线解绑，订单中心仅清采购单号（保留分配痕迹）。
-func (s *OrderService) detachDropshipPOOnClose(ctx context.Context, tenantID, orderID uint64, orderNo, poNo, reason, bearerToken string) error {
+// detachDropshipPOOnClose 退款完成/交易关闭时处理代发采购单。
+// beforeShip=true：仅划线提醒「待人工解绑」，保留订单采购单号与 PO 关联。
+// beforeShip=false：划线解绑并清空采购单号（保留分配痕迹）。
+func (s *OrderService) detachDropshipPOOnClose(ctx context.Context, tenantID, orderID uint64, orderNo, poNo, reason string, beforeShip bool, bearerToken string) error {
 	if s.supply == nil || strings.TrimSpace(poNo) == "" {
+		return nil
+	}
+	if beforeShip {
+		if _, err := s.supply.DetachSalesOrderEx(ctx, bearerToken, poNo, orderNo, orderID, reason, true); err != nil && !isSupplyNotFound(err) {
+			return err
+		}
+		_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+			TenantID:   tenantID,
+			OrderID:    orderID,
+			FromStatus: model.StatusClosed,
+			ToStatus:   model.StatusClosed,
+			Action:     "dropship_po_pending_unbind",
+			Remark:     fmt.Sprintf("%s；代发单 %s 待人工解绑", reason, poNo),
+		})
 		return nil
 	}
 	if _, err := s.supply.DetachSalesOrder(ctx, bearerToken, poNo, orderNo, orderID, reason); err != nil && !isSupplyNotFound(err) {
