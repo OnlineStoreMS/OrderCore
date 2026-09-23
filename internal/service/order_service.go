@@ -2203,7 +2203,7 @@ func (s *OrderService) detachDropshipPOOnClose(ctx context.Context, tenantID, or
 			FromStatus: model.StatusClosed,
 			ToStatus:   model.StatusClosed,
 			Action:     "dropship_po_pending_unbind",
-			Remark:     fmt.Sprintf("%s；代发单 %s 待人工解绑", reason, poNo),
+			Remark:     fmt.Sprintf("%s；代发单 %s 已划线，请人工解绑", reason, poNo),
 		})
 		return nil
 	}
