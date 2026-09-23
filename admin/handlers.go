@@ -73,6 +73,26 @@ func (h *Handlers) FenFaRemarks(c *gin.Context) {
 	response.OK(c, data)
 }
 
+func (h *Handlers) SkuSpecs(c *gin.Context) {
+	var in struct {
+		OrderNos []string `json:"orderNos"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		response.Fail(c, http.StatusBadRequest, "参数无效")
+		return
+	}
+	if len(in.OrderNos) > 2000 {
+		response.Fail(c, http.StatusBadRequest, "订单号过多")
+		return
+	}
+	data, err := h.orders.SkuSpecsByOrderNos(authcontext.TenantID(c), in.OrderNos)
+	if err != nil {
+		response.Fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	response.OK(c, data)
+}
+
 func (h *Handlers) ListOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))

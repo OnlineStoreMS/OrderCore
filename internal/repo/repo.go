@@ -211,6 +211,85 @@ func (r *Repos) FenFaRemarksByOrderNos(tenantID uint64, orderNos []string) (map[
 	return out, nil
 }
 
+// SkuSpecsByOrderNos 按内部单号或平台单号批量取商品规格文案（根行；拆分子行忽略）。
+func (r *Repos) SkuSpecsByOrderNos(tenantID uint64, orderNos []string) (map[string]string, error) {
+	seen := map[string]struct{}{}
+	nos := make([]string, 0, len(orderNos))
+	for _, raw := range orderNos {
+		n := strings.TrimSpace(raw)
+		if n == "" {
+			continue
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		nos = append(nos, n)
+	}
+	out := map[string]string{}
+	if len(nos) == 0 {
+		return out, nil
+	}
+	const chunk = 300
+	for i := 0; i < len(nos); i += chunk {
+		end := i + chunk
+		if end > len(nos) {
+			end = len(nos)
+		}
+		part := nos[i:end]
+		var list []model.Order
+		err := r.db.Select("id, order_no, platform_order_id").
+			Where("tenant_id = ? AND (order_no IN ? OR platform_order_id IN ?)", tenantID, part, part).
+			Preload("Items", "parent_order_item_id = 0").
+			Find(&list).Error
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range list {
+			text := formatOrderSkuSpecs(o.Items)
+			if text == "" {
+				continue
+			}
+			if o.OrderNo != "" {
+				out[o.OrderNo] = text
+			}
+			if o.PlatformOrderID != "" {
+				out[o.PlatformOrderID] = text
+			}
+		}
+	}
+	return out, nil
+}
+
+func formatOrderSkuSpecs(items []model.OrderItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(items))
+	for _, it := range items {
+		spec := strings.TrimSpace(it.SkuSpecs)
+		if spec == "" {
+			spec = strings.TrimSpace(it.ProductName)
+		}
+		if spec == "" {
+			spec = strings.TrimSpace(it.SkuCode)
+		}
+		if spec == "" {
+			continue
+		}
+		qty := it.Quantity
+		if qty <= 0 {
+			qty = 1
+		}
+		if qty == 1 {
+			parts = append(parts, spec)
+		} else {
+			parts = append(parts, fmt.Sprintf("%s ×%d", spec, qty))
+		}
+	}
+	return strings.Join(parts, "；")
+}
+
 func (r *Repos) FindByOrderNo(tenantID uint64, orderNo string) (*model.Order, error) {
 	var o model.Order
 	err := r.db.Where("tenant_id = ? AND order_no = ?", tenantID, strings.TrimSpace(orderNo)).

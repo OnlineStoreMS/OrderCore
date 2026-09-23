@@ -130,6 +130,10 @@ func (s *OrderService) FenFaRemarks(tenantID uint64, orderNos []string) (map[str
 	return s.repos.FenFaRemarksByOrderNos(tenantID, orderNos)
 }
 
+func (s *OrderService) SkuSpecsByOrderNos(tenantID uint64, orderNos []string) (map[string]string, error) {
+	return s.repos.SkuSpecsByOrderNos(tenantID, orderNos)
+}
+
 func (s *OrderService) Get(tenantID, id uint64) (*model.Order, error) {
 	return s.repos.GetOrder(tenantID, id)
 }
