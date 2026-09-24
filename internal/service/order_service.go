@@ -626,6 +626,16 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 
 	var existing *model.Order
 	var err error
+	// 抖店同一主单 tid 可对应多个快递助手包裹（不同 sysTid），优先按 sysTid 定位
+	if channel == model.SourceKDZS && strings.TrimSpace(req.PlatformSysTid) != "" {
+		existing, err = s.repos.FindByPlatformSysTid(tenantID, channel, req.PlatformSysTid)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, false, err
+		}
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			existing = nil
+		}
+	}
 	if existing == nil && req.PlatformOrderID != "" {
 		existing, err = s.repos.FindBySourcePlatform(tenantID, channel, req.PlatformOrderID)
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -634,15 +644,13 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			existing = nil
 		}
-	}
-	// 历史单可能把子单 oid 写成了平台单号；按快递助手 sysTid 回找，避免重复建单
-	if existing == nil && channel == model.SourceKDZS && strings.TrimSpace(req.PlatformSysTid) != "" {
-		existing, err = s.repos.FindByPlatformSysTid(tenantID, channel, req.PlatformSysTid)
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, false, err
-		}
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			existing = nil
+		// 主单号撞车：已有单是另一包裹（sysTid 不同）则不能覆盖
+		if existing != nil && channel == model.SourceKDZS {
+			wantSys := strings.TrimSpace(req.PlatformSysTid)
+			haveSys := strings.TrimSpace(existing.PlatformSysTid)
+			if wantSys != "" && haveSys != "" && wantSys != haveSys {
+				existing = nil
+			}
 		}
 	}
 	if existing == nil && req.ExternalRefID != "" {
