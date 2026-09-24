@@ -90,6 +90,16 @@ export function listItemMeta(it: OrderItem): { spec?: string; sku?: string } {
   }
 }
 
+/** 行级退款完成角标（对齐快递助手「全部」商品图角标） */
+export function itemRefundBadge(it: Pick<OrderItem, 'afterSaleStatus' | 'afterSaleStatusText' | 'lineOrderStatus'>): string {
+  const text = (it.afterSaleStatusText || '').trim()
+  if (/退款(完成|成功)/.test(text)) return '退款完成'
+  const as = (it.afterSaleStatus || '').toUpperCase()
+  if (/REFUND_(SUCCESS|MONEY_FINISH|MONEY_SUCCESS)|REFUNDED|SUCCESS_REFUND/.test(as)) return '退款完成'
+  if (as.includes('REFUND') && /(SUCCESS|FINISH|DONE)/.test(as)) return '退款完成'
+  return ''
+}
+
 /** 详情树主标题：拆分子行优先规格名 */
 export function itemTreeTitle(node: ItemTreeRow): string {
   const it = node.item

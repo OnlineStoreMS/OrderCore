@@ -33,6 +33,7 @@ import { copyToClipboard } from '../../utils/clipboard'
 import { pushOrder } from '../../api/settings'
 import { EXPRESS_COMPANIES, findExpressCompany } from '../../constants/expressCompanies'
 import SellerFlag from '../../components/SellerFlag.vue'
+import { itemRefundBadge } from '../../utils/orderItemTree'
 
 const route = useRoute()
 const router = useRouter()
@@ -613,15 +614,18 @@ onMounted(load)
               <span class="muted">—</span>
             </template>
             <template v-else>
-              <el-image
-                v-if="row.item.picUrl"
-                :src="row.item.picUrl"
-                :preview-src-list="[row.item.picUrl]"
-                fit="cover"
-                style="width: 48px; height: 48px; border-radius: 4px"
-                preview-teleported
-              />
-              <span v-else class="muted">-</span>
+              <div class="goods-pic-wrap">
+                <el-image
+                  v-if="row.item.picUrl"
+                  :src="row.item.picUrl"
+                  :preview-src-list="[row.item.picUrl]"
+                  fit="cover"
+                  class="goods-pic"
+                  preview-teleported
+                />
+                <span v-else class="muted">-</span>
+                <span v-if="itemRefundBadge(row.item)" class="goods-refund-badge">{{ itemRefundBadge(row.item) }}</span>
+              </div>
             </template>
           </template>
         </el-table-column>
@@ -638,6 +642,7 @@ onMounted(load)
                 }}
                 <el-tag v-if="row.isSplitChild" size="small" type="warning" class="split-tag">拆分</el-tag>
                 <el-tag v-else-if="row.isSplitParent" size="small" type="info" class="split-tag">已拆分</el-tag>
+                <el-tag v-if="itemRefundBadge(row.item)" size="small" type="danger" class="split-tag">{{ itemRefundBadge(row.item) }}</el-tag>
               </template>
             </div>
           </template>
@@ -812,5 +817,20 @@ h3 { margin: 8px 0 0; font-size: 15px; color: #334155; }
   align-items: center;
   gap: 8px;
   width: 100%;
+}
+.goods-pic-wrap { position: relative; width: 48px; height: 48px; }
+.goods-pic { width: 48px; height: 48px; border-radius: 4px; display: block; background: #f5f5f5; }
+.goods-refund-badge {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 1px 0;
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
+  color: #fff;
+  background: rgba(245, 108, 108, 0.92);
+  border-radius: 0 0 4px 4px;
 }
 </style>

@@ -174,7 +174,7 @@ func TestTradeGoodsExcludedFromFulfillment(t *testing.T) {
 	}
 }
 
-func TestMapTradeToIngestSkipsRefundedGoods(t *testing.T) {
+func TestMapTradeToIngestKeepsRefundedGoods(t *testing.T) {
 	req := mapTradeToIngest(storesync.TradeOrder{
 		Platform:            "FXG",
 		Tids:                []string{"tid1"},
@@ -184,14 +184,20 @@ func TestMapTradeToIngestSkipsRefundedGoods(t *testing.T) {
 		AfterSaleStatus:     "REFUND_MONEY_NONE",
 		Payment:             135,
 		Goods: []storesync.TradeGoods{
-			{Title: "盘片", SkuName: "50-34T", Num: 1, Price: 158, AfterSaleStatus: "REFUND_SUCCESS", OrderStatus: "TRADE_CLOSED"},
+			{Title: "盘片", SkuName: "50-34T", Num: 1, Price: 158, AfterSaleStatus: "REFUND_SUCCESS", AfterSaleStatusText: "退款成功", OrderStatus: "TRADE_CLOSED"},
 			{Title: "链条", SkuName: "HG95", Num: 1, Price: 135, AfterSaleStatus: "REFUND_MONEY_NONE", OrderStatus: "ORDER_PAID", SkuID: "sku-hg95"},
 		},
 	})
-	if len(req.Items) != 1 {
+	if len(req.Items) != 2 {
 		t.Fatalf("items=%+v", req.Items)
 	}
-	if req.Items[0].SkuSpecs != "HG95" || req.Items[0].PlatformSkuID != "sku-hg95" {
-		t.Fatalf("item=%+v", req.Items[0])
+	if req.Items[0].SkuSpecs != "50-34T" || req.Items[0].AfterSaleStatus != "REFUND_SUCCESS" {
+		t.Fatalf("refunded item=%+v", req.Items[0])
+	}
+	if req.Items[1].SkuSpecs != "HG95" || req.Items[1].PlatformSkuID != "sku-hg95" {
+		t.Fatalf("item=%+v", req.Items[1])
+	}
+	if !tradeGoodsExcludedFromFulfillment(storesync.TradeGoods{Num: 1, AfterSaleStatus: req.Items[0].AfterSaleStatus, OrderStatus: req.Items[0].LineOrderStatus}) {
+		t.Fatalf("refunded line should still be excluded from fulfillment")
 	}
 }

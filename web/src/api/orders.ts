@@ -13,6 +13,9 @@ export interface OrderItem {
   quantity: number
   price: number
   totalAmount?: number
+  afterSaleStatus?: string
+  afterSaleStatusText?: string
+  lineOrderStatus?: string
   parentOrderItemId?: number
   splitKind?: '' | 'partial' | 'full'
   shipPlanLineId?: number

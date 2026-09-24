@@ -35,6 +35,7 @@ import {
   listItemMeta,
   listItemTitle,
   listOrderRootItems,
+  itemRefundBadge,
 } from '../../utils/orderItemTree'
 
 const router = useRouter()
@@ -458,16 +459,19 @@ onMounted(load)
               :key="it.id || idx"
               class="goods-row"
             >
-              <el-image
-                v-if="it.picUrl"
-                :src="it.picUrl"
-                :preview-src-list="listOrderRootItems(row.items).map((x) => x.picUrl).filter(Boolean) as string[]"
-                :initial-index="listOrderRootItems(row.items).slice(0, idx).filter((x) => x.picUrl).length"
-                fit="cover"
-                class="goods-pic"
-                preview-teleported
-              />
-              <div v-else class="goods-pic goods-pic-empty">无图</div>
+              <div class="goods-pic-wrap">
+                <el-image
+                  v-if="it.picUrl"
+                  :src="it.picUrl"
+                  :preview-src-list="listOrderRootItems(row.items).map((x) => x.picUrl).filter(Boolean) as string[]"
+                  :initial-index="listOrderRootItems(row.items).slice(0, idx).filter((x) => x.picUrl).length"
+                  fit="cover"
+                  class="goods-pic"
+                  preview-teleported
+                />
+                <div v-else class="goods-pic goods-pic-empty">无图</div>
+                <span v-if="itemRefundBadge(it)" class="goods-refund-badge">{{ itemRefundBadge(it) }}</span>
+              </div>
               <div class="goods-info">
                 <div class="goods-title">{{ listItemTitle(it) }}</div>
                 <template v-for="meta in [listItemMeta(it)]" :key="`${it.id || idx}-meta`">
@@ -476,7 +480,7 @@ onMounted(load)
                     <span v-if="meta.sku">SKU {{ meta.sku }}</span>
                   </div>
                 </template>
-                <div class="goods-meta">×{{ it.quantity || 1 }}</div>
+                <div class="goods-meta">×{{ it.quantity || 1 }} · ¥{{ Number(it.price || 0).toFixed(2) }}</div>
               </div>
             </div>
           </div>
@@ -650,10 +654,24 @@ onMounted(load)
 .pager { display: flex; justify-content: flex-end; flex-shrink: 0; }
 .goods-list { display: flex; flex-direction: column; gap: 8px; }
 .goods-row { display: flex; gap: 8px; align-items: flex-start; }
-.goods-pic { width: 48px; height: 48px; border-radius: 4px; flex-shrink: 0; background: #f5f5f5; }
+.goods-pic-wrap { position: relative; width: 48px; height: 48px; flex-shrink: 0; }
+.goods-pic { width: 48px; height: 48px; border-radius: 4px; flex-shrink: 0; background: #f5f5f5; display: block; }
 .goods-pic-empty {
   display: flex; align-items: center; justify-content: center;
   font-size: 11px; color: #bbb;
+}
+.goods-refund-badge {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 1px 0;
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
+  color: #fff;
+  background: rgba(245, 108, 108, 0.92);
+  border-radius: 0 0 4px 4px;
 }
 .goods-info { min-width: 0; line-height: 1.4; }
 .goods-title {

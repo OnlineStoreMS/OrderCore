@@ -1496,10 +1496,13 @@ func (s *OrderService) mapOrderToSelfLines(o *model.Order) []selfcore.SelfOrderI
 		if strings.TrimSpace(it.SplitKind) != "" {
 			continue
 		}
+		if orderItemExcludedFromFulfillment(it) {
+			continue
+		}
 		rootItems = append(rootItems, it)
 	}
 	if len(rootItems) == 0 {
-		rootItems = append(rootItems, o.Items...)
+		return nil
 	}
 	weights := make([]float64, len(rootItems))
 	var sumW float64
@@ -1565,10 +1568,13 @@ func (s *OrderService) mapOrderToPOLines(ctx context.Context, bearerToken string
 		if strings.TrimSpace(it.SplitKind) != "" {
 			continue
 		}
+		if orderItemExcludedFromFulfillment(it) {
+			continue
+		}
 		items = append(items, it)
 	}
 	if len(items) == 0 {
-		items = append(items, o.Items...)
+		return nil
 	}
 	pay := o.PayAmount
 	if pay <= 0 {
@@ -1759,7 +1765,7 @@ func (s *OrderService) BatchAllocateDropship(ctx context.Context, tenantID, oper
 		if o.Status != model.StatusPendingAlloc && o.Status != model.StatusPendingShip {
 			return nil, fmt.Errorf("%s 当前状态不可代发分配", o.OrderNo)
 		}
-		if len(o.Items) == 0 {
+		if len(o.Items) == 0 || !orderHasFulfillableItems(o) {
 			return nil, fmt.Errorf("%s 无商品明细", o.OrderNo)
 		}
 		orders = append(orders, o)
@@ -3624,6 +3630,9 @@ func (s *OrderService) resolveShipLines(o *model.Order, reqItems []dto.ShipItemI
 	if len(reqItems) == 0 {
 		out := make([]resolvedShipLine, 0, len(o.Items))
 		for _, it := range o.Items {
+			if orderItemExcludedFromFulfillment(it) {
+				continue
+			}
 			left := remaining[it.ID]
 			if left <= 0 {
 				continue
@@ -3648,6 +3657,9 @@ func (s *OrderService) resolveShipLines(o *model.Order, reqItems []dto.ShipItemI
 		it, ok := itemByID[in.OrderItemID]
 		if !ok {
 			return nil, fmt.Errorf("商品行 %d 不属于本订单", in.OrderItemID)
+		}
+		if orderItemExcludedFromFulfillment(it) {
+			return nil, fmt.Errorf("商品「%s」已退款/关闭，无法发货", firstNonEmpty(it.SkuSpecs, it.ProductName, it.SkuCode))
 		}
 		qty := in.Qty
 		if qty <= 0 {
@@ -4690,19 +4702,22 @@ func mapItems(tenantID, orderID uint64, items []dto.OrderItemInput) []model.Orde
 			qty = 1
 		}
 		out = append(out, model.OrderItem{
-			TenantID:       tenantID,
-			OrderID:        orderID,
-			LineNo:         i + 1,
-			SkuID:          it.SkuID,
-			SkuCode:        it.SkuCode,
-			PlatformSkuID:  it.PlatformSkuID,
-			PlatformItemID: it.PlatformItemID,
-			ProductName:    it.ProductName,
-			SkuSpecs:       it.SkuSpecs,
-			PicURL:         it.PicURL,
-			Quantity:       qty,
-			Price:          it.Price,
-			TotalAmount:    it.Price * float64(qty),
+			TenantID:            tenantID,
+			OrderID:             orderID,
+			LineNo:              i + 1,
+			SkuID:               it.SkuID,
+			SkuCode:             it.SkuCode,
+			PlatformSkuID:       it.PlatformSkuID,
+			PlatformItemID:      it.PlatformItemID,
+			ProductName:         it.ProductName,
+			SkuSpecs:            it.SkuSpecs,
+			PicURL:              it.PicURL,
+			Quantity:            qty,
+			Price:               it.Price,
+			TotalAmount:         it.Price * float64(qty),
+			AfterSaleStatus:     it.AfterSaleStatus,
+			AfterSaleStatusText: it.AfterSaleStatusText,
+			LineOrderStatus:     it.LineOrderStatus,
 		})
 	}
 	return out
@@ -4723,18 +4738,22 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 	raw, _ := json.Marshal(t)
 	items := make([]dto.OrderItemInput, 0, len(t.Goods))
 	for _, g := range t.Goods {
-		if tradeGoodsExcludedFromFulfillment(g) {
+		// 全部列表与快递助手一致：退款完成行仍入库展示；履约侧再按行排除
+		if g.Num <= 0 {
 			continue
 		}
 		// 商家编码不从快递助手 outerId 同步，由 OSMS 侧自行填写/绑定
 		items = append(items, dto.OrderItemInput{
-			PlatformSkuID:  g.SkuID,
-			PlatformItemID: g.ItemID,
-			ProductName:    g.Title,
-			SkuSpecs:       g.SkuName,
-			PicURL:         g.PicURL,
-			Quantity:       g.Num,
-			Price:          g.Price,
+			PlatformSkuID:       g.SkuID,
+			PlatformItemID:      g.ItemID,
+			ProductName:         g.Title,
+			SkuSpecs:            g.SkuName,
+			PicURL:              g.PicURL,
+			Quantity:            g.Num,
+			Price:               g.Price,
+			AfterSaleStatus:     g.AfterSaleStatus,
+			AfterSaleStatusText: g.AfterSaleStatusText,
+			LineOrderStatus:     g.OrderStatus,
 		})
 	}
 	addrFull := t.FormattedReceiver
@@ -4821,12 +4840,20 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 	}
 }
 
-// tradeGoodsExcludedFromFulfillment 与快递助手待发货一致：已退款完成/行关闭的明细不再入库履约。
+// tradeGoodsExcludedFromFulfillment 行已退款完成/关闭：仍入库展示，但不参与待发货履约。
 func tradeGoodsExcludedFromFulfillment(g storesync.TradeGoods) bool {
-	if g.Num <= 0 {
+	return orderLineExcludedFromFulfillment(g.Num, g.AfterSaleStatus, g.OrderStatus)
+}
+
+func orderItemExcludedFromFulfillment(it model.OrderItem) bool {
+	return orderLineExcludedFromFulfillment(it.Quantity, it.AfterSaleStatus, it.LineOrderStatus)
+}
+
+func orderLineExcludedFromFulfillment(num int, afterSaleStatus, lineOrderStatus string) bool {
+	if num <= 0 {
 		return true
 	}
-	as := strings.ToUpper(strings.TrimSpace(g.AfterSaleStatus))
+	as := strings.ToUpper(strings.TrimSpace(afterSaleStatus))
 	switch as {
 	case "REFUND_SUCCESS", "REFUNDED", "SUCCESS_REFUND", "REFUND_MONEY_FINISH", "REFUND_MONEY_SUCCESS":
 		return true
@@ -4834,7 +4861,7 @@ func tradeGoodsExcludedFromFulfillment(g storesync.TradeGoods) bool {
 	if strings.Contains(as, "REFUND") && (strings.Contains(as, "SUCCESS") || strings.Contains(as, "FINISH") || strings.Contains(as, "DONE")) {
 		return true
 	}
-	os := strings.ToUpper(strings.TrimSpace(g.OrderStatus))
+	os := strings.ToUpper(strings.TrimSpace(lineOrderStatus))
 	switch os {
 	case "TRADE_CLOSED", "ORDER_CANCEL", "ORDER_CANCELLED", "CANCEL", "CANCELLED", "CLOSED",
 		"TRADE_CLOSED_BY_TAOBAO", "TRADE_CLOSED_BY_USER", "REFUND_SUCCESS", "REFUNDED":
@@ -4842,6 +4869,21 @@ func tradeGoodsExcludedFromFulfillment(g storesync.TradeGoods) bool {
 	}
 	if strings.Contains(os, "CANCEL") || strings.HasSuffix(os, "_CLOSED") {
 		return true
+	}
+	return false
+}
+
+func orderHasFulfillableItems(o *model.Order) bool {
+	if o == nil {
+		return false
+	}
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" {
+			continue
+		}
+		if !orderItemExcludedFromFulfillment(it) {
+			return true
+		}
 	}
 	return false
 }

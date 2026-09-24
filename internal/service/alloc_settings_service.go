@@ -221,7 +221,11 @@ func (s *OrderService) TryAutoAllocateBySKU(ctx context.Context, tenantID, opera
 
 	var supplierID uint64
 	var supplierName string
+	matched := 0
 	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" || orderItemExcludedFromFulfillment(it) {
+			continue
+		}
 		skuCode := strings.TrimSpace(it.SkuCode)
 		if skuCode == "" {
 			return
@@ -230,6 +234,7 @@ func (s *OrderService) TryAutoAllocateBySKU(ctx context.Context, tenantID, opera
 		if err != nil {
 			return
 		}
+		matched++
 		if supplierID == 0 {
 			supplierID = rule.SupplierID
 			supplierName = rule.SupplierName
@@ -240,7 +245,7 @@ func (s *OrderService) TryAutoAllocateBySKU(ctx context.Context, tenantID, opera
 			return
 		}
 	}
-	if supplierID == 0 {
+	if supplierID == 0 || matched == 0 {
 		return
 	}
 

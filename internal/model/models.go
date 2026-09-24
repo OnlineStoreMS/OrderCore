@@ -161,6 +161,11 @@ type OrderItem struct {
 	Quantity       int       `gorm:"not null" json:"quantity"`
 	Price          float64   `gorm:"type:decimal(12,2)" json:"price"`
 	TotalAmount    float64   `gorm:"type:decimal(12,2)" json:"totalAmount"`
+	// AfterSaleStatus 行级售后状态（如 REFUND_MONEY_FINISH）；全部列表展示退款角标用
+	AfterSaleStatus     string `gorm:"size:64" json:"afterSaleStatus"`
+	AfterSaleStatusText string `gorm:"size:64" json:"afterSaleStatusText"`
+	// LineOrderStatus 行级电商状态（如 ORDER_CANCELLED）
+	LineOrderStatus string `gorm:"size:64" json:"lineOrderStatus"`
 	// ParentOrderItemID 拆分子行指向原销售行；整单拆分子行为 0
 	ParentOrderItemID uint64 `gorm:"index;default:0" json:"parentOrderItemId"`
 	// SplitKind 拆分子行：partial=按商品 / full=整单；根行为空

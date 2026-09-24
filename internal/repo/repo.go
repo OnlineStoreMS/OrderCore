@@ -499,20 +499,24 @@ func (r *Repos) ReplaceItems(tenantID, orderID uint64, items []model.OrderItem) 
 		if err := r.db.Model(&model.OrderItem{}).
 			Where("tenant_id = ? AND id = ?", tenantID, matched.ID).
 			Select("line_no", "sku_id", "sku_code", "platform_sku_id", "platform_item_id",
-				"product_name", "sku_specs", "pic_url", "quantity", "price", "total_amount", "updated_at").
+				"product_name", "sku_specs", "pic_url", "quantity", "price", "total_amount",
+				"after_sale_status", "after_sale_status_text", "line_order_status", "updated_at").
 			Updates(map[string]any{
-				"line_no":          it.LineNo,
-				"sku_id":           it.SkuID,
-				"sku_code":         it.SkuCode,
-				"platform_sku_id":  it.PlatformSkuID,
-				"platform_item_id": it.PlatformItemID,
-				"product_name":     it.ProductName,
-				"sku_specs":        it.SkuSpecs,
-				"pic_url":          it.PicURL,
-				"quantity":         it.Quantity,
-				"price":            it.Price,
-				"total_amount":     it.TotalAmount,
-				"updated_at":       time.Now(),
+				"line_no":                it.LineNo,
+				"sku_id":                 it.SkuID,
+				"sku_code":               it.SkuCode,
+				"platform_sku_id":        it.PlatformSkuID,
+				"platform_item_id":       it.PlatformItemID,
+				"product_name":           it.ProductName,
+				"sku_specs":              it.SkuSpecs,
+				"pic_url":                it.PicURL,
+				"quantity":               it.Quantity,
+				"price":                  it.Price,
+				"total_amount":           it.TotalAmount,
+				"after_sale_status":      it.AfterSaleStatus,
+				"after_sale_status_text": it.AfterSaleStatusText,
+				"line_order_status":      it.LineOrderStatus,
+				"updated_at":             time.Now(),
 			}).Error; err != nil {
 			return err
 		}
