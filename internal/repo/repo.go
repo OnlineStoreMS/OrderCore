@@ -213,6 +213,37 @@ func (r *Repos) FenFaRemarksByOrderNos(tenantID uint64, orderNos []string) (map[
 
 // SkuSpecsByOrderNos 按内部单号或平台单号批量取商品规格文案（根行；拆分子行忽略）。
 func (r *Repos) SkuSpecsByOrderNos(tenantID uint64, orderNos []string) (map[string]string, error) {
+	summaries, err := r.LookupOrderSummaries(tenantID, orderNos)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for k, s := range summaries {
+		if strings.TrimSpace(s.SkuSpecs) != "" {
+			out[k] = s.SkuSpecs
+		}
+	}
+	return out, nil
+}
+
+type OrderLookupSummary struct {
+	OrderNo         string
+	PlatformOrderID string
+	ShopName        string
+	BuyerName       string
+	BuyerPhone      string
+	Address         string
+	ProductTitle    string
+	ProductImage    string
+	SkuSpecs        string
+}
+
+// LookupOrderSummaries 按内部单号或平台单号批量取订单摘要（地址、规格、店铺等）。
+func (r *Repos) LookupOrderSummaries(tenantID uint64, orderNos []string) (map[string]OrderLookupSummary, error) {
+	return r.lookupOrderSummaries(tenantID, orderNos)
+}
+
+func (r *Repos) lookupOrderSummaries(tenantID uint64, orderNos []string) (map[string]OrderLookupSummary, error) {
 	seen := map[string]struct{}{}
 	nos := make([]string, 0, len(orderNos))
 	for _, raw := range orderNos {
@@ -226,7 +257,7 @@ func (r *Repos) SkuSpecsByOrderNos(tenantID uint64, orderNos []string) (map[stri
 		seen[n] = struct{}{}
 		nos = append(nos, n)
 	}
-	out := map[string]string{}
+	out := map[string]OrderLookupSummary{}
 	if len(nos) == 0 {
 		return out, nil
 	}
@@ -238,23 +269,46 @@ func (r *Repos) SkuSpecsByOrderNos(tenantID uint64, orderNos []string) (map[stri
 		}
 		part := nos[i:end]
 		var list []model.Order
-		err := r.db.Select("id, order_no, platform_order_id").
+		err := r.db.
 			Where("tenant_id = ? AND (order_no IN ? OR platform_order_id IN ?)", tenantID, part, part).
 			Preload("Items", "parent_order_item_id = 0").
+			Preload("Address").
 			Find(&list).Error
 		if err != nil {
 			return nil, err
 		}
 		for _, o := range list {
-			text := formatOrderSkuSpecs(o.Items)
-			if text == "" {
-				continue
+			sum := OrderLookupSummary{
+				OrderNo:         o.OrderNo,
+				PlatformOrderID: o.PlatformOrderID,
+				ShopName:        strings.TrimSpace(o.ShopName),
+				BuyerName:       strings.TrimSpace(o.BuyerName),
+				BuyerPhone:      strings.TrimSpace(o.BuyerPhone),
+				SkuSpecs:        formatOrderSkuSpecs(o.Items),
+			}
+			if o.Address != nil {
+				sum.Address = strings.TrimSpace(o.Address.FullText)
+				if sum.Address == "" {
+					sum.Address = strings.TrimSpace(strings.Join([]string{
+						o.Address.Name, o.Address.Phone, o.Address.Province, o.Address.City, o.Address.District, o.Address.Address,
+					}, " "))
+				}
+				if sum.BuyerName == "" {
+					sum.BuyerName = strings.TrimSpace(o.Address.Name)
+				}
+				if sum.BuyerPhone == "" {
+					sum.BuyerPhone = strings.TrimSpace(o.Address.Phone)
+				}
+			}
+			if len(o.Items) > 0 {
+				sum.ProductTitle = strings.TrimSpace(o.Items[0].ProductName)
+				sum.ProductImage = strings.TrimSpace(o.Items[0].PicURL)
 			}
 			if o.OrderNo != "" {
-				out[o.OrderNo] = text
+				out[o.OrderNo] = sum
 			}
 			if o.PlatformOrderID != "" {
-				out[o.PlatformOrderID] = text
+				out[o.PlatformOrderID] = sum
 			}
 		}
 	}

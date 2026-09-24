@@ -93,6 +93,41 @@ func (h *Handlers) SkuSpecs(c *gin.Context) {
 	response.OK(c, data)
 }
 
+func (h *Handlers) LookupOrderSummaries(c *gin.Context) {
+	var in struct {
+		OrderNos []string `json:"orderNos"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		response.Fail(c, http.StatusBadRequest, "参数无效")
+		return
+	}
+	if len(in.OrderNos) > 200 {
+		response.Fail(c, http.StatusBadRequest, "订单号过多")
+		return
+	}
+	data, err := h.orders.LookupOrderSummaries(authcontext.TenantID(c), in.OrderNos)
+	if err != nil {
+		response.Fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// 输出 camelCase JSON
+	out := map[string]gin.H{}
+	for k, s := range data {
+		out[k] = gin.H{
+			"orderNo":         s.OrderNo,
+			"platformOrderId": s.PlatformOrderID,
+			"shopName":        s.ShopName,
+			"buyerName":       s.BuyerName,
+			"buyerPhone":      s.BuyerPhone,
+			"address":         s.Address,
+			"productTitle":    s.ProductTitle,
+			"productImage":    s.ProductImage,
+			"skuSpecs":        s.SkuSpecs,
+		}
+	}
+	response.OK(c, out)
+}
+
 func (h *Handlers) ListOrders(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))

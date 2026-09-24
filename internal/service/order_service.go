@@ -134,6 +134,10 @@ func (s *OrderService) SkuSpecsByOrderNos(tenantID uint64, orderNos []string) (m
 	return s.repos.SkuSpecsByOrderNos(tenantID, orderNos)
 }
 
+func (s *OrderService) LookupOrderSummaries(tenantID uint64, orderNos []string) (map[string]repo.OrderLookupSummary, error) {
+	return s.repos.LookupOrderSummaries(tenantID, orderNos)
+}
+
 func (s *OrderService) Get(tenantID, id uint64) (*model.Order, error) {
 	return s.repos.GetOrder(tenantID, id)
 }
