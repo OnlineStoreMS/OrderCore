@@ -976,6 +976,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				s.syncLinkedPOPurchasePrices(ctx, o, bearerToken)
 			}
 		}
+		s.reconcileCoveredChildOrders(ctx, tenantID, o, req)
 		return o, false, nil
 	}
 
@@ -1102,6 +1103,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	s.autoSyncSelfLogisticsFromIngest(ctx, out, req, bearerToken)
 	s.syncShippingShippedAtFromOrder(ctx, out, bearerToken)
 	out = s.dedupeMergeShipFenFa(ctx, tenantID, out)
+	s.reconcileCoveredChildOrders(ctx, tenantID, out, req)
 	return out, true, nil
 }
 
@@ -4886,6 +4888,128 @@ func orderHasFulfillableItems(o *model.Order) bool {
 		}
 	}
 	return false
+}
+
+// ingestChildPlatformIDs 主单 tid 之外的子单 oid（快递助手 tids[1:]）。
+func ingestChildPlatformIDs(req dto.IngestOrderRequest) []string {
+	parent := strings.TrimSpace(req.PlatformOrderID)
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || id == parent {
+			return
+		}
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if raw := strings.TrimSpace(req.RawPayload); raw != "" {
+		var payload struct {
+			Tids []string `json:"tids"`
+		}
+		if err := json.Unmarshal([]byte(raw), &payload); err == nil {
+			for _, t := range payload.Tids {
+				add(t)
+			}
+		}
+	}
+	return out
+}
+
+func orderSafeToSupersedeAsChildDup(o *model.Order) bool {
+	if o == nil {
+		return false
+	}
+	if strings.TrimSpace(o.PurchaseOrderID) != "" || strings.TrimSpace(o.SelfOrderNo) != "" {
+		return false
+	}
+	if o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
+		return false
+	}
+	switch o.Status {
+	case model.StatusClosed, model.StatusPendingAlloc, model.StatusPendingShip:
+		return true
+	default:
+		return false
+	}
+}
+
+// reconcileCoveredChildOrders 主包裹同步后，清理历史上误以子单 oid 建档、且已被本包裹 tids 覆盖的悬空单。
+func (s *OrderService) reconcileCoveredChildOrders(ctx context.Context, tenantID uint64, keeper *model.Order, req dto.IngestOrderRequest) {
+	if keeper == nil || strings.TrimSpace(req.SourceChannel) != model.SourceKDZS {
+		return
+	}
+	keeperSys := strings.TrimSpace(keeper.PlatformSysTid)
+	if keeperSys == "" {
+		return
+	}
+	children := ingestChildPlatformIDs(req)
+	if len(children) == 0 {
+		return
+	}
+	for _, cid := range children {
+		other, err := s.repos.FindBySourcePlatform(tenantID, model.SourceKDZS, cid)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				continue
+			}
+			log.Printf("[ordercore] lookup child-dup oid=%s: %v", cid, err)
+			continue
+		}
+		if other == nil {
+			continue
+		}
+		if other.ID == keeper.ID {
+			continue
+		}
+		otherSys := strings.TrimSpace(other.PlatformSysTid)
+		if otherSys == "" || otherSys == keeperSys {
+			continue
+		}
+		if !orderSafeToSupersedeAsChildDup(other) {
+			log.Printf("[ordercore] skip child-dup supersede order=%s covered_by=%s (has fulfillment/active)", other.OrderNo, keeper.OrderNo)
+			continue
+		}
+		remark := fmt.Sprintf("子单包裹已被 %s(sysTid=%s) 覆盖，自动清理", keeper.OrderNo, keeperSys)
+		if other.Status == model.StatusClosed {
+			if err := s.repos.DeleteOrderCascade(tenantID, other.ID); err != nil {
+				log.Printf("[ordercore] delete child-dup order=%s: %v", other.OrderNo, err)
+			} else {
+				log.Printf("[ordercore] deleted child-dup order=%s covered_by=%s", other.OrderNo, keeper.OrderNo)
+			}
+			continue
+		}
+		from := other.Status
+		err = s.repos.Transaction(func(tx *repo.Repos) error {
+			if err := tx.UpdateOrderFields(tenantID, other.ID, map[string]any{
+				"status":      model.StatusClosed,
+				"ship_status": "",
+			}); err != nil {
+				return err
+			}
+			return tx.AddStatusLog(&model.OrderStatusLog{
+				TenantID:   tenantID,
+				OrderID:    other.ID,
+				FromStatus: from,
+				ToStatus:   model.StatusClosed,
+				Action:     "child_dup_close",
+				Remark:     remark,
+			})
+		})
+		if err != nil {
+			log.Printf("[ordercore] close child-dup order=%s: %v", other.OrderNo, err)
+			continue
+		}
+		log.Printf("[ordercore] closed child-dup order=%s covered_by=%s", other.OrderNo, keeper.OrderNo)
+		// 已关闭且无履约链路：直接删掉，避免「全部」里残留空壳重复
+		if err := s.repos.DeleteOrderCascade(tenantID, other.ID); err != nil {
+			log.Printf("[ordercore] delete closed child-dup order=%s: %v", other.OrderNo, err)
+		}
+	}
+	_ = ctx
 }
 
 type kdzsIngestHint struct {

@@ -201,3 +201,26 @@ func TestMapTradeToIngestKeepsRefundedGoods(t *testing.T) {
 		t.Fatalf("refunded line should still be excluded from fulfillment")
 	}
 }
+
+func TestIngestChildPlatformIDs(t *testing.T) {
+	req := dto.IngestOrderRequest{
+		PlatformOrderID: "parent-tid",
+		RawPayload:      `{"tids":["parent-tid","child-oid-1","child-oid-2","parent-tid"]}`,
+	}
+	got := ingestChildPlatformIDs(req)
+	if len(got) != 2 || got[0] != "child-oid-1" || got[1] != "child-oid-2" {
+		t.Fatalf("got=%v", got)
+	}
+}
+
+func TestOrderSafeToSupersedeAsChildDup(t *testing.T) {
+	if !orderSafeToSupersedeAsChildDup(&model.Order{Status: model.StatusClosed}) {
+		t.Fatal("closed should be safe")
+	}
+	if orderSafeToSupersedeAsChildDup(&model.Order{Status: model.StatusClosed, PurchaseOrderID: "PO1"}) {
+		t.Fatal("with PO should not be safe")
+	}
+	if orderSafeToSupersedeAsChildDup(&model.Order{Status: model.StatusAllocated}) {
+		t.Fatal("allocated should not be safe")
+	}
+}
