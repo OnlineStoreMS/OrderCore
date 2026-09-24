@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"ordercore/internal/dto"
+	"ordercore/internal/integration/storesync"
 	"ordercore/internal/model"
 )
 
@@ -152,5 +153,45 @@ func TestCloseDetachReason(t *testing.T) {
 		EcommerceStatusText: "交易关闭",
 	}); got != "交易关闭" {
 		t.Fatalf("want 交易关闭 got %q", got)
+	}
+}
+
+func TestTradeGoodsExcludedFromFulfillment(t *testing.T) {
+	cases := []struct {
+		g    storesync.TradeGoods
+		want bool
+	}{
+		{storesync.TradeGoods{Num: 1, AfterSaleStatus: "REFUND_SUCCESS"}, true},
+		{storesync.TradeGoods{Num: 1, OrderStatus: "TRADE_CLOSED"}, true},
+		{storesync.TradeGoods{Num: 1, AfterSaleStatus: "WAIT_SELLER_AGREE"}, false},
+		{storesync.TradeGoods{Num: 1, AfterSaleStatus: "REFUND_MONEY_NONE", OrderStatus: "ORDER_PAID"}, false},
+		{storesync.TradeGoods{Num: 0}, true},
+	}
+	for i, c := range cases {
+		if got := tradeGoodsExcludedFromFulfillment(c.g); got != c.want {
+			t.Fatalf("case %d got %v want %v", i, got, c.want)
+		}
+	}
+}
+
+func TestMapTradeToIngestSkipsRefundedGoods(t *testing.T) {
+	req := mapTradeToIngest(storesync.TradeOrder{
+		Platform:            "FXG",
+		Tids:                []string{"tid1"},
+		SysTids:             []string{"sys1"},
+		TradeStatus:         "wait_send",
+		PlatformOrderStatus: "ORDER_PAID",
+		AfterSaleStatus:     "REFUND_MONEY_NONE",
+		Payment:             135,
+		Goods: []storesync.TradeGoods{
+			{Title: "盘片", SkuName: "50-34T", Num: 1, Price: 158, AfterSaleStatus: "REFUND_SUCCESS", OrderStatus: "TRADE_CLOSED"},
+			{Title: "链条", SkuName: "HG95", Num: 1, Price: 135, AfterSaleStatus: "REFUND_MONEY_NONE", OrderStatus: "ORDER_PAID", SkuID: "sku-hg95"},
+		},
+	})
+	if len(req.Items) != 1 {
+		t.Fatalf("items=%+v", req.Items)
+	}
+	if req.Items[0].SkuSpecs != "HG95" || req.Items[0].PlatformSkuID != "sku-hg95" {
+		t.Fatalf("item=%+v", req.Items[0])
 	}
 }

@@ -46,14 +46,17 @@ type OrderQuery struct {
 }
 
 type TradeGoods struct {
-	Title   string  `json:"title"`
-	SkuName string  `json:"skuName"`
-	PicURL  string  `json:"picUrl"`
-	Num     int     `json:"num"`
-	OuterID string  `json:"outerId"`
-	SkuID   string  `json:"skuId"`
-	ItemID  string  `json:"itemId"`
-	Price   float64 `json:"price"`
+	Title               string  `json:"title"`
+	SkuName             string  `json:"skuName"`
+	PicURL              string  `json:"picUrl"`
+	Num                 int     `json:"num"`
+	OuterID             string  `json:"outerId"`
+	SkuID               string  `json:"skuId"`
+	ItemID              string  `json:"itemId"`
+	Price               float64 `json:"price"`
+	AfterSaleStatus     string  `json:"afterSaleStatus"`
+	AfterSaleStatusText string  `json:"afterSaleStatusText"`
+	OrderStatus         string  `json:"orderStatus"`
 }
 
 type TradeOrder struct {

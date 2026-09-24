@@ -4700,6 +4700,9 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 	raw, _ := json.Marshal(t)
 	items := make([]dto.OrderItemInput, 0, len(t.Goods))
 	for _, g := range t.Goods {
+		if tradeGoodsExcludedFromFulfillment(g) {
+			continue
+		}
 		// 商家编码不从快递助手 outerId 同步，由 OSMS 侧自行填写/绑定
 		items = append(items, dto.OrderItemInput{
 			PlatformSkuID:  g.SkuID,
@@ -4793,6 +4796,31 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 		},
 		Items: items,
 	}
+}
+
+// tradeGoodsExcludedFromFulfillment 与快递助手待发货一致：已退款完成/行关闭的明细不再入库履约。
+func tradeGoodsExcludedFromFulfillment(g storesync.TradeGoods) bool {
+	if g.Num <= 0 {
+		return true
+	}
+	as := strings.ToUpper(strings.TrimSpace(g.AfterSaleStatus))
+	switch as {
+	case "REFUND_SUCCESS", "REFUNDED", "SUCCESS_REFUND", "REFUND_MONEY_FINISH", "REFUND_MONEY_SUCCESS":
+		return true
+	}
+	if strings.Contains(as, "REFUND") && (strings.Contains(as, "SUCCESS") || strings.Contains(as, "FINISH") || strings.Contains(as, "DONE")) {
+		return true
+	}
+	os := strings.ToUpper(strings.TrimSpace(g.OrderStatus))
+	switch os {
+	case "TRADE_CLOSED", "ORDER_CANCEL", "ORDER_CANCELLED", "CANCEL", "CANCELLED", "CLOSED",
+		"TRADE_CLOSED_BY_TAOBAO", "TRADE_CLOSED_BY_USER", "REFUND_SUCCESS", "REFUNDED":
+		return true
+	}
+	if strings.Contains(os, "CANCEL") || strings.HasSuffix(os, "_CLOSED") {
+		return true
+	}
+	return false
 }
 
 type kdzsIngestHint struct {
