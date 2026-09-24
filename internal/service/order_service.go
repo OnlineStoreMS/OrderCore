@@ -626,8 +626,18 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 
 	var existing *model.Order
 	var err error
-	if req.PlatformOrderID != "" {
+	if existing == nil && req.PlatformOrderID != "" {
 		existing, err = s.repos.FindBySourcePlatform(tenantID, channel, req.PlatformOrderID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, false, err
+		}
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			existing = nil
+		}
+	}
+	// 历史单可能把子单 oid 写成了平台单号；按快递助手 sysTid 回找，避免重复建单
+	if existing == nil && channel == model.SourceKDZS && strings.TrimSpace(req.PlatformSysTid) != "" {
+		existing, err = s.repos.FindByPlatformSysTid(tenantID, channel, req.PlatformSysTid)
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, false, err
 		}
@@ -701,6 +711,10 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				"fen_fa_remark":          req.FenFaRemark,
 				"printer_remark":         req.PrinterRemark,
 				"raw_payload":            req.RawPayload,
+			}
+			// 纠正历史误写的子单 oid → 主单 tid（与快递助手「平台单号」一致）
+			if pid := strings.TrimSpace(req.PlatformOrderID); pid != "" {
+				fields["platform_order_id"] = pid
 			}
 			if req.SellerFlag != nil {
 				fields["seller_flag"] = *req.SellerFlag

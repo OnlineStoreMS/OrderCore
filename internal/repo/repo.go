@@ -365,6 +365,22 @@ func (r *Repos) FindBySourcePlatform(tenantID uint64, channel, platformOrderID s
 	return &o, nil
 }
 
+// FindByPlatformSysTid 按快递助手系统单号定位（主单号从子单 oid 纠正后仍能命中已有单）。
+func (r *Repos) FindByPlatformSysTid(tenantID uint64, channel, sysTid string) (*model.Order, error) {
+	sysTid = strings.TrimSpace(sysTid)
+	if sysTid == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+	var o model.Order
+	err := r.db.Where("tenant_id = ? AND source_channel = ? AND platform_sys_tid = ?", tenantID, channel, sysTid).
+		Preload("Items").Preload("Address").
+		First(&o).Error
+	if err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
 func (r *Repos) FindByExternalRef(tenantID uint64, channel, externalRefID string) (*model.Order, error) {
 	var o model.Order
 	err := r.db.Where("tenant_id = ? AND source_channel = ? AND external_ref_id = ?", tenantID, channel, externalRefID).
