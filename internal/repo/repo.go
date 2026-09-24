@@ -366,6 +366,7 @@ func (r *Repos) FindBySourcePlatform(tenantID uint64, channel, platformOrderID s
 }
 
 // FindByPlatformSysTid 按快递助手系统单号定位（主单号从子单 oid 纠正后仍能命中已有单）。
+// 同一 sysTid 若有历史重复单：优先非 closed，再取 id 最小。
 func (r *Repos) FindByPlatformSysTid(tenantID uint64, channel, sysTid string) (*model.Order, error) {
 	sysTid = strings.TrimSpace(sysTid)
 	if sysTid == "" {
@@ -373,6 +374,7 @@ func (r *Repos) FindByPlatformSysTid(tenantID uint64, channel, sysTid string) (*
 	}
 	var o model.Order
 	err := r.db.Where("tenant_id = ? AND source_channel = ? AND platform_sys_tid = ?", tenantID, channel, sysTid).
+		Order("CASE WHEN status = 'closed' THEN 1 ELSE 0 END ASC, id ASC").
 		Preload("Items").Preload("Address").
 		First(&o).Error
 	if err != nil {

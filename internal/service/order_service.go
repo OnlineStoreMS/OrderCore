@@ -3871,9 +3871,10 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 						ingest.PlatformStatus = status
 						ingest.PlatformStatusText = kdzsPlatformStatusText(status)
 					}
-					key := ingest.PlatformOrderID
+					// 同一主单 tid 可有多个包裹，去重键必须用 sysTid，不能用 platform_order_id
+					key := strings.TrimSpace(ingest.PlatformSysTid)
 					if key == "" {
-						key = ingest.PlatformSysTid
+						key = strings.TrimSpace(ingest.PlatformOrderID)
 					}
 					if key != "" {
 						if _, ok := seen[key]; ok {

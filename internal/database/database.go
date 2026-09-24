@@ -132,14 +132,40 @@ func backfillFulfillmentShipStatus(db *gorm.DB) error {
 func ensureIndexes(db *gorm.DB) error {
 	switch db.Dialector.Name() {
 	case "postgres":
-		return db.Exec(`
-			CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_tenant_no ON orders (tenant_id, order_no);
-			CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_source_platform ON orders (tenant_id, source_channel, platform_order_id) WHERE platform_order_id <> '';
-			CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_source_ext ON orders (tenant_id, source_channel, external_ref_id) WHERE external_ref_id <> '';
-			CREATE UNIQUE INDEX IF NOT EXISTS idx_ship_tenant_no ON order_shipments (tenant_id, shipment_no);
-			CREATE UNIQUE INDEX IF NOT EXISTS idx_bind_supplier_factory ON supplier_source_bindings (tenant_id, source_channel, external_factory_id) WHERE status = 1;
-			CREATE UNIQUE INDEX IF NOT EXISTS idx_sku_supplier_rule_active ON sku_supplier_rules (tenant_id, sku_code) WHERE status = 1;
-		`).Error
+		// 抖店同一主单 tid 可对应多个快递助手包裹（不同 sysTid），platform_order_id 不能再唯一。
+		// 幂等键改为 platform_sys_tid；platform_order_id 仅保留普通检索索引。
+		steps := []string{
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_tenant_no ON orders (tenant_id, order_no)`,
+			`DROP INDEX IF EXISTS idx_orders_source_platform`,
+			`CREATE INDEX IF NOT EXISTS idx_orders_platform_order_id ON orders (platform_order_id)`,
+			// 历史脏数据：同一 sysTid 多条时保留「非 closed 优先、id 最小」一条，其余打 #dup 后缀腾出唯一键
+			`WITH d AS (
+				SELECT id,
+					ROW_NUMBER() OVER (
+						PARTITION BY tenant_id, source_channel, platform_sys_tid
+						ORDER BY CASE WHEN status = 'closed' THEN 1 ELSE 0 END, id ASC
+					) AS rn
+				FROM orders
+				WHERE COALESCE(platform_sys_tid, '') <> ''
+			)
+			UPDATE orders o
+			SET platform_sys_tid = o.platform_sys_tid || '#dup' || o.id::text,
+				status = CASE WHEN o.status = 'closed' THEN o.status ELSE 'closed' END,
+				updated_at = NOW()
+			FROM d
+			WHERE o.id = d.id AND d.rn > 1`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_source_systid ON orders (tenant_id, source_channel, platform_sys_tid) WHERE platform_sys_tid <> ''`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_source_ext ON orders (tenant_id, source_channel, external_ref_id) WHERE external_ref_id <> ''`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_ship_tenant_no ON order_shipments (tenant_id, shipment_no)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_bind_supplier_factory ON supplier_source_bindings (tenant_id, source_channel, external_factory_id) WHERE status = 1`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_sku_supplier_rule_active ON sku_supplier_rules (tenant_id, sku_code) WHERE status = 1`,
+		}
+		for _, sql := range steps {
+			if err := db.Exec(sql).Error; err != nil {
+				return fmt.Errorf("ensureIndexes: %w\nsql=%s", err, sql)
+			}
+		}
+		return nil
 	default:
 		return nil
 	}
