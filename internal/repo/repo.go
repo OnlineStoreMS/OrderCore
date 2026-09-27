@@ -365,6 +365,19 @@ func (r *Repos) FindBySourcePlatform(tenantID uint64, channel, platformOrderID s
 	return &o, nil
 }
 
+// ListBySourcePlatform 同一平台主单号下的全部订单（抖店一主单可多包裹）。
+func (r *Repos) ListBySourcePlatform(tenantID uint64, channel, platformOrderID string) ([]model.Order, error) {
+	platformOrderID = strings.TrimSpace(platformOrderID)
+	if platformOrderID == "" {
+		return nil, nil
+	}
+	var list []model.Order
+	err := r.db.Where("tenant_id = ? AND source_channel = ? AND platform_order_id = ?", tenantID, channel, platformOrderID).
+		Order("id ASC").
+		Find(&list).Error
+	return list, err
+}
+
 // FindByPlatformSysTid 按快递助手系统单号定位（主单号从子单 oid 纠正后仍能命中已有单）。
 // 同一 sysTid 若有历史重复单：优先非 closed，再取 id 最小。
 func (r *Repos) FindByPlatformSysTid(tenantID uint64, channel, sysTid string) (*model.Order, error) {

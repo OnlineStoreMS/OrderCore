@@ -977,6 +977,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			}
 		}
 		s.reconcileCoveredChildOrders(ctx, tenantID, o, req)
+		s.reconcileSupersededSiblingPackages(ctx, tenantID, o, req)
 		return o, false, nil
 	}
 
@@ -1104,6 +1105,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	s.syncShippingShippedAtFromOrder(ctx, out, bearerToken)
 	out = s.dedupeMergeShipFenFa(ctx, tenantID, out)
 	s.reconcileCoveredChildOrders(ctx, tenantID, out, req)
+	s.reconcileSupersededSiblingPackages(ctx, tenantID, out, req)
 	return out, true, nil
 }
 
@@ -5010,6 +5012,143 @@ func (s *OrderService) reconcileCoveredChildOrders(ctx context.Context, tenantID
 		}
 	}
 	_ = ctx
+}
+
+// reconcileSupersededSiblingPackages 同一主单 tid 下，快递助手换包（新 sysTid）后清理旧包裹悬空单。
+// 典型：退款重拉后旧 sysTid 从助手消失，新取消包另建单，旧 pending_alloc 仍留在待分配。
+func (s *OrderService) reconcileSupersededSiblingPackages(ctx context.Context, tenantID uint64, keeper *model.Order, req dto.IngestOrderRequest) {
+	if keeper == nil || strings.TrimSpace(req.SourceChannel) != model.SourceKDZS {
+		return
+	}
+	parent := strings.TrimSpace(keeper.PlatformOrderID)
+	keeperSys := strings.TrimSpace(keeper.PlatformSysTid)
+	if parent == "" || keeperSys == "" {
+		return
+	}
+	keeperTids := ingestAllPlatformIDs(req)
+	if len(keeperTids) == 0 {
+		keeperTids[parent] = struct{}{}
+	}
+	siblings, err := s.repos.ListBySourcePlatform(tenantID, model.SourceKDZS, parent)
+	if err != nil {
+		log.Printf("[ordercore] list sibling packages tid=%s: %v", parent, err)
+		return
+	}
+	for i := range siblings {
+		other := &siblings[i]
+		if other.ID == keeper.ID {
+			continue
+		}
+		otherSys := strings.TrimSpace(other.PlatformSysTid)
+		if otherSys == "" || otherSys == keeperSys {
+			continue
+		}
+		if !orderSafeToSupersedeAsChildDup(other) {
+			log.Printf("[ordercore] skip sibling supersede order=%s covered_by=%s (has fulfillment/active)", other.OrderNo, keeper.OrderNo)
+			continue
+		}
+		otherTids := parseOrderRawTids(other.RawPayload, other.PlatformOrderID)
+		if !tidSetCovers(keeperTids, otherTids) {
+			continue
+		}
+		remark := fmt.Sprintf("同主单换包：已被 %s(sysTid=%s) 覆盖，自动清理悬空包裹", keeper.OrderNo, keeperSys)
+		if other.Status == model.StatusClosed {
+			if err := s.repos.DeleteOrderCascade(tenantID, other.ID); err != nil {
+				log.Printf("[ordercore] delete sibling-dup order=%s: %v", other.OrderNo, err)
+			} else {
+				log.Printf("[ordercore] deleted sibling-dup order=%s covered_by=%s", other.OrderNo, keeper.OrderNo)
+			}
+			continue
+		}
+		from := other.Status
+		err = s.repos.Transaction(func(tx *repo.Repos) error {
+			if err := tx.UpdateOrderFields(tenantID, other.ID, map[string]any{
+				"status":      model.StatusClosed,
+				"ship_status": "",
+			}); err != nil {
+				return err
+			}
+			return tx.AddStatusLog(&model.OrderStatusLog{
+				TenantID:   tenantID,
+				OrderID:    other.ID,
+				FromStatus: from,
+				ToStatus:   model.StatusClosed,
+				Action:     "sibling_pkg_close",
+				Remark:     remark,
+			})
+		})
+		if err != nil {
+			log.Printf("[ordercore] close sibling-dup order=%s: %v", other.OrderNo, err)
+			continue
+		}
+		log.Printf("[ordercore] closed sibling-dup order=%s covered_by=%s", other.OrderNo, keeper.OrderNo)
+		if err := s.repos.DeleteOrderCascade(tenantID, other.ID); err != nil {
+			log.Printf("[ordercore] delete closed sibling-dup order=%s: %v", other.OrderNo, err)
+		}
+	}
+	_ = ctx
+}
+
+// ingestAllPlatformIDs 包裹 tids 全集（含主单 tid）。
+func ingestAllPlatformIDs(req dto.IngestOrderRequest) map[string]struct{} {
+	out := map[string]struct{}{}
+	parent := strings.TrimSpace(req.PlatformOrderID)
+	if parent != "" {
+		out[parent] = struct{}{}
+	}
+	if raw := strings.TrimSpace(req.RawPayload); raw != "" {
+		var payload struct {
+			Tids []string `json:"tids"`
+		}
+		if err := json.Unmarshal([]byte(raw), &payload); err == nil {
+			for _, t := range payload.Tids {
+				t = strings.TrimSpace(t)
+				if t != "" {
+					out[t] = struct{}{}
+				}
+			}
+		}
+	}
+	for _, c := range ingestChildPlatformIDs(req) {
+		out[c] = struct{}{}
+	}
+	return out
+}
+
+func parseOrderRawTids(raw, fallbackParent string) map[string]struct{} {
+	out := map[string]struct{}{}
+	if parent := strings.TrimSpace(fallbackParent); parent != "" {
+		out[parent] = struct{}{}
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return out
+	}
+	var payload struct {
+		Tids []string `json:"tids"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return out
+	}
+	for _, t := range payload.Tids {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			out[t] = struct{}{}
+		}
+	}
+	return out
+}
+
+func tidSetCovers(keeper, other map[string]struct{}) bool {
+	if len(other) == 0 {
+		return false
+	}
+	for id := range other {
+		if _, ok := keeper[id]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 type kdzsIngestHint struct {
