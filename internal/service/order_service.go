@@ -626,6 +626,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 
 	var existing *model.Order
 	var err error
+	mergeSameParentPkg := false
 	// 抖店同一主单 tid 可对应多个快递助手包裹（不同 sysTid），优先按 sysTid 定位
 	if channel == model.SourceKDZS && strings.TrimSpace(req.PlatformSysTid) != "" {
 		existing, err = s.repos.FindByPlatformSysTid(tenantID, channel, req.PlatformSysTid)
@@ -637,18 +638,22 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		}
 	}
 	if existing == nil && req.PlatformOrderID != "" {
-		existing, err = s.repos.FindBySourcePlatform(tenantID, channel, req.PlatformOrderID)
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, false, err
-		}
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			existing = nil
-		}
-		// 主单号撞车：已有单是另一包裹（sysTid 不同）则不能覆盖
-		if existing != nil && channel == model.SourceKDZS {
-			wantSys := strings.TrimSpace(req.PlatformSysTid)
-			haveSys := strings.TrimSpace(existing.PlatformSysTid)
-			if wantSys != "" && haveSys != "" && wantSys != haveSys {
+		// 同主单多包裹：并入已有销售单（按商品级再拆），不再另建
+		if channel == model.SourceKDZS {
+			if keeper := s.findKDZSParentKeeper(tenantID, req.PlatformOrderID); keeper != nil {
+				existing = keeper
+				wantSys := strings.TrimSpace(req.PlatformSysTid)
+				haveSys := basePlatformSysTid(keeper.PlatformSysTid)
+				if wantSys != "" && haveSys != "" && wantSys != haveSys {
+					mergeSameParentPkg = true
+				}
+			}
+		} else {
+			existing, err = s.repos.FindBySourcePlatform(tenantID, channel, req.PlatformOrderID)
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, false, err
+			}
+			if errors.Is(err, gorm.ErrRecordNotFound) {
 				existing = nil
 			}
 		}
@@ -720,6 +725,13 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				"printer_remark":         req.PrinterRemark,
 				"raw_payload":            req.RawPayload,
 			}
+			if mergeSameParentPkg {
+				// 同主单另一包裹：保留主包裹 sysTid/金额口径，商品走合并写入
+				delete(fields, "platform_sys_tid")
+				delete(fields, "total_amount")
+				delete(fields, "pay_amount")
+				delete(fields, "raw_payload")
+			}
 			// 纠正历史误写的子单 oid → 主单 tid（与快递助手「平台单号」一致）
 			if pid := strings.TrimSpace(req.PlatformOrderID); pid != "" {
 				fields["platform_order_id"] = pid
@@ -770,11 +782,11 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				kdzsDecided := ps == model.KDZSWaitSend || ps == "shipped" || ps == "completed"
 				skipSelfAuto := hint.AgentType == model.AgentTypeSelf && existing.SkipAutoAlloc && !kdzsDecided &&
 					hint.ShipStatus != model.ShipShipped && hint.Status != model.StatusCompleted
-				// OSMS 线下代发会对快递助手走 self_print；同步若按「自营」回写会冲掉供应商。
+				// OSMS 线下代发会对快递助手走 self_print；同步若按「自营/渠道已发」回写会冲掉供应商。
 				// 已有 osms 代发，或仍挂着代发采购单号时，保留/按采购单恢复。
 				osmsRestoreSID, osmsRestoreSName := uint64(0), ""
 				preserveOSMSDropship := false
-				if hint.AllocType == model.AllocSelfShip {
+				if hint.AllocType == model.AllocSelfShip || hint.AllocType == model.AllocChannelShip {
 					if existing.AllocType == model.AllocDropship &&
 						existing.DropshipMode == model.DropshipOSMSSupplier &&
 						existing.SupplierID > 0 {
@@ -787,12 +799,25 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 						}
 					}
 				}
+				// 已在订单管理/快递助手待发货分配为自营的，同步已发货时不要改成渠道已发
+				if hint.AllocType == model.AllocChannelShip &&
+					(existing.AllocType == model.AllocSelfShip || existing.AllocType == model.AllocPurchaseThenShip) {
+					hint.AllocType = existing.AllocType
+					hint.DropshipMode = existing.DropshipMode
+					hint.ShipLockReason = "快递助手已发货"
+					fields["ship_lock_reason"] = hint.ShipLockReason
+					if status == model.StatusCompleted {
+						hint.LogRemark = "同步交易完成→保留自营分配+已完成"
+					} else {
+						hint.LogRemark = "同步已发货→保留自营分配+已发货"
+					}
+				}
 				if !skipSelfAuto && !preserveOSMSDropship {
 					fields["alloc_type"] = hint.AllocType
 					fields["dropship_mode"] = hint.DropshipMode
 					fields["factory_id"] = req.FactoryID
 					fields["factory_name"] = req.FactoryName
-					if hint.AllocType == model.AllocSelfShip {
+					if hint.AllocType == model.AllocSelfShip || hint.AllocType == model.AllocChannelShip {
 						fields["supplier_id"] = 0
 						fields["supplier_name"] = ""
 					} else if hint.AllocType == model.AllocDropship && hint.DropshipMode == model.DropshipKDZSFactory {
@@ -894,7 +919,12 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			}
 			items := mapItems(tenantID, existing.ID, req.Items)
 			preserveOSMSSKUFields(existing.Items, items)
-			if err := tx.ReplaceItems(tenantID, existing.ID, items); err != nil {
+			// 快递助手同主单可多包裹：同步只 upsert，不删其它包裹商品
+			if channel == model.SourceKDZS {
+				if err := tx.MergePackageItems(tenantID, existing.ID, items); err != nil {
+					return err
+				}
+			} else if err := tx.ReplaceItems(tenantID, existing.ID, items); err != nil {
 				return err
 			}
 			if req.Address != nil && !keepPlainReceiver {
@@ -925,6 +955,18 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		o, err := s.repos.GetOrder(tenantID, existing.ID)
 		if err != nil {
 			return nil, false, err
+		}
+		if mergeSameParentPkg && o != nil {
+			sum := sumItemAmounts(o.Items)
+			if sum > 0 && (roundMoney(o.PayAmount) != sum || roundMoney(o.TotalAmount) != sum) {
+				_ = s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{
+					"pay_amount":   sum,
+					"total_amount": sum,
+				})
+				o.PayAmount = sum
+				o.TotalAmount = sum
+			}
+			log.Printf("[ordercore] merge same-parent package into %s sysTid=%s from=%s", o.OrderNo, o.PlatformSysTid, req.PlatformSysTid)
 		}
 		closingNow := !terminalPre && status == model.StatusClosed
 		if closingNow && strings.TrimSpace(bearerToken) != "" {
@@ -2636,6 +2678,46 @@ func orderItemPlatformOids(o *model.Order) []string {
 		out = append(out, oid)
 	}
 	return out
+}
+
+// findKDZSParentKeeper 同平台主单下选履约主单：排除商品级拆出子单，优先非 closed，再取最早建档。
+func (s *OrderService) findKDZSParentKeeper(tenantID uint64, platformOrderID string) *model.Order {
+	list, err := s.repos.ListBySourcePlatform(tenantID, model.SourceKDZS, platformOrderID)
+	if err != nil || len(list) == 0 {
+		return nil
+	}
+	var best *model.Order
+	score := func(o *model.Order) int {
+		if o == nil {
+			return -100
+		}
+		if o.SplitFromOrderID > 0 || strings.Contains(o.PlatformSysTid, "#split") {
+			return -50
+		}
+		sc := 10
+		if o.Status == model.StatusClosed {
+			sc -= 5
+		}
+		if o.Status == model.StatusCompleted {
+			sc -= 1
+		}
+		return sc
+	}
+	for i := range list {
+		o := &list[i]
+		if best == nil {
+			best = o
+			continue
+		}
+		sb, so := score(best), score(o)
+		if so > sb || (so == sb && o.ID < best.ID) {
+			best = o
+		}
+	}
+	if best != nil && (best.SplitFromOrderID > 0 || strings.Contains(best.PlatformSysTid, "#split")) {
+		return nil
+	}
+	return best
 }
 
 func (s *OrderService) cancelKDZSPush(ctx context.Context, o *model.Order, token string) error {
@@ -5337,30 +5419,34 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 		h.ShipStatus = model.ShipShipped
 		h.ApplySyncAlloc = true
 		h.ShipEntryLocked = true
-		h.ShipLockReason = "快递助手已发货"
 		if isFactory {
 			h.AllocType = model.AllocDropship
 			h.DropshipMode = model.DropshipKDZSFactory
+			h.ShipLockReason = "快递助手已发货"
 			h.LogRemark = "同步已发货代发单→已分配+已发货"
 		} else {
-			h.AllocType = model.AllocSelfShip
+			// 未经订单管理/快递助手待发货分配，平台或其它渠道已填单号 → 渠道已发
+			h.AllocType = model.AllocChannelShip
 			h.DropshipMode = ""
-			h.LogRemark = "同步已发货自营单→已分配+已发货"
+			h.ShipLockReason = "渠道已发，非订单管理分配"
+			h.LogRemark = "同步渠道已发→已分配+已发货"
 		}
 	case "completed":
 		h.Status = model.StatusCompleted
 		h.ShipStatus = model.ShipShipped
 		h.ApplySyncAlloc = true
 		h.ShipEntryLocked = true
-		h.ShipLockReason = "快递助手交易完成"
 		if isFactory {
 			h.AllocType = model.AllocDropship
 			h.DropshipMode = model.DropshipKDZSFactory
+			h.ShipLockReason = "快递助手交易完成"
+			h.LogRemark = "同步交易完成→已完成+已发货"
 		} else {
-			h.AllocType = model.AllocSelfShip
+			h.AllocType = model.AllocChannelShip
 			h.DropshipMode = ""
+			h.ShipLockReason = "渠道已发，非订单管理分配"
+			h.LogRemark = "同步交易完成→渠道已发+已完成"
 		}
-		h.LogRemark = "同步交易完成→已完成+已发货"
 	case model.KDZSWaitAudit:
 		// 待推单（含撤单/退审回退）：履约侧一律恢复待分配。
 		// 快递助手撤单后常仍挂厂家(agentType=2/factory*)，不能再视为「已分配」。
@@ -5630,8 +5716,8 @@ func (s *OrderService) syncShippingShippedAtFromOrder(ctx context.Context, o *mo
 	if o == nil || s.shipping == nil || !s.shipping.Enabled() || strings.TrimSpace(bearerToken) == "" {
 		return
 	}
-	// 自营走快递助手打单：同步后要在发货中心可查；代发不建发货中心单
-	if o.AllocType != model.AllocSelfShip {
+	// 自营/渠道已发：同步后要在发货中心可查；代发不建发货中心单
+	if o.AllocType != model.AllocSelfShip && o.AllocType != model.AllocChannelShip {
 		return
 	}
 	if len(o.Shipments) == 0 {

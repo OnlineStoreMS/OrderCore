@@ -442,6 +442,7 @@ onMounted(load)
         >
           <el-option label="自营发货" value="self_ship" />
           <el-option label="代发发货" value="dropship" />
+          <el-option label="渠道已发" value="channel_ship" />
           <el-option label="采购发货" value="purchase_then_ship" />
         </el-select>
         <div class="date-field">

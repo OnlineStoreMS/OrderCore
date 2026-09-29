@@ -47,9 +47,10 @@ var ShipNeedShipStatuses = []string{ShipWaitShip, ShipPartialShipped}
 
 // 分配类型
 const (
-	AllocSelfShip         = "self_ship"          // 自营发货
+	AllocSelfShip         = "self_ship"          // 自营发货（订单管理/快递助手待发货分配）
 	AllocDropship         = "dropship"           // 代发发货
 	AllocPurchaseThenShip = "purchase_then_ship" // 采购发货
+	AllocChannelShip      = "channel_ship"       // 渠道已发（平台/其它渠道填单号，未经订单管理分配）
 )
 
 // 代发子类型

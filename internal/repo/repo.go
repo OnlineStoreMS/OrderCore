@@ -42,7 +42,7 @@ type OrderListQuery struct {
 	PlatformOrderID   string
 	PlatformSysTid    string
 	EcommerceWaitShip bool   // 兼容：按电商订单「待发货」筛选
-	SalesChannel      string // self | dropship，与工作台自营/代发口径一致
+	SalesChannel      string // self | dropship | channel，与工作台自营/代发/渠道已发口径一致
 	OrderedAtStart    *time.Time
 	OrderedAtEnd      *time.Time
 	ShippedAtStart    *time.Time
@@ -100,9 +100,13 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	switch strings.ToLower(strings.TrimSpace(q.SalesChannel)) {
 	case "self":
 		tx = tx.Where("NOT " + sqlIsDropship)
+		tx = tx.Where("COALESCE(alloc_type,'') <> ?", model.AllocChannelShip)
 		tx = scopeValidSales(tx)
 	case "dropship":
 		tx = tx.Where(sqlIsDropship)
+		tx = scopeValidSales(tx)
+	case "channel", "channel_ship":
+		tx = tx.Where("alloc_type = ?", model.AllocChannelShip)
 		tx = scopeValidSales(tx)
 	}
 	if q.EcommerceWaitShip {
@@ -465,6 +469,15 @@ func (r *Repos) UpdateOrderFields(tenantID, id uint64, fields map[string]interfa
 // ReplaceItems 用平台同步明细更新根行，尽量保留原 id；拆分子行不删除、不覆盖。
 // 旧实现全删全建会导致拆分行丢失，且采购/发货侧 refOrderItemId 失效。
 func (r *Repos) ReplaceItems(tenantID, orderID uint64, items []model.OrderItem) error {
+	return r.replaceItems(tenantID, orderID, items, false)
+}
+
+// MergePackageItems 同主单另一包裹同步：只 upsert 本包商品，不删除已有根行（避免拆掉其它包裹商品）。
+func (r *Repos) MergePackageItems(tenantID, orderID uint64, items []model.OrderItem) error {
+	return r.replaceItems(tenantID, orderID, items, true)
+}
+
+func (r *Repos) replaceItems(tenantID, orderID uint64, items []model.OrderItem, keepUnmatched bool) error {
 	var existing []model.OrderItem
 	if err := r.db.Where("tenant_id = ? AND order_id = ?", tenantID, orderID).
 		Order("id ASC").Find(&existing).Error; err != nil {
@@ -489,6 +502,13 @@ func (r *Repos) ReplaceItems(tenantID, orderID uint64, items []model.OrderItem) 
 		}
 	}
 
+	nextLine := 0
+	for _, root := range roots {
+		if root.LineNo > nextLine {
+			nextLine = root.LineNo
+		}
+	}
+
 	for i := range items {
 		it := &items[i]
 		it.TenantID = tenantID
@@ -503,6 +523,10 @@ func (r *Repos) ReplaceItems(tenantID, orderID uint64, items []model.OrderItem) 
 		matched := matchExistingRoot(roots, *it, used)
 		if matched == nil {
 			it.ID = 0
+			if keepUnmatched {
+				nextLine++
+				it.LineNo = nextLine
+			}
 			if err := r.db.Create(it).Error; err != nil {
 				return err
 			}
@@ -524,12 +548,12 @@ func (r *Repos) ReplaceItems(tenantID, orderID uint64, items []model.OrderItem) 
 				"product_name", "sku_specs", "pic_url", "quantity", "price", "total_amount",
 				"after_sale_status", "after_sale_status_text", "line_order_status", "updated_at").
 			Updates(map[string]any{
-				"line_no":                it.LineNo,
+				"line_no":                matched.LineNo,
 				"sku_id":                 it.SkuID,
 				"sku_code":               it.SkuCode,
 				"platform_sku_id":        it.PlatformSkuID,
 				"platform_item_id":       it.PlatformItemID,
-				"platform_oid":           it.PlatformOid,
+				"platform_oid":           firstNonEmptyRepo(it.PlatformOid, matched.PlatformOid),
 				"product_name":           it.ProductName,
 				"sku_specs":              it.SkuSpecs,
 				"pic_url":                it.PicURL,
@@ -553,12 +577,24 @@ func (r *Repos) ReplaceItems(tenantID, orderID uint64, items []model.OrderItem) 
 		if _, ok := parentHasChildren[root.ID]; ok {
 			continue
 		}
+		if keepUnmatched {
+			continue
+		}
 		if err := r.db.Where("tenant_id = ? AND id = ?", tenantID, root.ID).
 			Delete(&model.OrderItem{}).Error; err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func firstNonEmptyRepo(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 func matchExistingRoot(roots []model.OrderItem, want model.OrderItem, used map[uint64]struct{}) *model.OrderItem {
@@ -568,7 +604,18 @@ func matchExistingRoot(roots []model.OrderItem, want model.OrderItem, used map[u
 			strings.TrimSpace(productName) + "\x00" +
 			strings.TrimSpace(skuSpecs)
 	}
-	// 1) 平台子单号
+	// 0) 电商子单 oid（抖店）
+	if oid := strings.TrimSpace(want.PlatformOid); oid != "" {
+		for i := range roots {
+			if _, ok := used[roots[i].ID]; ok {
+				continue
+			}
+			if strings.TrimSpace(roots[i].PlatformOid) == oid {
+				return &roots[i]
+			}
+		}
+	}
+	// 1) 平台商品/货品 ID
 	if pid := strings.TrimSpace(want.PlatformItemID); pid != "" {
 		for i := range roots {
 			if _, ok := used[roots[i].ID]; ok {

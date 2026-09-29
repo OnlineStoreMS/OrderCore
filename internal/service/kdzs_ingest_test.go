@@ -97,8 +97,19 @@ func TestDeriveKDZSShippedSelf(t *testing.T) {
 		PlatformStatusText: "已发货",
 		AgentType:          1,
 	})
-	if !h.ApplySyncAlloc || h.Status != model.StatusAllocated || h.AllocType != model.AllocSelfShip || h.ShipStatus != model.ShipShipped {
-		t.Fatalf("shipped self hint=%+v", h)
+	if !h.ApplySyncAlloc || h.Status != model.StatusAllocated || h.AllocType != model.AllocChannelShip || h.ShipStatus != model.ShipShipped {
+		t.Fatalf("shipped self (no OSMS alloc) should be channel_ship, hint=%+v", h)
+	}
+}
+
+func TestDeriveKDZSCompletedSelfChannelShip(t *testing.T) {
+	h := deriveKDZSIngest(model.SourceKDZS, dto.IngestOrderRequest{
+		PlatformStatus:     "completed",
+		PlatformStatusText: "交易完成",
+		AgentType:          1,
+	})
+	if !h.ApplySyncAlloc || h.Status != model.StatusCompleted || h.AllocType != model.AllocChannelShip || h.ShipStatus != model.ShipShipped {
+		t.Fatalf("completed self (no OSMS alloc) should be channel_ship, hint=%+v", h)
 	}
 }
 

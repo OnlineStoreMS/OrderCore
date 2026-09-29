@@ -50,6 +50,10 @@ const sqlIsDropship = `(
 	OR COALESCE(dropship_mode, '') IN ('kdzs_factory', 'osms_supplier')
 )`
 
+const sqlIsChannelShip = `COALESCE(alloc_type, '') = 'channel_ship'`
+
+const sqlIsSelfShip = `(NOT (` + sqlIsDropship + `) AND NOT (` + sqlIsChannelShip + `))`
+
 const sqlOrderedAt = `COALESCE(ordered_at, created_at)`
 const sqlShippedAt = `COALESCE(shipped_at, updated_at)`
 
@@ -210,7 +214,7 @@ func (r *Repos) DashboardCards(tenantID uint64, rangeStart, rangeEnd time.Time, 
 		if dropship {
 			tx = tx.Where(sqlIsDropship)
 		} else {
-			tx = tx.Where("NOT " + sqlIsDropship)
+			tx = tx.Where(sqlIsSelfShip)
 		}
 		return amt, tx.Scan(&amt).Error
 	}
@@ -274,7 +278,7 @@ func (r *Repos) DailyOrderTrend(tenantID uint64, start, end time.Time, timeType 
 		Select(`to_char(date_trunc('day', `+dateExpr+`), 'YYYY-MM-DD') as day,
 			count(*) as cnt,
 			COALESCE(SUM(`+sqlAmt+`),0) as amt,
-			COALESCE(SUM(CASE WHEN NOT `+sqlIsDropship+` THEN `+sqlAmt+` ELSE 0 END),0) as self_amount,
+			COALESCE(SUM(CASE WHEN `+sqlIsSelfShip+` THEN `+sqlAmt+` ELSE 0 END),0) as self_amount,
 			COALESCE(SUM(CASE WHEN `+sqlIsDropship+` THEN `+sqlAmt+` ELSE 0 END),0) as dropship_amount`).
 		Where("tenant_id = ?", tenantID)
 	tx = scopeTrendTime(tx, timeType, start, endExclusive)

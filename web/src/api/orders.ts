@@ -195,6 +195,7 @@ const allocLabels: Record<string, string> = {
   self_ship: '自营发货',
   dropship: '代发发货',
   purchase_then_ship: '采购发货',
+  channel_ship: '渠道已发',
 }
 
 const dropshipLabels: Record<string, string> = {
