@@ -638,14 +638,12 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		}
 	}
 	if existing == nil && req.PlatformOrderID != "" {
-		// 同主单多包裹：并入已有销售单（按商品级再拆），不再另建
+		// 快递助手同主单多包裹（不同 sysTid）各自建履约单，与助手拆包一致；不再合并进主单。
+		// 仅缺 sysTid 时回退到同主单主履约单（兼容旧数据）。
 		if channel == model.SourceKDZS {
-			if keeper := s.findKDZSParentKeeper(tenantID, req.PlatformOrderID); keeper != nil {
-				existing = keeper
-				wantSys := strings.TrimSpace(req.PlatformSysTid)
-				haveSys := basePlatformSysTid(keeper.PlatformSysTid)
-				if wantSys != "" && haveSys != "" && wantSys != haveSys {
-					mergeSameParentPkg = true
+			if strings.TrimSpace(req.PlatformSysTid) == "" {
+				if keeper := s.findKDZSParentKeeper(tenantID, req.PlatformOrderID); keeper != nil {
+					existing = keeper
 				}
 			}
 		} else {
@@ -673,6 +671,10 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	shipStatus := hint.ShipStatus
 	platformStatus := coalesceStr(hint.PlatformStatus, req.PlatformStatus)
 	platformStatusText := coalesceStr(hint.PlatformStatusText, req.PlatformStatusText)
+	req.AfterSaleStatusText = normalizeAfterSaleText(req.AfterSaleStatus, req.AfterSaleStatusText)
+	for i := range req.Items {
+		req.Items[i].AfterSaleStatusText = normalizeAfterSaleText(req.Items[i].AfterSaleStatus, req.Items[i].AfterSaleStatusText)
+	}
 	if existing != nil {
 		fromStatus := existing.Status
 		terminalPre := existing.Status == model.StatusCompleted || existing.Status == model.StatusClosed
@@ -739,18 +741,27 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			if req.SellerFlag != nil {
 				fields["seller_flag"] = *req.SellerFlag
 			}
-			// 平台备注为空时不覆盖本地手工填写
+			// 卖家备注/买家留言：空不覆盖本地手工填写
 			if strings.TrimSpace(req.SellerRemark) == "" {
 				delete(fields, "seller_remark")
 			}
-			if strings.TrimSpace(req.FenFaRemark) == "" {
-				delete(fields, "fen_fa_remark")
-			}
-			if strings.TrimSpace(req.PrinterRemark) == "" {
-				delete(fields, "printer_remark")
-			}
 			if strings.TrimSpace(req.Remark) == "" {
 				delete(fields, "remark")
+			}
+			// 快递助手分发/打单备注：按包裹同步（含清空），与助手拆单字段一致
+			if channel != model.SourceKDZS {
+				if strings.TrimSpace(req.FenFaRemark) == "" {
+					delete(fields, "fen_fa_remark")
+				}
+				if strings.TrimSpace(req.PrinterRemark) == "" {
+					delete(fields, "printer_remark")
+				}
+			}
+			if mergeSameParentPkg {
+				// 旧合并路径：另一包裹备注不得冲掉主包裹备注
+				delete(fields, "fen_fa_remark")
+				delete(fields, "printer_remark")
+				delete(fields, "seller_remark")
 			}
 			// 已解密明文不被同步脱敏覆盖，避免重复解密
 			keepPlainReceiver := orderHasPlainReceiver(existing) && ingestReceiverMasked(req)
@@ -5590,10 +5601,11 @@ func ecommerceBlocksFulfillment(ecomStatus, ecomText, afterSale, afterSaleText s
 	as := strings.ToUpper(strings.TrimSpace(afterSale))
 	switch as {
 	case "WAIT_SELLER_AGREE", "WAIT_BUYER_RETURN_ITEM", "WAIT_SELLER_CONFIRM_RECEIVE",
-		"WAIT_BUYER_MODIFY", "WAIT_SEND_EXCHANGE_ITEM", "WAIT_RECEIVE_EXCHANGE_ITEM":
-		label := afterSaleText
-		if label == "" {
-			label = as
+		"WAIT_BUYER_MODIFY", "WAIT_SEND_EXCHANGE_ITEM", "WAIT_RECEIVE_EXCHANGE_ITEM",
+		"REFUND_MONEY_APPLY_ING", "REFUNDING", "IN_REFUND":
+		label := strings.TrimSpace(afterSaleText)
+		if label == "" || strings.EqualFold(label, as) {
+			label = afterSaleStatusLabel(as)
 		}
 		return true, "存在进行中售后（" + label + "），暂停分配/发货"
 	}
@@ -5638,6 +5650,35 @@ func ecommerceStatusText(code string) string {
 	default:
 		return code
 	}
+}
+
+func afterSaleStatusLabel(code string) string {
+	switch strings.ToUpper(strings.TrimSpace(code)) {
+	case "WAIT_SELLER_AGREE", "REFUND_MONEY_APPLY_ING":
+		return "申请退款中"
+	case "WAIT_BUYER_RETURN_ITEM":
+		return "等待买家退货"
+	case "WAIT_SELLER_CONFIRM_RECEIVE":
+		return "待卖家确认收货"
+	case "REFUNDING", "IN_REFUND":
+		return "退款中"
+	case "REFUND_SUCCESS", "REFUND_MONEY_FINISH", "REFUND_MONEY_SUCCESS", "REFUNDED":
+		return "退款完成"
+	default:
+		return code
+	}
+}
+
+// normalizeAfterSaleText 同步时若文案为空或等于状态码，补中文（如申请退款中）。
+func normalizeAfterSaleText(code, text string) string {
+	t := strings.TrimSpace(text)
+	c := strings.TrimSpace(code)
+	if t == "" || strings.EqualFold(t, c) {
+		if label := afterSaleStatusLabel(c); label != "" && label != c {
+			return label
+		}
+	}
+	return t
 }
 
 func kdzsPlatformStatusText(status string) string {

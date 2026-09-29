@@ -95,13 +95,23 @@ export function listItemMeta(it: OrderItem): { spec?: string; sku?: string } {
   }
 }
 
-/** 行级退款完成角标（对齐快递助手「全部」商品图角标） */
+/** 行级售后角标（对齐快递助手「全部」商品图角标） */
 export function itemRefundBadge(it: Pick<OrderItem, 'afterSaleStatus' | 'afterSaleStatusText' | 'lineOrderStatus'>): string {
   const text = (it.afterSaleStatusText || '').trim()
   if (/退款(完成|成功)/.test(text)) return '退款完成'
+  if (/申请退款|退款中|等待卖家同意|待卖家确认|等待买家退货/.test(text)) {
+    if (/申请退款|等待卖家同意/.test(text)) return '申请退款中'
+    if (/等待买家退货/.test(text)) return '等待买家退货'
+    if (/待卖家确认/.test(text)) return '待卖家确认收货'
+    return '退款中'
+  }
   const as = (it.afterSaleStatus || '').toUpperCase()
   if (/REFUND_(SUCCESS|MONEY_FINISH|MONEY_SUCCESS)|REFUNDED|SUCCESS_REFUND/.test(as)) return '退款完成'
   if (as.includes('REFUND') && /(SUCCESS|FINISH|DONE)/.test(as)) return '退款完成'
+  if (/REFUND_MONEY_APPLY_ING|REFUNDING|WAIT_SELLER_AGREE/.test(as)) return '申请退款中'
+  if (/WAIT_BUYER_RETURN_ITEM/.test(as)) return '等待买家退货'
+  if (/WAIT_SELLER_CONFIRM_RECEIVE/.test(as)) return '待卖家确认收货'
+  if (as.includes('REFUND') && /(APPLY|ING|WAIT)/.test(as) && !/NONE/.test(as)) return '退款中'
   return ''
 }
 
