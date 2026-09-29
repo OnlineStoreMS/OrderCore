@@ -33,7 +33,7 @@ import { copyToClipboard } from '../../utils/clipboard'
 import { pushOrder } from '../../api/settings'
 import { EXPRESS_COMPANIES, findExpressCompany } from '../../constants/expressCompanies'
 import SellerFlag from '../../components/SellerFlag.vue'
-import { itemRefundBadge } from '../../utils/orderItemTree'
+import { itemRefundBadge, listAllocatableRootItems, listItemTitle } from '../../utils/orderItemTree'
 
 const route = useRoute()
 const router = useRouter()
@@ -121,6 +121,9 @@ const allocForm = reactive({
   purchaseOrderId: '',
   remark: '',
 })
+const allocItemIds = ref<number[]>([])
+
+const allocatableItems = computed(() => listAllocatableRootItems(order.value?.items))
 
 const shipForm = reactive({
   expressCompany: '',
@@ -361,6 +364,7 @@ async function saveRemarks() {
 }
 
 async function openAllocate() {
+  allocItemIds.value = allocatableItems.value.map((it) => it.id!).filter(Boolean)
   allocVisible.value = true
   try {
     const [b, s] = await Promise.all([
@@ -386,6 +390,10 @@ function onSupplierPick(sid: number) {
 }
 
 async function submitAllocate() {
+  if (allocatableItems.value.length && !allocItemIds.value.length) {
+    ElMessage.warning('请至少勾选一件商品')
+    return
+  }
   try {
     order.value = await allocateOrder(id, {
       allocType: allocForm.allocType,
@@ -393,6 +401,7 @@ async function submitAllocate() {
       supplierName: allocForm.supplierName,
       purchaseOrderId: allocForm.purchaseOrderId,
       remark: allocForm.remark,
+      orderItemIds: allocItemIds.value.length ? allocItemIds.value : undefined,
     })
     syncRemarkForm(order.value)
     const poTip = order.value?.purchaseOrderId ? `，已生成供应商代发单 ${order.value.purchaseOrderId}` : ''
@@ -710,6 +719,18 @@ onMounted(load)
 
     <el-dialog v-model="allocVisible" title="订单分配" width="560px">
       <el-form label-width="110px">
+        <el-form-item v-if="allocatableItems.length" label="分配商品">
+          <el-checkbox-group v-model="allocItemIds">
+            <div v-for="it in allocatableItems" :key="it.id" class="ship-pick-row">
+              <el-checkbox :value="it.id">
+                {{ listItemTitle(it) }}
+                <span v-if="it.skuSpecs" class="muted"> · {{ it.skuSpecs }}</span>
+                <span class="muted"> ×{{ it.quantity || 1 }}</span>
+              </el-checkbox>
+            </div>
+          </el-checkbox-group>
+          <div class="hint">可勾选部分商品拆分分配（自营/代发可不同）；不勾等于整单。</div>
+        </el-form-item>
         <el-form-item label="分配类型">
           <el-radio-group v-model="allocForm.allocType">
             <el-radio value="self_ship">自营发货</el-radio>
@@ -718,7 +739,7 @@ onMounted(load)
           </el-radio-group>
         </el-form-item>
         <p v-if="order?.sourceChannel === 'kdzs'" class="alloc-tip">
-          自营/采购：快递助手改为自营。代发：按厂家绑定自动推厂家，无绑定则快递助手改自营。
+          自营/采购：快递助手改为自营。代发：按厂家绑定自动推厂家，无绑定则快递助手改自营。勾选部分商品时会先拆出履约子单。
         </p>
         <el-form-item v-if="allocForm.allocType === 'dropship'" label="OSMS供应商" required>
           <el-select

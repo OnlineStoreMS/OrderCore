@@ -1114,6 +1114,11 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	if err != nil {
 		return nil, err
 	}
+	o, err = s.resolveAllocateTarget(ctx, tenantID, operatorID, o, req.OrderItemIDs)
+	if err != nil {
+		return nil, err
+	}
+	orderID = o.ID
 	if o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
 		return nil, fmt.Errorf("当前状态不可分配")
 	}
@@ -1736,7 +1741,8 @@ func parseRemarkPurchaseAmount(raw string) (float64, bool) {
 }
 
 // BatchAllocateDropship 批量代发：同一供应商合并为一张 SupplyCore 代发采购单（多行明细），再逐单分配。
-func (s *OrderService) BatchAllocateDropship(ctx context.Context, tenantID, operatorID uint64, orderIDs []uint64, supplierID uint64, supplierName, bearerToken string) (map[string]any, error) {
+// itemIDsByOrder 非空时按商品级拆分后再合并建单。
+func (s *OrderService) BatchAllocateDropship(ctx context.Context, tenantID, operatorID uint64, orderIDs []uint64, supplierID uint64, supplierName, bearerToken string, itemIDsByOrder map[uint64][]uint64) (map[string]any, error) {
 	if supplierID == 0 {
 		return nil, fmt.Errorf("请选择供应商")
 	}
@@ -1772,7 +1778,12 @@ func (s *OrderService) BatchAllocateDropship(ctx context.Context, tenantID, oper
 		if len(o.Items) == 0 || !orderHasFulfillableItems(o) {
 			return nil, fmt.Errorf("%s 无商品明细", o.OrderNo)
 		}
-		orders = append(orders, o)
+		itemIDs := itemIDsByOrder[id]
+		target, rerr := s.resolveAllocateTarget(ctx, tenantID, operatorID, o, itemIDs)
+		if rerr != nil {
+			return nil, fmt.Errorf("%s: %w", o.OrderNo, rerr)
+		}
+		orders = append(orders, target)
 	}
 	if len(orders) == 0 {
 		return nil, fmt.Errorf("请选择有效订单")
@@ -2572,11 +2583,12 @@ func (s *OrderService) DeleteManualOrder(ctx context.Context, tenantID, orderID 
 
 // kdzsAgentSysTid 快递助手推单/撤单接口使用的 sysTid。
 // 手工单（DFHAND）建单 SuccessList/SuccessRealList 与电商含义不一致，setTradeAgentType 认的是平台单号（platform_order_id）。
+// 商品级拆单会给 sysTid 加 #split 后缀，调用助手时需还原真实包裹号。
 func kdzsAgentSysTid(o *model.Order) (sysTid, tid string) {
 	if o == nil {
 		return "", ""
 	}
-	sysTid = strings.TrimSpace(o.PlatformSysTid)
+	sysTid = basePlatformSysTid(o.PlatformSysTid)
 	tid = strings.TrimSpace(o.PlatformOrderID)
 	if strings.EqualFold(strings.TrimSpace(o.Platform), "DFHAND") || o.SourceChannel == model.SourceManual {
 		if tid != "" {
@@ -2587,6 +2599,43 @@ func kdzsAgentSysTid(o *model.Order) (sysTid, tid string) {
 		sysTid = tid
 	}
 	return sysTid, tid
+}
+
+// basePlatformSysTid 去掉拆单/去重后缀，得到快递助手真实 sysTid。
+func basePlatformSysTid(sysTid string) string {
+	s := strings.TrimSpace(sysTid)
+	for _, sep := range []string{"#split", "#dup", "#alloc"} {
+		if i := strings.Index(s, sep); i > 0 {
+			return s[:i]
+		}
+	}
+	return s
+}
+
+func orderItemPlatformOids(o *model.Order) []string {
+	if o == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" {
+			continue
+		}
+		if orderItemExcludedFromFulfillment(it) {
+			continue
+		}
+		oid := strings.TrimSpace(it.PlatformOid)
+		if oid == "" {
+			continue
+		}
+		if _, ok := seen[oid]; ok {
+			continue
+		}
+		seen[oid] = struct{}{}
+		out = append(out, oid)
+	}
+	return out
 }
 
 func (s *OrderService) cancelKDZSPush(ctx context.Context, o *model.Order, token string) error {
@@ -2624,12 +2673,16 @@ func (s *OrderService) setKDZSAgentType(ctx context.Context, o *model.Order, act
 	if tradeStatus == "" {
 		tradeStatus = model.KDZSWaitAudit
 	}
+	oids := orderItemPlatformOids(o)
+	split := o.SplitFromOrderID > 0 || strings.Contains(strings.TrimSpace(o.PlatformSysTid), "#split")
 	req := storesync.SetAgentTypeRequest{
 		Platform:    o.Platform,
 		TradeStatus: tradeStatus,
 		Action:      action,
 		FactoryID:   factoryID,
 		SysTids:     []string{sysTid},
+		OidList:     oids,
+		Split:       split && len(oids) > 0,
 	}
 	if tid != "" && tid != sysTid {
 		req.Tids = []string{tid}
@@ -4713,6 +4766,7 @@ func mapItems(tenantID, orderID uint64, items []dto.OrderItemInput) []model.Orde
 			SkuCode:             it.SkuCode,
 			PlatformSkuID:       it.PlatformSkuID,
 			PlatformItemID:      it.PlatformItemID,
+			PlatformOid:         strings.TrimSpace(it.PlatformOid),
 			ProductName:         it.ProductName,
 			SkuSpecs:            it.SkuSpecs,
 			PicURL:              it.PicURL,
@@ -4750,6 +4804,7 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 		items = append(items, dto.OrderItemInput{
 			PlatformSkuID:       g.SkuID,
 			PlatformItemID:      g.ItemID,
+			PlatformOid:         g.Oid,
 			ProductName:         g.Title,
 			SkuSpecs:            g.SkuName,
 			PicURL:              g.PicURL,
@@ -5025,6 +5080,10 @@ func (s *OrderService) reconcileSupersededSiblingPackages(ctx context.Context, t
 	if parent == "" || keeperSys == "" {
 		return
 	}
+	// 商品级拆出的履约子单与主单同 tid，不可互相覆盖删除
+	if keeper.SplitFromOrderID > 0 || strings.Contains(keeperSys, "#split") {
+		return
+	}
 	keeperTids := ingestAllPlatformIDs(req)
 	if len(keeperTids) == 0 {
 		keeperTids[parent] = struct{}{}
@@ -5041,6 +5100,9 @@ func (s *OrderService) reconcileSupersededSiblingPackages(ctx context.Context, t
 		}
 		otherSys := strings.TrimSpace(other.PlatformSysTid)
 		if otherSys == "" || otherSys == keeperSys {
+			continue
+		}
+		if other.SplitFromOrderID > 0 || strings.Contains(otherSys, "#split") {
 			continue
 		}
 		if !orderSafeToSupersedeAsChildDup(other) {

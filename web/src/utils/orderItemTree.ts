@@ -17,6 +17,11 @@ export function listOrderRootItems(items: OrderItem[] | undefined): OrderItem[] 
   return (items || []).filter((it) => !isSplitChildItem(it))
 }
 
+/** 可履约根行（排除已退款关闭），用于商品级分配勾选 */
+export function listAllocatableRootItems(items: OrderItem[] | undefined): OrderItem[] {
+  return listOrderRootItems(items).filter((it) => !itemRefundBadge(it) && (it.quantity || 0) > 0)
+}
+
 /** 详情用：根行 + └ 拆分子行（整单拆分单独分组） */
 export function buildItemTreeRows(items: OrderItem[] | undefined): ItemTreeRow[] {
   if (!items?.length) return []

@@ -361,6 +361,13 @@ func (h *Handlers) BatchDropship(c *gin.Context) {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	itemIDsByOrder := map[uint64][]uint64{}
+	for _, it := range req.Items {
+		if it.OrderID == 0 {
+			continue
+		}
+		itemIDsByOrder[it.OrderID] = append(itemIDsByOrder[it.OrderID], it.OrderItemIDs...)
+	}
 	stats, err := h.orders.BatchAllocateDropship(
 		c.Request.Context(),
 		authcontext.TenantID(c),
@@ -369,6 +376,7 @@ func (h *Handlers) BatchDropship(c *gin.Context) {
 		req.SupplierID,
 		req.SupplierName,
 		authcontext.BearerToken(c),
+		itemIDsByOrder,
 	)
 	if err != nil {
 		response.Fail(c, http.StatusBadRequest, err.Error())

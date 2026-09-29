@@ -135,8 +135,10 @@ type Order struct {
 	AllocatedAt   *time.Time `json:"allocatedAt,omitempty"`
 	ShippedAt     *time.Time `json:"shippedAt,omitempty"`
 	RawPayload    string     `gorm:"type:text" json:"rawPayload,omitempty"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	UpdatedAt     time.Time  `json:"updatedAt"`
+	// SplitFromOrderID 商品级拆分配产生的履约子单指向原销售单；0=未拆
+	SplitFromOrderID uint64 `gorm:"index;default:0" json:"splitFromOrderId,omitempty"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 
 	Items      []OrderItem      `gorm:"foreignKey:OrderID" json:"items,omitempty"`
 	Address    *OrderAddress    `gorm:"foreignKey:OrderID" json:"address,omitempty"`
@@ -155,7 +157,9 @@ type OrderItem struct {
 	SkuCode        string    `gorm:"size:64" json:"skuCode"`
 	PlatformSkuID  string    `gorm:"size:128" json:"platformSkuId"`
 	PlatformItemID string    `gorm:"size:128" json:"platformItemId"`
-	ProductName    string    `gorm:"size:512" json:"productName"`
+	// PlatformOid 电商子单号（抖店 oid）；商品级推厂家/拆包用
+	PlatformOid string `gorm:"size:128;index" json:"platformOid,omitempty"`
+	ProductName string `gorm:"size:512" json:"productName"`
 	SkuSpecs       string    `gorm:"size:256" json:"skuSpecs"`
 	PicURL         string    `gorm:"size:512" json:"picUrl"`
 	Quantity       int       `gorm:"not null" json:"quantity"`

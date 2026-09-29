@@ -53,6 +53,7 @@ type TradeGoods struct {
 	OuterID             string  `json:"outerId"`
 	SkuID               string  `json:"skuId"`
 	ItemID              string  `json:"itemId"`
+	Oid                 string  `json:"oid,omitempty"`
 	Price               float64 `json:"price"`
 	AfterSaleStatus     string  `json:"afterSaleStatus"`
 	AfterSaleStatusText string  `json:"afterSaleStatusText"`
@@ -248,6 +249,9 @@ type SetAgentTypeRequest struct {
 	FactoryID   string   `json:"factoryId"`
 	SysTids     []string `json:"sysTids"`
 	Tids        []string `json:"tids,omitempty"`
+	// OidList 商品级拆包：仅推这些子单；空=整包
+	OidList []string `json:"oidList,omitempty"`
+	Split   bool     `json:"split,omitempty"`
 }
 
 func (c *Client) SetOrderAgentType(ctx context.Context, token string, req SetAgentTypeRequest) error {

@@ -7,6 +7,7 @@ export interface OrderItem {
   skuCode?: string
   platformSkuId?: string
   platformItemId?: string
+  platformOid?: string
   productName?: string
   skuSpecs?: string
   picUrl?: string
@@ -59,6 +60,7 @@ export interface Order {
   platform?: string
   platformOrderId?: string
   platformSysTid?: string
+  splitFromOrderId?: number
   shopId?: string
   shopName?: string
   manualSourceId?: number
@@ -433,6 +435,7 @@ export async function batchDropshipOrders(body: {
   orderIds: number[]
   supplierId: number
   supplierName?: string
+  items?: { orderId: number; orderItemIds: number[] }[]
 }) {
   return unwrap<{
     poNo: string

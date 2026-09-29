@@ -35,6 +35,7 @@ import {
   listItemMeta,
   listItemTitle,
   listOrderRootItems,
+  listAllocatableRootItems,
   itemRefundBadge,
 } from '../../utils/orderItemTree'
 
@@ -45,6 +46,8 @@ const batching = ref(false)
 const list = ref<Order[]>([])
 const total = ref(0)
 const selected = ref<Order[]>([])
+/** 订单 → 勾选的商品行 id；勾选整单时填入全部可履约根行 */
+const selectedItemIds = ref<Record<number, number[]>>({})
 
 const pageRef = ref<HTMLElement | null>(null)
 const toolbarRef = ref<HTMLElement | null>(null)
@@ -139,6 +142,7 @@ async function load() {
     list.value = data.list || []
     total.value = data.total || 0
     selected.value = []
+    selectedItemIds.value = {}
     await rebindWheel()
   } catch (e: any) {
     ElMessage.error(e.message || '加载失败')
@@ -215,6 +219,52 @@ watch(
 
 function onSelectionChange(rows: Order[]) {
   selected.value = rows
+  const next: Record<number, number[]> = {}
+  for (const o of rows) {
+    const prev = selectedItemIds.value[o.id]
+    if (prev?.length) {
+      next[o.id] = prev
+    } else {
+      next[o.id] = listAllocatableRootItems(o.items).map((it) => it.id!).filter(Boolean)
+    }
+  }
+  selectedItemIds.value = next
+}
+
+function isItemSelected(orderId: number, itemId?: number) {
+  if (!itemId) return false
+  return (selectedItemIds.value[orderId] || []).includes(itemId)
+}
+
+function toggleItemSelect(order: Order, itemId: number | undefined, checked: boolean) {
+  if (!itemId) return
+  const allIds = listAllocatableRootItems(order.items).map((it) => it.id!).filter(Boolean)
+  let cur = [...(selectedItemIds.value[order.id] || [])]
+  if (checked) {
+    if (!cur.includes(itemId)) cur.push(itemId)
+  } else {
+    cur = cur.filter((id) => id !== itemId)
+  }
+  selectedItemIds.value = { ...selectedItemIds.value, [order.id]: cur }
+  const table = tableRef.value as any
+  if (!table?.toggleRowSelection) return
+  if (cur.length === 0) {
+    table.toggleRowSelection(order, false)
+    selected.value = selected.value.filter((o) => o.id !== order.id)
+  } else if (!selected.value.some((o) => o.id === order.id)) {
+    table.toggleRowSelection(order, true)
+    selected.value = [...selected.value, order]
+  } else if (cur.length === allIds.length || cur.length > 0) {
+    // keep selected
+  }
+}
+
+function itemIdsForOrder(o: Order): number[] | undefined {
+  const ids = selectedItemIds.value[o.id]
+  if (!ids?.length) return undefined
+  const all = listAllocatableRootItems(o.items).map((it) => it.id!).filter(Boolean)
+  if (ids.length >= all.length) return undefined
+  return ids
 }
 
 async function ensureSuppliers() {
@@ -286,7 +336,10 @@ async function runBatch(
 async function batchSelfShip() {
   const rows = selected.value.filter((o) => o.status === 'pending_alloc' || o.status === 'pending_ship')
   await runBatch(rows, '批量自营发货', async (o) => {
-    await allocateOrder(o.id, { allocType: 'self_ship' })
+    await allocateOrder(o.id, {
+      allocType: 'self_ship',
+      orderItemIds: itemIdsForOrder(o),
+    })
   })
 }
 
@@ -328,6 +381,12 @@ async function submitBatchDropship() {
       orderIds: rows.map((o) => o.id),
       supplierId: dropshipForm.supplierId,
       supplierName: dropshipForm.supplierName,
+      items: rows
+        .map((o) => {
+          const ids = itemIdsForOrder(o)
+          return ids?.length ? { orderId: o.id, orderItemIds: ids } : null
+        })
+        .filter(Boolean) as { orderId: number; orderItemIds: number[] }[],
     })
     const failHint = res.failed ? `，失败 ${res.failed}` : ''
     ElMessage.success(
@@ -422,7 +481,7 @@ onMounted(load)
         type="info"
         :closable="false"
         title="分配说明"
-        description="自营发货：本仓发货后填单号回传；代发发货：快递助手厂家代发（推送即可）或 OSMS 供应商代发（线下沟通后填单号）；采购发货：先采购到货再自营发出。可勾选多单批量操作。"
+        description="可勾选整单，也可勾选单内部分商品做商品级分配（部分勾选会拆出履约子单）。自营：本仓发货后填单号；代发：厂家绑定推快递助手，或 OSMS 供应商线下代发。"
         show-icon
       />
     </div>
@@ -451,7 +510,7 @@ onMounted(load)
       <el-table-column label="买家" min-width="120" show-overflow-tooltip>
         <template #default="{ row }">{{ row.buyerNick || row.buyerName || '-' }}</template>
       </el-table-column>
-      <el-table-column label="商品" min-width="260">
+      <el-table-column label="商品" min-width="300">
         <template #default="{ row }">
           <div v-if="listOrderRootItems(row.items).length" class="goods-list">
             <div
@@ -459,6 +518,13 @@ onMounted(load)
               :key="it.id || idx"
               class="goods-row"
             >
+              <el-checkbox
+                v-if="(row.status === 'pending_alloc' || row.status === 'pending_ship') && it.id && !itemRefundBadge(it)"
+                class="goods-check"
+                :model-value="isItemSelected(row.id, it.id)"
+                @click.stop
+                @change="(v: boolean | string | number) => toggleItemSelect(row, it.id, !!v)"
+              />
               <div class="goods-pic-wrap">
                 <el-image
                   v-if="it.picUrl"
@@ -654,6 +720,7 @@ onMounted(load)
 .pager { display: flex; justify-content: flex-end; flex-shrink: 0; }
 .goods-list { display: flex; flex-direction: column; gap: 8px; }
 .goods-row { display: flex; gap: 8px; align-items: flex-start; }
+.goods-check { margin-top: 10px; flex-shrink: 0; }
 .goods-pic-wrap { position: relative; width: 48px; height: 48px; flex-shrink: 0; }
 .goods-pic { width: 48px; height: 48px; border-radius: 4px; flex-shrink: 0; background: #f5f5f5; display: block; }
 .goods-pic-empty {

@@ -66,6 +66,7 @@ type OrderItemInput struct {
 	SkuCode             string  `json:"skuCode"`
 	PlatformSkuID       string  `json:"platformSkuId"`
 	PlatformItemID      string  `json:"platformItemId"`
+	PlatformOid         string  `json:"platformOid,omitempty"`
 	ProductName         string  `json:"productName"`
 	SkuSpecs            string  `json:"skuSpecs"`
 	PicURL              string  `json:"picUrl"`
@@ -136,12 +137,21 @@ type AllocateRequest struct {
 	FactoryName     string `json:"factoryName"`
 	PurchaseOrderID string `json:"purchaseOrderId"`
 	Remark          string `json:"remark"`
+	// OrderItemIDs 商品级分配：勾选的销售根行；空=整单。部分勾选时先拆出履约子单再分配。
+	OrderItemIDs []uint64 `json:"orderItemIds,omitempty"`
 }
 
 type BatchDropshipRequest struct {
 	OrderIDs     []uint64 `json:"orderIds" binding:"required,min=1"`
 	SupplierID   uint64   `json:"supplierId" binding:"required"`
 	SupplierName string   `json:"supplierName"`
+	// Items 可选：按单指定商品行；缺省或空=该单全部待分配商品
+	Items []BatchDropshipItem `json:"items,omitempty"`
+}
+
+type BatchDropshipItem struct {
+	OrderID      uint64   `json:"orderId"`
+	OrderItemIDs []uint64 `json:"orderItemIds"`
 }
 
 // RelinkPurchaseOrderRequest 代发单合并后，把销售单上的采购单号批量改到目标单。

@@ -442,6 +442,15 @@ func (r *Repos) DeleteOrderCascade(tenantID, orderID uint64) error {
 	})
 }
 
+func (r *Repos) MoveOrderItems(tenantID, fromOrderID, toOrderID uint64, itemIDs []uint64) error {
+	if len(itemIDs) == 0 {
+		return nil
+	}
+	return r.db.Model(&model.OrderItem{}).
+		Where("tenant_id = ? AND order_id = ? AND id IN ?", tenantID, fromOrderID, itemIDs).
+		Updates(map[string]any{"order_id": toOrderID, "updated_at": time.Now()}).Error
+}
+
 func (r *Repos) UpdateOrderFields(tenantID, id uint64, fields map[string]interface{}) error {
 	res := r.db.Model(&model.Order{}).Where("tenant_id = ? AND id = ?", tenantID, id).Updates(fields)
 	if res.Error != nil {
@@ -511,7 +520,7 @@ func (r *Repos) ReplaceItems(tenantID, orderID uint64, items []model.OrderItem) 
 		}
 		if err := r.db.Model(&model.OrderItem{}).
 			Where("tenant_id = ? AND id = ?", tenantID, matched.ID).
-			Select("line_no", "sku_id", "sku_code", "platform_sku_id", "platform_item_id",
+			Select("line_no", "sku_id", "sku_code", "platform_sku_id", "platform_item_id", "platform_oid",
 				"product_name", "sku_specs", "pic_url", "quantity", "price", "total_amount",
 				"after_sale_status", "after_sale_status_text", "line_order_status", "updated_at").
 			Updates(map[string]any{
@@ -520,6 +529,7 @@ func (r *Repos) ReplaceItems(tenantID, orderID uint64, items []model.OrderItem) 
 				"sku_code":               it.SkuCode,
 				"platform_sku_id":        it.PlatformSkuID,
 				"platform_item_id":       it.PlatformItemID,
+				"platform_oid":           it.PlatformOid,
 				"product_name":           it.ProductName,
 				"sku_specs":              it.SkuSpecs,
 				"pic_url":                it.PicURL,
