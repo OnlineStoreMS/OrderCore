@@ -33,7 +33,7 @@ import { copyToClipboard } from '../../utils/clipboard'
 import { pushOrder } from '../../api/settings'
 import { EXPRESS_COMPANIES, findExpressCompany } from '../../constants/expressCompanies'
 import SellerFlag from '../../components/SellerFlag.vue'
-import { itemRefundBadge, listAllocatableRootItems, listItemTitle } from '../../utils/orderItemTree'
+import { allocItemLabel, itemRefundBadge, listAllocatableRootItems } from '../../utils/orderItemTree'
 
 const route = useRoute()
 const router = useRouter()
@@ -729,8 +729,7 @@ onMounted(load)
           <el-checkbox-group v-model="allocItemIds">
             <div v-for="it in allocatableItems" :key="it.id" class="ship-pick-row">
               <el-checkbox :value="it.id">
-                {{ listItemTitle(it) }}
-                <span v-if="it.skuSpecs" class="muted"> · {{ it.skuSpecs }}</span>
+                {{ allocItemLabel(it) }}
                 <span class="muted"> ×{{ it.quantity || 1 }}</span>
               </el-checkbox>
             </div>

@@ -84,6 +84,15 @@ export function listItemTitle(it: OrderItem): string {
   return (it.productName || it.skuCode || '商品').trim() || '商品'
 }
 
+/** 分配勾选行：只显示规格（无规格再退 SKU） */
+export function allocItemLabel(it: Pick<OrderItem, 'skuSpecs' | 'skuCode'>): string {
+  const spec = (it.skuSpecs || '').trim()
+  if (spec) return spec
+  const sku = (it.skuCode || '').trim()
+  if (sku) return sku
+  return '规格'
+}
+
 /** 列表规格/SKU 副行：与标题相同则隐藏 */
 export function listItemMeta(it: OrderItem): { spec?: string; sku?: string } {
   const title = listItemTitle(it)

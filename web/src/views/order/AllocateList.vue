@@ -32,6 +32,7 @@ import { dateShortcuts, dateRangeDefaultTime, formatDateTimeLocal } from '../../
 import { copyToClipboard } from '../../utils/clipboard'
 import { bindTableShiftWheel, useTableFillHeight } from '../../composables/useTableFillHeight'
 import {
+  allocItemLabel,
   listItemMeta,
   listItemTitle,
   listOrderRootItems,
@@ -540,10 +541,17 @@ onMounted(load)
                 <span v-if="itemRefundBadge(it)" class="goods-refund-badge">{{ itemRefundBadge(it) }}</span>
               </div>
               <div class="goods-info">
-                <div class="goods-title">{{ listItemTitle(it) }}</div>
+                <div class="goods-title">{{
+                  row.status === 'pending_alloc' || row.status === 'pending_ship'
+                    ? allocItemLabel(it)
+                    : listItemTitle(it)
+                }}</div>
                 <template v-for="meta in [listItemMeta(it)]" :key="`${it.id || idx}-meta`">
-                  <div v-if="meta.spec || meta.sku" class="goods-meta">
-                    <span v-if="meta.spec">{{ meta.spec }}</span>
+                  <div
+                    v-if="(meta.spec && !(row.status === 'pending_alloc' || row.status === 'pending_ship')) || meta.sku"
+                    class="goods-meta"
+                  >
+                    <span v-if="meta.spec && !(row.status === 'pending_alloc' || row.status === 'pending_ship')">{{ meta.spec }}</span>
                     <span v-if="meta.sku">SKU {{ meta.sku }}</span>
                   </div>
                 </template>
