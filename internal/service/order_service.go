@@ -2552,6 +2552,12 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 	if err != nil {
 		return nil, err
 	}
+	// 商品级拆分子单：双方都已空闲时合回原销售单
+	if merged, merr := s.mergeAllocSplitAfterRevoke(ctx, tenantID, operatorID, orderID); merr != nil {
+		return nil, merr
+	} else if merged != nil {
+		return merged, nil
+	}
 	return s.repos.GetOrder(tenantID, orderID)
 }
 
@@ -4011,15 +4017,29 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 						return syncKDZSStats(created, updated, fetched, reportedTotal), err
 					}
 				}
-				result, err := s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
-					Platform:      platform,
-					ShopID:        req.ShopID,
-					TradeStatus:   status,
-					PageNo:        page,
-					PageSize:      pageSize,
-					StartDateTime: startTime,
-					EndDateTime:   endTime,
-				})
+				var result *storesync.OrderListResult
+				var err error
+				for attempt := 0; attempt < 8; attempt++ {
+					result, err = s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
+						Platform:      platform,
+						ShopID:        req.ShopID,
+						TradeStatus:   status,
+						PageNo:        page,
+						PageSize:      pageSize,
+						StartDateTime: startTime,
+						EndDateTime:   endTime,
+					})
+					if err == nil {
+						break
+					}
+					if !isKDZSRateLimitErr(err) {
+						return syncKDZSStats(created, updated, fetched, reportedTotal), err
+					}
+					log.Printf("[ordercore] sync kdzs rate-limited platform=%s status=%s page=%d attempt=%d: %v", platform, status, page, attempt+1, err)
+					if err := sleepKDZSRateLimit(ctx, attempt); err != nil {
+						return syncKDZSStats(created, updated, fetched, reportedTotal), err
+					}
+				}
 				if err != nil {
 					return syncKDZSStats(created, updated, fetched, reportedTotal), err
 				}
@@ -4081,7 +4101,33 @@ func sleepKDZSGap(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(3500 * time.Millisecond):
+	case <-time.After(5 * time.Second):
+		return nil
+	}
+}
+
+func isKDZSRateLimitErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "过于频繁") || strings.Contains(msg, "811")
+}
+
+func sleepKDZSRateLimit(ctx context.Context, attempt int) error {
+	// 限流后退避：5s、10s、20s、30s…
+	shift := attempt
+	if shift > 3 {
+		shift = 3
+	}
+	d := time.Duration(5*(1<<shift)) * time.Second
+	if d > 30*time.Second {
+		d = 30 * time.Second
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
 		return nil
 	}
 }
@@ -4108,8 +4154,8 @@ func (s *OrderService) syncKDZSByTid(ctx context.Context, tenantID, operatorID u
 			PageSize:    5,
 		})
 		if err != nil {
-			if strings.Contains(err.Error(), "过于频繁") || strings.Contains(err.Error(), "811") {
-				_ = sleepKDZSGap(ctx)
+			if isKDZSRateLimitErr(err) {
+				_ = sleepKDZSRateLimit(ctx, i)
 				continue
 			}
 			return nil, err

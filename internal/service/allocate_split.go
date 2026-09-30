@@ -233,3 +233,125 @@ func (s *OrderService) splitOrderForAllocate(ctx context.Context, tenantID, oper
 	log.Printf("[ordercore] alloc-split parent=%s -> child=%s items=%d", parent.OrderNo, out.OrderNo, len(selectedRoots))
 	return out, nil
 }
+
+// orderEligibleForAllocSplitMerge 撤回分配后可合回原单：未发货、无履约占用。
+func orderEligibleForAllocSplitMerge(o *model.Order) bool {
+	if o == nil {
+		return false
+	}
+	if o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
+		return false
+	}
+	if o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
+		return false
+	}
+	if strings.TrimSpace(o.AllocType) != "" {
+		return false
+	}
+	if strings.TrimSpace(o.PurchaseOrderID) != "" || strings.TrimSpace(o.SelfOrderNo) != "" {
+		return false
+	}
+	return true
+}
+
+// mergeAllocSplitAfterRevoke 商品级拆分子单在撤回分配后，若双方都空闲则合回原销售单。
+// 返回合单后的原单；无需合并时返回 (nil, nil)。
+func (s *OrderService) mergeAllocSplitAfterRevoke(ctx context.Context, tenantID, operatorID, revokedOrderID uint64) (*model.Order, error) {
+	_ = ctx
+	o, err := s.repos.GetOrder(tenantID, revokedOrderID)
+	if err != nil {
+		// 子单可能已被合回删除
+		return nil, nil
+	}
+	if o.SplitFromOrderID > 0 {
+		return s.tryMergeSplitChildIntoParent(tenantID, operatorID, o)
+	}
+	children, err := s.repos.ListBySplitFromOrderID(tenantID, o.ID)
+	if err != nil {
+		return nil, err
+	}
+	mergedAny := false
+	for i := range children {
+		ch := &children[i]
+		if !orderEligibleForAllocSplitMerge(ch) {
+			continue
+		}
+		if _, err := s.tryMergeSplitChildIntoParent(tenantID, operatorID, ch); err != nil {
+			return nil, err
+		}
+		mergedAny = true
+	}
+	if !mergedAny {
+		return nil, nil
+	}
+	return s.repos.GetOrder(tenantID, o.ID)
+}
+
+func (s *OrderService) tryMergeSplitChildIntoParent(tenantID, operatorID uint64, child *model.Order) (*model.Order, error) {
+	if child == nil || child.SplitFromOrderID == 0 {
+		return nil, nil
+	}
+	if !orderEligibleForAllocSplitMerge(child) {
+		return nil, nil
+	}
+	parent, err := s.repos.GetOrder(tenantID, child.SplitFromOrderID)
+	if err != nil {
+		return nil, fmt.Errorf("合回原单失败：原销售单不存在")
+	}
+	if !orderEligibleForAllocSplitMerge(parent) {
+		// 原单仍占用中：仅保持子单待分配，下次原单也撤回后再合
+		return nil, nil
+	}
+
+	moveIDs := make([]uint64, 0, len(child.Items))
+	for _, it := range child.Items {
+		moveIDs = append(moveIDs, it.ID)
+	}
+	if len(moveIDs) == 0 {
+		// 空壳子单直接删
+		if err := s.repos.DeleteOrderCascade(tenantID, child.ID); err != nil {
+			return nil, err
+		}
+		return s.repos.GetOrder(tenantID, parent.ID)
+	}
+
+	childPay := child.PayAmount
+	if childPay <= 0 {
+		childPay = sumItemAmounts(child.Items)
+	}
+	parentPay := roundMoney(parent.PayAmount + childPay)
+
+	err = s.repos.Transaction(func(tx *repo.Repos) error {
+		if err := tx.MoveOrderItems(tenantID, child.ID, parent.ID, moveIDs); err != nil {
+			return err
+		}
+		if err := tx.UpdateOrderFields(tenantID, parent.ID, map[string]any{
+			"pay_amount":     parentPay,
+			"total_amount":   parentPay,
+			"freight_amount": 0,
+		}); err != nil {
+			return err
+		}
+		return tx.AddStatusLog(&model.OrderStatusLog{
+			TenantID:   tenantID,
+			OrderID:    parent.ID,
+			FromStatus: parent.Status,
+			ToStatus:   parent.Status,
+			Action:     "alloc_split_merge",
+			Remark:     fmt.Sprintf("撤回分配后合回拆分子单 %s（%d 行）", child.OrderNo, len(moveIDs)),
+			OperatorID: operatorID,
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("合回原销售单失败: %w", err)
+	}
+	if err := s.repos.DeleteOrderCascade(tenantID, child.ID); err != nil {
+		return nil, fmt.Errorf("合回后清理拆分子单失败: %w", err)
+	}
+	out, err := s.repos.GetOrder(tenantID, parent.ID)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("[ordercore] alloc-split-merge child=%s -> parent=%s items=%d", child.OrderNo, out.OrderNo, len(moveIDs))
+	return out, nil
+}

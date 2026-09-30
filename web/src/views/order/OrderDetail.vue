@@ -415,7 +415,7 @@ async function submitAllocate() {
 async function onRevokeAllocate() {
   try {
     await ElMessageBox.confirm(
-      '确认撤回分配？将同步在快递助手撤单（回到待推单），订单中心恢复为待分配。',
+      '确认撤回分配？将同步在快递助手撤单（回到待推单），订单中心恢复为待分配；若为商品级拆分子单且原单也空闲，将自动合回原销售单。',
       '撤回分配',
       {
         type: 'warning',
@@ -423,8 +423,14 @@ async function onRevokeAllocate() {
         cancelButtonText: '取消',
       },
     )
+    const prevId = id
     order.value = await revokeAllocateOrder(id)
     syncRemarkForm(order.value)
+    if (order.value?.id && order.value.id !== prevId) {
+      ElMessage.success(`已撤回分配并合回原销售单 ${order.value.orderNo || ''}`)
+      await router.replace(`/orders/${order.value.id}`)
+      return
+    }
     ElMessage.success('已撤回分配（快递助手已同步）')
   } catch (e: any) {
     if (e === 'cancel' || e === 'close') return

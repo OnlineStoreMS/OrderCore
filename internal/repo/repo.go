@@ -455,6 +455,19 @@ func (r *Repos) MoveOrderItems(tenantID, fromOrderID, toOrderID uint64, itemIDs 
 		Updates(map[string]any{"order_id": toOrderID, "updated_at": time.Now()}).Error
 }
 
+// ListBySplitFromOrderID 商品级拆分配产生的履约子单（SplitFromOrderID = 原销售单）。
+func (r *Repos) ListBySplitFromOrderID(tenantID, parentOrderID uint64) ([]model.Order, error) {
+	if parentOrderID == 0 {
+		return nil, nil
+	}
+	var list []model.Order
+	err := r.db.Where("tenant_id = ? AND split_from_order_id = ?", tenantID, parentOrderID).
+		Preload("Items").
+		Order("id asc").
+		Find(&list).Error
+	return list, err
+}
+
 func (r *Repos) UpdateOrderFields(tenantID, id uint64, fields map[string]interface{}) error {
 	res := r.db.Model(&model.Order{}).Where("tenant_id = ? AND id = ?", tenantID, id).Updates(fields)
 	if res.Error != nil {
