@@ -116,7 +116,14 @@ const dropshipForm = reactive({
   supplierName: '',
 })
 
-const selectedCount = computed(() => selected.value.length)
+const selectedOrderCount = computed(() => new Set(selected.value.map((o) => o.id).filter(Boolean)).size)
+const selectedItemCount = computed(() => {
+  let n = 0
+  for (const id of new Set(selected.value.map((o) => o.id).filter(Boolean))) {
+    n += selectedItemIds.value[id]?.length || 0
+  }
+  return n
+})
 const canBatchAllocate = computed(() =>
   selected.value.some((o) => o.status === 'pending_alloc' || o.status === 'pending_ship'),
 )
@@ -219,9 +226,17 @@ watch(
 )
 
 function onSelectionChange(rows: Order[]) {
-  selected.value = rows
-  const next: Record<number, number[]> = {}
+  // el-table 偶发带重复行；按 id 去重
+  const uniq: Order[] = []
+  const seen = new Set<number>()
   for (const o of rows) {
+    if (!o?.id || seen.has(o.id)) continue
+    seen.add(o.id)
+    uniq.push(o)
+  }
+  selected.value = uniq
+  const next: Record<number, number[]> = {}
+  for (const o of uniq) {
     const prev = selectedItemIds.value[o.id]
     if (prev?.length) {
       next[o.id] = prev
@@ -239,7 +254,6 @@ function isItemSelected(orderId: number, itemId?: number) {
 
 function toggleItemSelect(order: Order, itemId: number | undefined, checked: boolean) {
   if (!itemId) return
-  const allIds = listAllocatableRootItems(order.items).map((it) => it.id!).filter(Boolean)
   let cur = [...(selectedItemIds.value[order.id] || [])]
   if (checked) {
     if (!cur.includes(itemId)) cur.push(itemId)
@@ -248,15 +262,20 @@ function toggleItemSelect(order: Order, itemId: number | undefined, checked: boo
   }
   selectedItemIds.value = { ...selectedItemIds.value, [order.id]: cur }
   const table = tableRef.value as any
-  if (!table?.toggleRowSelection) return
+  if (!table?.toggleRowSelection) {
+    // 无表格选择 API 时直接维护 selected，并去重
+    if (cur.length === 0) {
+      selected.value = selected.value.filter((o) => o.id !== order.id)
+    } else if (!selected.value.some((o) => o.id === order.id)) {
+      selected.value = [...selected.value, order]
+    }
+    return
+  }
+  // 只调表格 API，由 @selection-change 统一写 selected，避免重复计入
   if (cur.length === 0) {
     table.toggleRowSelection(order, false)
-    selected.value = selected.value.filter((o) => o.id !== order.id)
   } else if (!selected.value.some((o) => o.id === order.id)) {
     table.toggleRowSelection(order, true)
-    selected.value = [...selected.value, order]
-  } else if (cur.length === allIds.length || cur.length > 0) {
-    // keep selected
   }
 }
 
@@ -471,7 +490,7 @@ onMounted(load)
         />
       </div>
       <div class="batch-actions">
-        <span v-if="selectedCount" class="muted">已选 {{ selectedCount }}</span>
+        <span v-if="selectedOrderCount" class="muted">已选 {{ selectedOrderCount }} 单 / {{ selectedItemCount }} 件</span>
         <el-button :disabled="!canBatchAllocate" :loading="batching" @click="batchSelfShip">批量自营</el-button>
         <el-button type="primary" :disabled="!canBatchAllocate" :loading="batching" @click="openBatchDropship">批量代发</el-button>
         <el-button type="warning" plain :disabled="!canBatchRevoke" :loading="batching" @click="batchRevoke">批量撤回</el-button>
