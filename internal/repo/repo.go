@@ -3,6 +3,7 @@ package repo
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -198,7 +199,8 @@ func (r *Repos) FenFaRemarksByOrderNos(tenantID uint64, orderNos []string) (map[
 		}
 		part := nos[i:end]
 		var list []model.Order
-		err := r.db.Select("order_no, platform_order_id, fen_fa_remark").
+		err := r.db.Preload("Packages").
+			Select("id, order_no, platform_order_id, fen_fa_remark").
 			Where("tenant_id = ? AND (order_no IN ? OR platform_order_id IN ?)", tenantID, part, part).
 			Find(&list).Error
 		if err != nil {
@@ -206,6 +208,34 @@ func (r *Repos) FenFaRemarksByOrderNos(tenantID uint64, orderNos []string) (map[
 		}
 		for _, o := range list {
 			remark := strings.TrimSpace(o.FenFaRemark)
+			if remark == "" {
+				// 头表空：汇总包裹分发备注（与 Get 水合一致）
+				var sum float64
+				nNum := 0
+				first := ""
+				for _, p := range o.Packages {
+					t := strings.TrimSpace(p.FenFaRemark)
+					if t == "" {
+						continue
+					}
+					if first == "" {
+						first = t
+					}
+					if v, err := strconv.ParseFloat(strings.TrimRight(strings.TrimSpace(t), "元块￥$ "), 64); err == nil && v >= 0 {
+						sum += v
+						nNum++
+					}
+				}
+				if nNum > 1 && sum > 0 {
+					if sum == float64(int64(sum)) {
+						remark = strconv.FormatInt(int64(sum), 10)
+					} else {
+						remark = strconv.FormatFloat(sum, 'f', 2, 64)
+					}
+				} else {
+					remark = first
+				}
+			}
 			if o.OrderNo != "" {
 				out[o.OrderNo] = remark
 			}

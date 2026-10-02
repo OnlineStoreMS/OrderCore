@@ -139,7 +139,71 @@ func (s *OrderService) LookupOrderSummaries(tenantID uint64, orderNos []string) 
 }
 
 func (s *OrderService) Get(tenantID, id uint64) (*model.Order, error) {
-	return s.repos.GetOrder(tenantID, id)
+	o, err := s.repos.GetOrder(tenantID, id)
+	if err != nil {
+		return nil, err
+	}
+	hydrateOrderPackageRemarks(o)
+	return o, nil
+}
+
+// hydrateOrderPackageRemarks 头表备注为空时，用 order_packages 汇总补齐（供货商同步采购价读头表 fenFaRemark）。
+func hydrateOrderPackageRemarks(o *model.Order) {
+	if o == nil {
+		return
+	}
+	if strings.TrimSpace(o.FenFaRemark) == "" {
+		if fen := effectivePackageFenFaRemark(o); fen != "" {
+			o.FenFaRemark = fen
+		}
+	}
+	if strings.TrimSpace(o.PrinterRemark) == "" {
+		for _, p := range o.Packages {
+			if pr := strings.TrimSpace(p.PrinterRemark); pr != "" {
+				o.PrinterRemark = pr
+				break
+			}
+		}
+	}
+}
+
+// effectivePackageFenFaRemark 多包裹分发备注：单条直接用；多条可解析数字则求和（合单总和），否则取首条非空。
+func effectivePackageFenFaRemark(o *model.Order) string {
+	if o == nil {
+		return ""
+	}
+	if fen := strings.TrimSpace(o.FenFaRemark); fen != "" {
+		return fen
+	}
+	texts := make([]string, 0, len(o.Packages))
+	var sum float64
+	allNumeric := true
+	for _, p := range o.Packages {
+		t := strings.TrimSpace(p.FenFaRemark)
+		if t == "" {
+			continue
+		}
+		texts = append(texts, t)
+		amt, ok := parseRemarkPurchaseAmount(t)
+		if !ok {
+			allNumeric = false
+			continue
+		}
+		sum += amt
+	}
+	if len(texts) == 0 {
+		return ""
+	}
+	if len(texts) == 1 {
+		return texts[0]
+	}
+	if allNumeric && sum > 0 {
+		if sum == float64(int64(sum)) {
+			return strconv.FormatInt(int64(sum), 10)
+		}
+		return strconv.FormatFloat(roundMoney(sum), 'f', 2, 64)
+	}
+	return texts[0]
 }
 
 func (s *OrderService) CreateManual(ctx context.Context, tenantID, operatorID uint64, req dto.ManualCreateOrderRequest, bearerToken string) (*model.Order, error) {
@@ -1058,12 +1122,18 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		s.syncShippingShippedAtFromOrder(ctx, o, bearerToken)
 		// 合单发货：分发备注只保留在第一单，其余清空（快递助手常复制到每单）
 		o = s.dedupeMergeShipFenFa(ctx, tenantID, o)
-		// 分发备注变更或合单去重后，补写未付款代发采购小计
-		if o != nil && strings.TrimSpace(o.PurchaseOrderID) != "" {
+		// 分发备注变更或合单去重后，补写未付款代发采购小计（含仅次包裹有备注的情况）
+		if o != nil && (strings.TrimSpace(o.PurchaseOrderID) != "" || orderHasAllocType(o, model.AllocDropship)) {
 			newFen := strings.TrimSpace(req.FenFaRemark)
 			oldFen := strings.TrimSpace(existing.FenFaRemark)
 			curFen := strings.TrimSpace(o.FenFaRemark)
-			if newFen != oldFen || curFen != oldFen || ingestHasLogistics(req) {
+			pkgFen := ""
+			if o.Packages != nil {
+				pkgFen = effectivePackageFenFaRemark(o)
+			} else if newFen != "" {
+				pkgFen = newFen
+			}
+			if newFen != oldFen || curFen != oldFen || pkgFen != oldFen || mergeSameParentPkg && newFen != "" || ingestHasLogistics(req) {
 				s.syncLinkedPOPurchasePrices(ctx, o, bearerToken)
 			}
 		}
@@ -1821,13 +1891,24 @@ func orderRemarkBySyncSource(o *model.Order, source string) string {
 	}
 	switch strings.TrimSpace(source) {
 	case "fen_fa_remark":
-		return o.FenFaRemark
+		if fen := strings.TrimSpace(o.FenFaRemark); fen != "" {
+			return fen
+		}
+		return effectivePackageFenFaRemark(o)
 	case "alloc_remark":
 		return o.AllocRemark
 	case "seller_remark":
 		return o.SellerRemark
 	case "printer_remark":
-		return o.PrinterRemark
+		if pr := strings.TrimSpace(o.PrinterRemark); pr != "" {
+			return pr
+		}
+		for _, p := range o.Packages {
+			if t := strings.TrimSpace(p.PrinterRemark); t != "" {
+				return t
+			}
+		}
+		return ""
 	default:
 		return ""
 	}
@@ -2855,7 +2936,7 @@ func (s *OrderService) upsertOrderPackageFromIngest(tenantID uint64, o *model.Or
 		return
 	}
 	saved, _ := s.repos.FindPackageBySysTid(tenantID, sysTid)
-	if saved != nil && saved.ID > 0 {
+		if saved != nil && saved.ID > 0 {
 		oids := make([]string, 0, len(req.Items))
 		for _, it := range req.Items {
 			if oid := strings.TrimSpace(it.PlatformOid); oid != "" {
@@ -2874,7 +2955,15 @@ func (s *OrderService) upsertOrderPackageFromIngest(tenantID uint64, o *model.Or
 		fields["printer_remark"] = req.PrinterRemark
 		if len(fields) > 0 {
 			_ = s.repos.UpdateOrderFields(tenantID, o.ID, fields)
+			o.FenFaRemark = req.FenFaRemark
+			o.PrinterRemark = req.PrinterRemark
 		}
+	} else if strings.TrimSpace(o.FenFaRemark) == "" && strings.TrimSpace(req.FenFaRemark) != "" {
+		// 次包裹有分发备注、头表为空：把头表补成有效备注，供采购价同步（多包裹数字会在 Get 时再汇总）
+		_ = s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{
+			"fen_fa_remark": req.FenFaRemark,
+		})
+		o.FenFaRemark = req.FenFaRemark
 	}
 }
 
@@ -3100,7 +3189,8 @@ func (s *OrderService) syncLinkedPOPurchasePrices(ctx context.Context, o *model.
 	if s.supply == nil || o == nil || strings.TrimSpace(bearerToken) == "" {
 		return
 	}
-	poNo := strings.TrimSpace(o.PurchaseOrderID)
+	hydrateOrderPackageRemarks(o)
+	poNos := orderDropshipPONos(o)
 	seen := map[uint64]struct{}{}
 	collect := func(list []supplycore.PurchaseOrderListItem) {
 		for _, it := range list {
@@ -3122,14 +3212,13 @@ func (s *OrderService) syncLinkedPOPurchasePrices(ctx context.Context, o *model.
 			}
 		}
 	}
-	// 合并代发单时单头 refSoId 只挂首单，优先按采购单号；再按本销售单 id 兜底
-	if poNo != "" {
+	for _, poNo := range poNos {
 		list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, 0, "dropship", poNo, 1, 20)
 		if err != nil {
 			log.Printf("[ordercore] list PO by no for price sync order=%s po=%s: %v", o.OrderNo, poNo, err)
-		} else {
-			collect(list)
+			continue
 		}
+		collect(list)
 	}
 	if o.ID > 0 {
 		list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, o.ID, "dropship", "", 1, 20)
