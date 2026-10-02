@@ -41,6 +41,7 @@ func AutoMigrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(
 		&model.Order{},
 		&model.OrderItem{},
+		&model.OrderPackage{},
 		&model.OrderAddress{},
 		&model.OrderStatusLog{},
 		&model.OrderShipment{},
@@ -156,6 +157,7 @@ func ensureIndexes(db *gorm.DB) error {
 			WHERE o.id = d.id AND d.rn > 1`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_source_systid ON orders (tenant_id, source_channel, platform_sys_tid) WHERE platform_sys_tid <> ''`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_source_ext ON orders (tenant_id, source_channel, external_ref_id) WHERE external_ref_id <> ''`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_order_packages_systid ON order_packages (tenant_id, platform_sys_tid) WHERE platform_sys_tid <> ''`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_ship_tenant_no ON order_shipments (tenant_id, shipment_no)`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_bind_supplier_factory ON supplier_source_bindings (tenant_id, source_channel, external_factory_id) WHERE status = 1`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_sku_supplier_rule_active ON sku_supplier_rules (tenant_id, sku_code) WHERE status = 1`,

@@ -137,7 +137,7 @@ type AllocateRequest struct {
 	FactoryName     string `json:"factoryName"`
 	PurchaseOrderID string `json:"purchaseOrderId"`
 	Remark          string `json:"remark"`
-	// OrderItemIDs 商品级分配：勾选的销售根行；空=整单。部分勾选时先拆出履约子单再分配。
+	// OrderItemIDs 商品级分配：勾选的销售根行；空=整单可履约根行。部分勾选时行级履约，不拆子单。
 	OrderItemIDs []uint64 `json:"orderItemIds,omitempty"`
 }
 

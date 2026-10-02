@@ -20,6 +20,17 @@ export interface OrderItem {
   parentOrderItemId?: number
   splitKind?: '' | 'partial' | 'full'
   shipPlanLineId?: number
+  packageId?: number
+  allocType?: string
+  dropshipMode?: string
+  supplierId?: number
+  supplierName?: string
+  factoryId?: string
+  factoryName?: string
+  purchaseOrderId?: string
+  selfOrderNo?: string
+  shipStatus?: string
+  allocatedAt?: string
 }
 
 export interface OrderAddress {
@@ -51,6 +62,17 @@ export interface OrderShipment {
   callbackMessage?: string
   shippedAt?: string
   items?: OrderShipmentItem[]
+}
+
+export interface OrderPackage {
+  id: number
+  platformSysTid: string
+  fenFaRemark?: string
+  printerRemark?: string
+  platformStatus?: string
+  platformStatusText?: string
+  mailNo?: string
+  isPrimary?: boolean
 }
 
 export interface Order {
@@ -105,6 +127,7 @@ export interface Order {
   shippedAt?: string
   createdAt?: string
   items?: OrderItem[]
+  packages?: OrderPackage[]
   address?: OrderAddress
   shipments?: OrderShipment[]
   statusLogs?: Array<{
@@ -196,6 +219,7 @@ const allocLabels: Record<string, string> = {
   dropship: '代发发货',
   purchase_then_ship: '采购发货',
   channel_ship: '渠道已发',
+  mixed: '混合分配',
 }
 
 const dropshipLabels: Record<string, string> = {

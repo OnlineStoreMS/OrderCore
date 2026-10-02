@@ -627,9 +627,55 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	var existing *model.Order
 	var err error
 	mergeSameParentPkg := false
-	// 抖店同一主单 tid 可对应多个快递助手包裹（不同 sysTid），优先按 sysTid 定位
-	if channel == model.SourceKDZS && strings.TrimSpace(req.PlatformSysTid) != "" {
-		existing, err = s.repos.FindByPlatformSysTid(tenantID, channel, req.PlatformSysTid)
+	reqSysTid := strings.TrimSpace(req.PlatformSysTid)
+	reqTid := strings.TrimSpace(req.PlatformOrderID)
+	// 一平台主单 tid → 一个 OC：同 tid 多 sysTid 并入 keeper，包裹写入 order_packages。
+	if channel == model.SourceKDZS {
+		if reqSysTid != "" {
+			existing, err = s.repos.FindByPlatformSysTid(tenantID, channel, reqSysTid)
+			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, false, err
+			}
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				existing = nil
+			}
+			// 历史影子单：sysTid 命中但同 tid 另有更好的 keeper → 并入 keeper
+			if existing != nil && reqTid != "" {
+				if keeper := s.findKDZSParentKeeper(tenantID, reqTid); keeper != nil && keeper.ID != existing.ID {
+					log.Printf("[ordercore] ingest redirect sysTid=%s order=%s -> keeper=%s tid=%s",
+						reqSysTid, existing.OrderNo, keeper.OrderNo, reqTid)
+					existing = keeper
+					mergeSameParentPkg = true
+				}
+			}
+			// 也可经 package 表反查已并入的 OC
+			if existing == nil {
+				if pkg, perr := s.repos.FindPackageBySysTid(tenantID, reqSysTid); perr == nil && pkg != nil && pkg.OrderID > 0 {
+					if o, gerr := s.repos.GetOrder(tenantID, pkg.OrderID); gerr == nil && o != nil {
+						existing = o
+						mergeSameParentPkg = true
+					}
+				}
+			}
+		}
+		if existing == nil && reqTid != "" {
+			if keeper := s.findKDZSParentKeeper(tenantID, reqTid); keeper != nil {
+				existing = keeper
+				if reqSysTid != "" && strings.TrimSpace(keeper.PlatformSysTid) != "" &&
+					basePlatformSysTid(keeper.PlatformSysTid) != reqSysTid {
+					mergeSameParentPkg = true
+				} else if reqSysTid != "" && strings.TrimSpace(keeper.PlatformSysTid) == "" {
+					mergeSameParentPkg = true
+				} else if reqSysTid == "" {
+					mergeSameParentPkg = false
+				} else {
+					// 同 sysTid 主包裹更新
+					mergeSameParentPkg = false
+				}
+			}
+		}
+	} else if reqSysTid != "" {
+		existing, err = s.repos.FindByPlatformSysTid(tenantID, channel, reqSysTid)
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, false, err
 		}
@@ -637,23 +683,13 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			existing = nil
 		}
 	}
-	if existing == nil && req.PlatformOrderID != "" {
-		// 快递助手同主单多包裹（不同 sysTid）各自建履约单，与助手拆包一致；不再合并进主单。
-		// 仅缺 sysTid 时回退到同主单主履约单（兼容旧数据）。
-		if channel == model.SourceKDZS {
-			if strings.TrimSpace(req.PlatformSysTid) == "" {
-				if keeper := s.findKDZSParentKeeper(tenantID, req.PlatformOrderID); keeper != nil {
-					existing = keeper
-				}
-			}
-		} else {
-			existing, err = s.repos.FindBySourcePlatform(tenantID, channel, req.PlatformOrderID)
-			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, false, err
-			}
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				existing = nil
-			}
+	if existing == nil && reqTid != "" && channel != model.SourceKDZS {
+		existing, err = s.repos.FindBySourcePlatform(tenantID, channel, reqTid)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, false, err
+		}
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			existing = nil
 		}
 	}
 	if existing == nil && req.ExternalRefID != "" {
@@ -778,6 +814,8 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 
 			statusChanged := false
 			terminal := existing.Status == model.StatusCompleted || existing.Status == model.StatusClosed
+			// 同主单另一包裹同步：不覆盖头表履约/发货态（物流与备注落在 package）
+			skipHeaderFulfillment := mergeSameParentPkg && (strings.TrimSpace(existing.AllocType) != "" || orderHasItemLevelAlloc(existing))
 			// 退款成功/交易关闭：同步关单，但默认保留履约分配与代发采购单（人工撤回除外）
 			if !terminal && status == model.StatusClosed {
 				fields["status"] = status
@@ -786,7 +824,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 					fields["ship_status"] = ""
 				}
 				statusChanged = fromStatus != status
-			} else if !terminal && hint.ApplySyncAlloc {
+			} else if !terminal && hint.ApplySyncAlloc && !skipHeaderFulfillment {
 				// 撤回分配后跳过「规则引擎自营自动分配」；
 				// 但快递助手已进入待发货/已发货/完成时，仍以快递助手为准回写（否则会出现助手侧已自营、中心仍待分配）。
 				ps := strings.ToLower(strings.TrimSpace(hint.PlatformStatus))
@@ -870,21 +908,28 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 					}
 				}
 			} else if !terminal && hint.ClearAlloc {
-				// 快递助手回到待推单（撤单等）：清空订单中心分配，恢复待分配
-				fields["alloc_type"] = ""
-				fields["dropship_mode"] = ""
-				fields["factory_id"] = ""
-				fields["factory_name"] = ""
-				fields["supplier_id"] = 0
-				fields["supplier_name"] = ""
-				fields["purchase_order_id"] = ""
-				fields["self_order_no"] = ""
-				fields["alloc_remark"] = ""
-				fields["allocated_at"] = nil
-				fields["skip_auto_alloc"] = false
-				fields["agent_type"] = hint.AgentType
-				fields["status"] = status
-				statusChanged = fromStatus != status
+				// 同主单另一包裹回待推单：不得清空已并入 OC 上其它包裹/行的履约
+				if mergeSameParentPkg || orderHasItemLevelAlloc(existing) {
+					fields["factory_id"] = req.FactoryID
+					fields["factory_name"] = req.FactoryName
+					log.Printf("[ordercore] skip clear alloc on merge/item-level order=%s sysTid=%s", existing.OrderNo, req.PlatformSysTid)
+				} else {
+					// 快递助手回到待推单（撤单等）：清空订单中心分配，恢复待分配
+					fields["alloc_type"] = ""
+					fields["dropship_mode"] = ""
+					fields["factory_id"] = ""
+					fields["factory_name"] = ""
+					fields["supplier_id"] = 0
+					fields["supplier_name"] = ""
+					fields["purchase_order_id"] = ""
+					fields["self_order_no"] = ""
+					fields["alloc_remark"] = ""
+					fields["allocated_at"] = nil
+					fields["skip_auto_alloc"] = false
+					fields["agent_type"] = hint.AgentType
+					fields["status"] = status
+					statusChanged = fromStatus != status
+				}
 			} else if !terminal && existing.AllocType == "" {
 				fields["factory_id"] = req.FactoryID
 				fields["factory_name"] = req.FactoryName
@@ -911,9 +956,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				}
 			}
 
-			// 发货状态独立更新（关闭单不写入待发货）
+			// 发货状态独立更新（关闭单不写入待发货）；合并包裹时不覆盖头表发货态
 			closingNow := status == model.StatusClosed
-			if shipStatus != "" && existing.Status != model.StatusClosed && !closingNow {
+			if shipStatus != "" && existing.Status != model.StatusClosed && !closingNow && !skipHeaderFulfillment {
 				fields["ship_status"] = shipStatus
 				if shipStatus == model.ShipShipped {
 					if t := parseTime(req.ShippedAt); t != nil {
@@ -1031,6 +1076,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		}
 		s.reconcileCoveredChildOrders(ctx, tenantID, o, req)
 		s.reconcileSupersededSiblingPackages(ctx, tenantID, o, req)
+		s.upsertOrderPackageFromIngest(tenantID, o, req, !mergeSameParentPkg)
 		return o, false, nil
 	}
 
@@ -1159,6 +1205,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	out = s.dedupeMergeShipFenFa(ctx, tenantID, out)
 	s.reconcileCoveredChildOrders(ctx, tenantID, out, req)
 	s.reconcileSupersededSiblingPackages(ctx, tenantID, out, req)
+	s.upsertOrderPackageFromIngest(tenantID, out, req, true)
 	return out, true, nil
 }
 
@@ -1167,7 +1214,8 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	if err != nil {
 		return nil, err
 	}
-	o, err = s.resolveAllocateTarget(ctx, tenantID, operatorID, o, req.OrderItemIDs)
+	var selectedItemIDs []uint64
+	o, selectedItemIDs, err = s.resolveAllocateTarget(ctx, tenantID, operatorID, o, req.OrderItemIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1178,7 +1226,10 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	if o.ShipStatus == model.ShipShipped {
 		return nil, fmt.Errorf("订单已发货，不可再分配")
 	}
-	if o.SourceChannel == model.SourceKDZS && o.AgentType == model.AgentTypeFactory {
+	// 整单已推厂家：不可再分配；行级混合时允许对未分配行继续操作
+	if o.SourceChannel == model.SourceKDZS && o.AgentType == model.AgentTypeFactory &&
+		o.AllocType == model.AllocDropship && o.DropshipMode == model.DropshipKDZSFactory &&
+		!orderHasUnallocatedRoots(o) {
 		return nil, fmt.Errorf("快递助手已推厂家代发，无需在订单中心再分配")
 	}
 	if blocked, reason := ecommerceBlocksFulfillment(o.EcommerceStatus, o.EcommerceStatusText, o.AfterSaleStatus, o.AfterSaleStatusText); blocked {
@@ -1195,6 +1246,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	kdzsAction := "" // self_print | push_factory | ""
 	purchaseOrderID := strings.TrimSpace(req.PurchaseOrderID)
 	syncKDZS := shouldSyncKDZSAgent(o)
+	partialItems := len(selectedItemIDs) > 0 && len(selectedItemIDs) < len(fulfillableRootItems(o))
 
 	switch allocType {
 	case model.AllocSelfShip, model.AllocPurchaseThenShip:
@@ -1235,9 +1287,12 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 		return nil, fmt.Errorf("无效的分配类型")
 	}
 
-	// 代发：同步批次延后合并建单；手工/接口分配始终建代发单。
-	// 「自动建代发单」开关仅约束同步自动分配（queueOrCreateDropshipPO），不阻塞手工改分配。
-	// 若请求已带 purchaseOrderId（批量合并代发），则复用该单号不再新建。
+	// 代发/自营建单：仅用勾选商品行
+	allocOrder := *o
+	if len(selectedItemIDs) > 0 {
+		allocOrder.Items = filterItemsByIDs(o.Items, selectedItemIDs)
+	}
+
 	var createdPOID uint64
 	var selfOrderNo string
 	if allocType == model.AllocDropship {
@@ -1246,7 +1301,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 		} else if deferredDropshipFromCtx(ctx) != nil {
 			// 同步批次：延后到 flush 按供应商合并建单
 		} else {
-			poNo, poID, created, err := s.ensureDropshipPurchaseOrder(ctx, o, supplierID, supplierName, bearerToken)
+			poNo, poID, created, err := s.ensureDropshipPurchaseOrder(ctx, &allocOrder, supplierID, supplierName, bearerToken)
 			if err != nil {
 				return nil, err
 			}
@@ -1263,32 +1318,28 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 		}
 	}
 	if allocType == model.AllocSelfShip {
-		soNo, err := s.ensureSelfOrder(ctx, o, bearerToken)
+		soNo, err := s.ensureSelfOrder(ctx, &allocOrder, bearerToken)
 		if err != nil {
 			return nil, err
 		}
 		selfOrderNo = soNo
 	}
 
-	nextStatus := model.StatusAllocated
-	if allocType == model.AllocPurchaseThenShip {
-		nextStatus = model.StatusPurchasing
-	}
 	locked, lockReason := computeShipLock(o.SourceChannel, o.PlatformStatus, agentType, dropshipMode)
 
 	if kdzsAction != "" {
 		needKDZS := true
-		// 仅「待发货且已是自营」可跳过；待推单必须调 self_print，否则快递助手仍停在待推单
 		if kdzsAction == "self_print" && o.AgentType == model.AgentTypeSelf &&
-			o.PlatformStatus == model.KDZSWaitSend {
+			o.PlatformStatus == model.KDZSWaitSend && !partialItems {
 			needKDZS = false
 		}
 		if kdzsAction == "push_factory" && o.AgentType == model.AgentTypeFactory &&
-			o.FactoryID != "" && o.FactoryID == factoryID {
+			o.FactoryID != "" && o.FactoryID == factoryID && !partialItems {
 			needKDZS = false
 		}
 		if needKDZS {
-			if err := s.setKDZSAgentType(ctx, o, kdzsAction, factoryID, bearerToken); err != nil {
+			oids := platformOidsForItemIDs(o, selectedItemIDs)
+			if err := s.setKDZSAgentType(ctx, o, kdzsAction, factoryID, bearerToken, oids, partialItems); err != nil {
 				if createdPOID > 0 {
 					_ = s.rollbackDropshipPurchaseOrder(ctx, bearerToken, createdPOID)
 				}
@@ -1302,36 +1353,53 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	now := time.Now()
 	from := o.Status
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
-		fields := map[string]any{
-			"alloc_type":        allocType,
-			"dropship_mode":     dropshipMode,
-			"supplier_id":       supplierID,
-			"supplier_name":     supplierName,
-			"factory_id":        factoryID,
-			"factory_name":      factoryName,
-			"purchase_order_id": purchaseOrderID,
-			"self_order_no":     selfOrderNo,
-			"alloc_remark":      req.Remark,
-			"status":            nextStatus,
-			"ship_status":       model.ShipWaitShip,
-			"allocated_at":      now,
-			"agent_type":        agentType,
-			"ship_entry_locked": locked,
-			"ship_lock_reason":  lockReason,
-			"skip_auto_alloc":   false,
+		if len(selectedItemIDs) > 0 {
+			if err := tx.UpdateOrderItemsFields(tenantID, selectedItemIDs, itemAllocFields(
+				allocType, dropshipMode, supplierName, factoryID, factoryName, purchaseOrderID, selfOrderNo, supplierID, now,
+			)); err != nil {
+				return err
+			}
 		}
+		// 重新加载行以 rollup
+		cur, gerr := tx.GetOrder(tenantID, orderID)
+		if gerr != nil {
+			return gerr
+		}
+		fields := rollupOrderFulfillmentFields(cur)
+		if fields == nil {
+			fields = map[string]any{}
+			fields["alloc_type"] = allocType
+			fields["dropship_mode"] = dropshipMode
+			fields["supplier_id"] = supplierID
+			fields["supplier_name"] = supplierName
+			fields["factory_id"] = factoryID
+			fields["factory_name"] = factoryName
+			fields["purchase_order_id"] = purchaseOrderID
+			fields["self_order_no"] = selfOrderNo
+			fields["alloc_remark"] = req.Remark
+			fields["status"] = model.StatusAllocated
+			if allocType == model.AllocPurchaseThenShip {
+				fields["status"] = model.StatusPurchasing
+			}
+			fields["ship_status"] = model.ShipWaitShip
+			fields["allocated_at"] = now
+			fields["agent_type"] = agentType
+		}
+		fields["alloc_remark"] = req.Remark
+		fields["ship_entry_locked"] = locked
+		fields["ship_lock_reason"] = lockReason
+		fields["skip_auto_alloc"] = false
+		nextStatus, _ := fields["status"].(string)
 		if kdzsAction == "push_factory" {
 			fields["platform_status"] = model.KDZSWaitSend
 			fields["platform_status_text"] = "待发货"
 		} else if strings.HasPrefix(kdzsAction, "self_print") {
-			// 自营打单：推单后按待发货解锁填单号（含 platform 曾被电商态污染为 order_paid 等）
 			fields["platform_status"] = model.KDZSWaitSend
 			fields["platform_status_text"] = "待发货"
 			locked2, reason2 := computeShipLock(o.SourceChannel, model.KDZSWaitSend, agentType, dropshipMode)
 			fields["ship_entry_locked"] = locked2
 			fields["ship_lock_reason"] = reason2
 		} else if allocType == model.AllocSelfShip {
-			// 未走快递助手推单时，自营分配也允许发货中心确认发货
 			fields["ship_entry_locked"] = false
 			fields["ship_lock_reason"] = ""
 		}
@@ -1339,7 +1407,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 			FromStatus: from,
 			ToStatus:   nextStatus,
 			Action:     "allocate",
-			Remark:     fmt.Sprintf("%s/%s kdzs=%s po=%s %s", allocType, dropshipMode, kdzsAction, purchaseOrderID, req.Remark),
+			Remark:     fmt.Sprintf("%s/%s kdzs=%s po=%s items=%d %s", allocType, dropshipMode, kdzsAction, purchaseOrderID, len(selectedItemIDs), req.Remark),
 			OperatorID: operatorID,
 		})
 	})
@@ -1353,9 +1421,12 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	if err != nil {
 		return nil, err
 	}
-	// 记忆模式：人工代发成功后记住订单 SKU→供应商（自动分配不写入）
 	if allocType == model.AllocDropship && supplierID > 0 && strings.TrimSpace(req.Remark) != autoAllocRemark {
-		s.rememberSkuSupplierBindings(tenantID, out.Items, supplierID, "", supplierName)
+		items := out.Items
+		if len(selectedItemIDs) > 0 {
+			items = filterItemsByIDs(out.Items, selectedItemIDs)
+		}
+		s.rememberSkuSupplierBindings(tenantID, items, supplierID, "", supplierName)
 	}
 	if s.onAllocated != nil && out != nil && out.SupplierID > 0 {
 		s.onAllocated(tenantID, out.ID)
@@ -1812,6 +1883,7 @@ func (s *OrderService) BatchAllocateDropship(ctx context.Context, tenantID, oper
 	}
 
 	orders := make([]*model.Order, 0, len(orderIDs))
+	selectedByOrder := map[uint64][]uint64{}
 	seen := map[uint64]struct{}{}
 	for _, id := range orderIDs {
 		if id == 0 {
@@ -1832,11 +1904,18 @@ func (s *OrderService) BatchAllocateDropship(ctx context.Context, tenantID, oper
 			return nil, fmt.Errorf("%s 无商品明细", o.OrderNo)
 		}
 		itemIDs := itemIDsByOrder[id]
-		target, rerr := s.resolveAllocateTarget(ctx, tenantID, operatorID, o, itemIDs)
+		target, selected, rerr := s.resolveAllocateTarget(ctx, tenantID, operatorID, o, itemIDs)
 		if rerr != nil {
 			return nil, fmt.Errorf("%s: %w", o.OrderNo, rerr)
 		}
-		orders = append(orders, target)
+		if len(selected) > 0 {
+			cp := *target
+			cp.Items = filterItemsByIDs(target.Items, selected)
+			orders = append(orders, &cp)
+			selectedByOrder[target.ID] = selected
+		} else {
+			orders = append(orders, target)
+		}
 	}
 	if len(orders) == 0 {
 		return nil, fmt.Errorf("请选择有效订单")
@@ -1863,6 +1942,7 @@ func (s *OrderService) BatchAllocateDropship(ctx context.Context, tenantID, oper
 			SupplierID:      supplierID,
 			SupplierName:    supplierName,
 			PurchaseOrderID: po.PoNo,
+			OrderItemIDs:    selectedByOrder[o.ID],
 		}, bearerToken)
 		if aerr != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", o.OrderNo, aerr))
@@ -2515,24 +2595,34 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 		lockReason = "快递助手待推单，请先分配；仅自营待发货可填单号"
 	}
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
-		fields := map[string]any{
-			"alloc_type":        "",
-			"dropship_mode":     "",
-			"supplier_id":       0,
-			"supplier_name":     "",
-			"factory_id":        "",
-			"factory_name":      "",
-			"purchase_order_id": "",
-			"self_order_no":     "",
-			"alloc_remark":      "",
-			"allocated_at":      nil,
-			"status":            model.StatusPendingAlloc,
-			"ship_status":       model.ShipWaitShip,
-			"agent_type":        model.AgentTypeSelf,
-			"ship_entry_locked": locked,
-			"ship_lock_reason":  lockReason,
-			"skip_auto_alloc":   true,
+		if err := tx.ClearOrderItemsFulfillment(tenantID, orderID, nil); err != nil {
+			return err
 		}
+		cur, gerr := tx.GetOrder(tenantID, orderID)
+		if gerr != nil {
+			return gerr
+		}
+		fields := rollupOrderFulfillmentFields(cur)
+		if fields == nil {
+			fields = map[string]any{
+				"alloc_type":        "",
+				"dropship_mode":     "",
+				"supplier_id":       0,
+				"supplier_name":     "",
+				"factory_id":        "",
+				"factory_name":      "",
+				"purchase_order_id": "",
+				"self_order_no":     "",
+				"allocated_at":      nil,
+				"status":            model.StatusPendingAlloc,
+				"ship_status":       model.ShipWaitShip,
+				"agent_type":        model.AgentTypeSelf,
+			}
+		}
+		fields["alloc_remark"] = ""
+		fields["ship_entry_locked"] = locked
+		fields["ship_lock_reason"] = lockReason
+		fields["skip_auto_alloc"] = true
 		if shouldSyncKDZSAgent(o) {
 			fields["platform_status"] = model.KDZSWaitAudit
 			fields["platform_status_text"] = "待推单"
@@ -2552,7 +2642,7 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 	if err != nil {
 		return nil, err
 	}
-	// 商品级拆分子单：双方都已空闲时合回原销售单
+	// 历史 #split 子单：双方都已空闲时合回原销售单
 	if merged, merr := s.mergeAllocSplitAfterRevoke(ctx, tenantID, operatorID, orderID); merr != nil {
 		return nil, merr
 	} else if merged != nil {
@@ -2737,6 +2827,64 @@ func (s *OrderService) findKDZSParentKeeper(tenantID uint64, platformOrderID str
 	return best
 }
 
+// upsertOrderPackageFromIngest 把本轮 sysTid 记为 order_packages；主包裹备注同步到头表。
+func (s *OrderService) upsertOrderPackageFromIngest(tenantID uint64, o *model.Order, req dto.IngestOrderRequest, asPrimary bool) {
+	if o == nil || strings.TrimSpace(req.SourceChannel) != model.SourceKDZS {
+		return
+	}
+	sysTid := strings.TrimSpace(req.PlatformSysTid)
+	if sysTid == "" {
+		return
+	}
+	mailNo := strings.TrimSpace(req.ExpressNo)
+	if mailNo == "" && len(req.Logistics) > 0 {
+		mailNo = strings.TrimSpace(req.Logistics[0].ExpressNo)
+	}
+	isPrimary := asPrimary
+	if !isPrimary {
+		keeperSys := basePlatformSysTid(o.PlatformSysTid)
+		isPrimary = keeperSys == "" || keeperSys == sysTid
+	}
+	pkg := &model.OrderPackage{
+		TenantID:           tenantID,
+		OrderID:            o.ID,
+		PlatformSysTid:     sysTid,
+		FenFaRemark:        req.FenFaRemark,
+		PrinterRemark:      req.PrinterRemark,
+		PlatformStatus:     coalesceStr(req.PlatformStatus, o.PlatformStatus),
+		PlatformStatusText: coalesceStr(req.PlatformStatusText, o.PlatformStatusText),
+		MailNo:             mailNo,
+		IsPrimary:          isPrimary,
+	}
+	if err := s.repos.UpsertOrderPackage(pkg); err != nil {
+		log.Printf("[ordercore] upsert package order=%s sysTid=%s: %v", o.OrderNo, sysTid, err)
+		return
+	}
+	saved, _ := s.repos.FindPackageBySysTid(tenantID, sysTid)
+	if saved != nil && saved.ID > 0 {
+		oids := make([]string, 0, len(req.Items))
+		for _, it := range req.Items {
+			if oid := strings.TrimSpace(it.PlatformOid); oid != "" {
+				oids = append(oids, oid)
+			}
+		}
+		_ = s.repos.BindItemsToPackage(tenantID, o.ID, saved.ID, oids)
+	}
+	if isPrimary {
+		fields := map[string]any{}
+		if strings.TrimSpace(o.PlatformSysTid) == "" || basePlatformSysTid(o.PlatformSysTid) != sysTid {
+			fields["platform_sys_tid"] = sysTid
+		}
+		// 主包裹备注写头表；次包裹仅存 packages
+		fields["fen_fa_remark"] = req.FenFaRemark
+		fields["printer_remark"] = req.PrinterRemark
+		if len(fields) > 0 {
+			_ = s.repos.UpdateOrderFields(tenantID, o.ID, fields)
+		}
+	}
+}
+
+
 func (s *OrderService) cancelKDZSPush(ctx context.Context, o *model.Order, token string) error {
 	if s.storeSync == nil {
 		return fmt.Errorf("StoreSyncAgent 未配置")
@@ -2760,7 +2908,7 @@ func (s *OrderService) cancelKDZSPush(ctx context.Context, o *model.Order, token
 	})
 }
 
-func (s *OrderService) setKDZSAgentType(ctx context.Context, o *model.Order, action, factoryID, token string) error {
+func (s *OrderService) setKDZSAgentType(ctx context.Context, o *model.Order, action, factoryID, token string, oidList []string, forceSplit bool) error {
 	if s.storeSync == nil {
 		return fmt.Errorf("StoreSyncAgent 未配置")
 	}
@@ -2772,8 +2920,11 @@ func (s *OrderService) setKDZSAgentType(ctx context.Context, o *model.Order, act
 	if tradeStatus == "" {
 		tradeStatus = model.KDZSWaitAudit
 	}
-	oids := orderItemPlatformOids(o)
-	split := o.SplitFromOrderID > 0 || strings.Contains(strings.TrimSpace(o.PlatformSysTid), "#split")
+	oids := oidList
+	if len(oids) == 0 {
+		oids = orderItemPlatformOids(o)
+	}
+	split := forceSplit || o.SplitFromOrderID > 0 || strings.Contains(strings.TrimSpace(o.PlatformSysTid), "#split")
 	req := storesync.SetAgentTypeRequest{
 		Platform:    o.Platform,
 		TradeStatus: tradeStatus,
@@ -3388,7 +3539,10 @@ func (s *OrderService) autoSyncSelfLogistics(ctx context.Context, before *model.
 
 // autoSyncSelfLogisticsFromIngest 快递助手/同步写入物流后，自动推到关联自营单（对齐代发）。
 func (s *OrderService) autoSyncSelfLogisticsFromIngest(ctx context.Context, o *model.Order, req dto.IngestOrderRequest, bearerToken string) {
-	if o == nil || o.AllocType != model.AllocSelfShip {
+	if o == nil {
+		return
+	}
+	if o.AllocType != model.AllocSelfShip && o.AllocType != model.AllocMixed && !orderHasAllocType(o, model.AllocSelfShip) {
 		return
 	}
 	if !ingestHasLogistics(req) && !orderHasExpressShipments(o) &&
@@ -5765,36 +5919,38 @@ func (s *OrderService) autoSyncDropshipLogistics(ctx context.Context, o *model.O
 	if o == nil || s.supply == nil || strings.TrimSpace(bearerToken) == "" {
 		return
 	}
-	if o.AllocType != model.AllocDropship {
+	if o.AllocType != model.AllocDropship && o.AllocType != model.AllocMixed && !orderHasAllocType(o, model.AllocDropship) {
 		return
 	}
-	poNo := strings.TrimSpace(o.PurchaseOrderID)
-	if poNo == "" {
+	poNos := orderDropshipPONos(o)
+	if len(poNos) == 0 {
 		return
 	}
 	if !ingestHasLogistics(req) && !orderHasExpressShipments(o) && o.ShipStatus != model.ShipShipped {
 		return
 	}
-	list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, 0, "dropship", poNo, 1, 20)
-	if err != nil {
-		log.Printf("[ordercore] auto sync logistics list PO=%s order=%s: %v", poNo, o.OrderNo, err)
-		return
-	}
-	var poID uint64
-	for _, it := range list {
-		if strings.TrimSpace(it.PoNo) == poNo {
-			poID = it.ID
-			break
+	for _, poNo := range poNos {
+		list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, 0, "dropship", poNo, 1, 20)
+		if err != nil {
+			log.Printf("[ordercore] auto sync logistics list PO=%s order=%s: %v", poNo, o.OrderNo, err)
+			continue
 		}
+		var poID uint64
+		for _, it := range list {
+			if strings.TrimSpace(it.PoNo) == poNo {
+				poID = it.ID
+				break
+			}
+		}
+		if poID == 0 {
+			continue
+		}
+		if err := s.supply.SyncShipmentsFromOrders(ctx, bearerToken, poID, o.ID); err != nil {
+			log.Printf("[ordercore] auto sync logistics PO=%s order=%s: %v", poNo, o.OrderNo, err)
+			continue
+		}
+		log.Printf("[ordercore] auto synced logistics PO=%s order=%s", poNo, o.OrderNo)
 	}
-	if poID == 0 {
-		return
-	}
-	if err := s.supply.SyncShipmentsFromOrders(ctx, bearerToken, poID, o.ID); err != nil {
-		log.Printf("[ordercore] auto sync logistics PO=%s order=%s: %v", poNo, o.OrderNo, err)
-		return
-	}
-	log.Printf("[ordercore] auto synced logistics PO=%s order=%s", poNo, o.OrderNo)
 }
 
 // syncShippingShippedAtFromOrder 快递助手同步已发货后：补建/对齐发货中心发货单。
@@ -5804,7 +5960,8 @@ func (s *OrderService) syncShippingShippedAtFromOrder(ctx context.Context, o *mo
 		return
 	}
 	// 自营/渠道已发：同步后要在发货中心可查；代发不建发货中心单
-	if o.AllocType != model.AllocSelfShip && o.AllocType != model.AllocChannelShip {
+	if o.AllocType != model.AllocSelfShip && o.AllocType != model.AllocChannelShip &&
+		o.AllocType != model.AllocMixed && !orderHasAllocType(o, model.AllocSelfShip) && !orderHasAllocType(o, model.AllocChannelShip) {
 		return
 	}
 	if len(o.Shipments) == 0 {

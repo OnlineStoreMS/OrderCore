@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -159,6 +160,7 @@ func (r *Repos) GetOrder(tenantID, id uint64) (*model.Order, error) {
 	var o model.Order
 	err := r.db.Where("tenant_id = ? AND id = ?", tenantID, id).
 		Preload("Items").
+		Preload("Packages", func(db *gorm.DB) *gorm.DB { return db.Order("is_primary DESC, id ASC") }).
 		Preload("Address").
 		Preload("Shipments", func(db *gorm.DB) *gorm.DB { return db.Order("id ASC") }).
 		Preload("Shipments.Items").
@@ -426,6 +428,7 @@ func (r *Repos) DeleteOrderCascade(tenantID, orderID uint64) error {
 		for _, m := range []any{
 			&model.OrderShipmentItem{},
 			&model.OrderItem{},
+			&model.OrderPackage{},
 			&model.OrderAddress{},
 			&model.OrderStatusLog{},
 			&model.OrderShipment{},
@@ -444,6 +447,133 @@ func (r *Repos) DeleteOrderCascade(tenantID, orderID uint64) error {
 		}
 		return nil
 	})
+}
+
+func (r *Repos) UpdateOrderItemFields(tenantID, itemID uint64, fields map[string]any) error {
+	if itemID == 0 || len(fields) == 0 {
+		return nil
+	}
+	res := r.db.Model(&model.OrderItem{}).
+		Where("tenant_id = ? AND id = ?", tenantID, itemID).
+		Updates(fields)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+func (r *Repos) UpdateOrderItemsFields(tenantID uint64, itemIDs []uint64, fields map[string]any) error {
+	if len(itemIDs) == 0 || len(fields) == 0 {
+		return nil
+	}
+	return r.db.Model(&model.OrderItem{}).
+		Where("tenant_id = ? AND id IN ?", tenantID, itemIDs).
+		Updates(fields).Error
+}
+
+func (r *Repos) ClearOrderItemsFulfillment(tenantID, orderID uint64, itemIDs []uint64) error {
+	fields := map[string]any{
+		"alloc_type":        "",
+		"dropship_mode":     "",
+		"supplier_id":       0,
+		"supplier_name":     "",
+		"factory_id":        "",
+		"factory_name":      "",
+		"purchase_order_id": "",
+		"self_order_no":     "",
+		"ship_status":       "",
+		"allocated_at":      nil,
+		"updated_at":        time.Now(),
+	}
+	q := r.db.Model(&model.OrderItem{}).Where("tenant_id = ? AND order_id = ?", tenantID, orderID)
+	if len(itemIDs) > 0 {
+		q = q.Where("id IN ?", itemIDs)
+	}
+	return q.Updates(fields).Error
+}
+
+// UpsertOrderPackage 按 tenant+sysTid 幂等写入包裹；同 sysTid 已挂别的 order 时迁到 orderID。
+func (r *Repos) UpsertOrderPackage(pkg *model.OrderPackage) error {
+	if pkg == nil {
+		return fmt.Errorf("package required")
+	}
+	sysTid := strings.TrimSpace(pkg.PlatformSysTid)
+	if sysTid == "" {
+		return fmt.Errorf("platformSysTid required")
+	}
+	pkg.PlatformSysTid = sysTid
+	var existing model.OrderPackage
+	err := r.db.Where("tenant_id = ? AND platform_sys_tid = ?", pkg.TenantID, sysTid).First(&existing).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return r.db.Create(pkg).Error
+		}
+		return err
+	}
+	pkg.ID = existing.ID
+	fields := map[string]any{
+		"order_id":             pkg.OrderID,
+		"fen_fa_remark":        pkg.FenFaRemark,
+		"printer_remark":       pkg.PrinterRemark,
+		"platform_status":      pkg.PlatformStatus,
+		"platform_status_text": pkg.PlatformStatusText,
+		"updated_at":           time.Now(),
+	}
+	if pkg.MailNo != "" {
+		fields["mail_no"] = pkg.MailNo
+	}
+	if pkg.IsPrimary {
+		fields["is_primary"] = true
+		_ = r.db.Model(&model.OrderPackage{}).
+			Where("tenant_id = ? AND order_id = ? AND id <> ?", pkg.TenantID, pkg.OrderID, existing.ID).
+			Update("is_primary", false).Error
+	}
+	return r.db.Model(&model.OrderPackage{}).Where("id = ?", existing.ID).Updates(fields).Error
+}
+
+func (r *Repos) FindPackageBySysTid(tenantID uint64, sysTid string) (*model.OrderPackage, error) {
+	sysTid = strings.TrimSpace(sysTid)
+	if sysTid == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+	var pkg model.OrderPackage
+	err := r.db.Where("tenant_id = ? AND platform_sys_tid = ?", tenantID, sysTid).First(&pkg).Error
+	if err != nil {
+		return nil, err
+	}
+	return &pkg, nil
+}
+
+func (r *Repos) ListPackagesByOrderID(tenantID, orderID uint64) ([]model.OrderPackage, error) {
+	var list []model.OrderPackage
+	err := r.db.Where("tenant_id = ? AND order_id = ?", tenantID, orderID).
+		Order("is_primary DESC, id ASC").Find(&list).Error
+	return list, err
+}
+
+func (r *Repos) BindItemsToPackage(tenantID, orderID, packageID uint64, platformOids []string) error {
+	oids := make([]string, 0, len(platformOids))
+	seen := map[string]struct{}{}
+	for _, raw := range platformOids {
+		oid := strings.TrimSpace(raw)
+		if oid == "" {
+			continue
+		}
+		if _, ok := seen[oid]; ok {
+			continue
+		}
+		seen[oid] = struct{}{}
+		oids = append(oids, oid)
+	}
+	if len(oids) == 0 || packageID == 0 {
+		return nil
+	}
+	return r.db.Model(&model.OrderItem{}).
+		Where("tenant_id = ? AND order_id = ? AND platform_oid IN ?", tenantID, orderID, oids).
+		Updates(map[string]any{"package_id": packageID, "updated_at": time.Now()}).Error
 }
 
 func (r *Repos) MoveOrderItems(tenantID, fromOrderID, toOrderID uint64, itemIDs []uint64) error {

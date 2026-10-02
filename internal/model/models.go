@@ -51,6 +51,7 @@ const (
 	AllocDropship         = "dropship"           // 代发发货
 	AllocPurchaseThenShip = "purchase_then_ship" // 采购发货
 	AllocChannelShip      = "channel_ship"       // 渠道已发（平台/其它渠道填单号，未经订单管理分配）
+	AllocMixed            = "mixed"              // 同行多分配（自营+代发等）；明细以 order_items 为准
 )
 
 // 代发子类型
@@ -144,6 +145,7 @@ type Order struct {
 	Items      []OrderItem      `gorm:"foreignKey:OrderID" json:"items,omitempty"`
 	Address    *OrderAddress    `gorm:"foreignKey:OrderID" json:"address,omitempty"`
 	Shipments  []OrderShipment  `gorm:"foreignKey:OrderID" json:"shipments,omitempty"`
+	Packages   []OrderPackage   `gorm:"foreignKey:OrderID" json:"packages,omitempty"`
 	StatusLogs []OrderStatusLog `gorm:"foreignKey:OrderID" json:"statusLogs,omitempty"`
 }
 
@@ -176,12 +178,43 @@ type OrderItem struct {
 	// SplitKind 拆分子行：partial=按商品 / full=整单；根行为空
 	SplitKind string `gorm:"size:16;index" json:"splitKind,omitempty"`
 	// ShipPlanLineID 对应发货中心拆分计划行，同步幂等
-	ShipPlanLineID uint64    `gorm:"index;default:0" json:"shipPlanLineId,omitempty"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ShipPlanLineID uint64 `gorm:"index;default:0" json:"shipPlanLineId,omitempty"`
+	// PackageID 归属的快递助手包裹；0=未绑定
+	PackageID uint64 `gorm:"index;default:0" json:"packageId,omitempty"`
+	// 行级履约（一平台单一 OC 后，分配落在商品行）
+	AllocType       string     `gorm:"size:32;index" json:"allocType,omitempty"`
+	DropshipMode    string     `gorm:"size:32" json:"dropshipMode,omitempty"`
+	SupplierID      uint64     `gorm:"index" json:"supplierId,omitempty"`
+	SupplierName    string     `gorm:"size:256" json:"supplierName,omitempty"`
+	FactoryID       string     `gorm:"size:64" json:"factoryId,omitempty"`
+	FactoryName     string     `gorm:"size:256" json:"factoryName,omitempty"`
+	PurchaseOrderID string     `gorm:"size:64" json:"purchaseOrderId,omitempty"`
+	SelfOrderNo     string     `gorm:"size:64;index" json:"selfOrderNo,omitempty"`
+	ShipStatus      string     `gorm:"size:32;index" json:"shipStatus,omitempty"`
+	AllocatedAt     *time.Time `json:"allocatedAt,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	UpdatedAt       time.Time  `json:"updatedAt"`
 }
 
 func (OrderItem) TableName() string { return "order_items" }
+
+// OrderPackage 快递助手同主单 tid 下的包裹（不同 sysTid）；一 OC 可挂多个包裹。
+type OrderPackage struct {
+	ID                 uint64    `gorm:"primaryKey" json:"id"`
+	TenantID           uint64    `gorm:"index;not null" json:"tenantId"`
+	OrderID            uint64    `gorm:"index;not null" json:"orderId"`
+	PlatformSysTid     string    `gorm:"size:128;not null;index" json:"platformSysTid"`
+	FenFaRemark        string    `gorm:"type:text" json:"fenFaRemark"`
+	PrinterRemark      string    `gorm:"type:text" json:"printerRemark"`
+	PlatformStatus     string    `gorm:"size:64" json:"platformStatus"`
+	PlatformStatusText string    `gorm:"size:64" json:"platformStatusText"`
+	MailNo             string    `gorm:"size:128" json:"mailNo,omitempty"`
+	IsPrimary          bool      `gorm:"default:false;index" json:"isPrimary"`
+	CreatedAt          time.Time `json:"createdAt"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+}
+
+func (OrderPackage) TableName() string { return "order_packages" }
 
 const (
 	SplitKindPartial = "partial"

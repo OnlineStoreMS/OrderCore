@@ -10,43 +10,36 @@ import (
 	"ordercore/internal/repo"
 )
 
-// resolveAllocateTarget 商品级分配：勾选部分根行时拆出履约子单，再对子单做整单分配。
-// itemIDs 空或覆盖全部可履约根行 → 原单；否则新建 SplitFrom 子单并迁走勾选行。
-func (s *OrderService) resolveAllocateTarget(ctx context.Context, tenantID, operatorID uint64, o *model.Order, itemIDs []uint64) (*model.Order, error) {
+// resolveAllocateTarget 商品级分配：校验勾选行后始终返回原单（不再拆 #split 子单）。
+// 部分勾选时由调用方对选中行写行级履约字段。
+func (s *OrderService) resolveAllocateTarget(ctx context.Context, tenantID, operatorID uint64, o *model.Order, itemIDs []uint64) (*model.Order, []uint64, error) {
+	_ = ctx
+	_ = tenantID
+	_ = operatorID
 	if o == nil {
-		return nil, fmt.Errorf("订单不存在")
+		return nil, nil, fmt.Errorf("订单不存在")
 	}
-	roots := fulfillableRootItems(o)
-	if len(roots) == 0 {
-		return o, nil
-	}
-	want := normalizeItemIDSet(itemIDs)
-	if len(want) == 0 {
-		return o, nil
-	}
-	selected := make([]model.OrderItem, 0, len(want))
-	for _, it := range roots {
-		if _, ok := want[it.ID]; ok {
-			selected = append(selected, it)
-		}
+	selected, err := selectAllocateItemIDs(o, itemIDs)
+	if err != nil {
+		return nil, nil, err
 	}
 	if len(selected) == 0 {
-		return nil, fmt.Errorf("请勾选本单待分配的商品")
+		return o, nil, nil
 	}
-	if len(selected) == len(roots) {
-		return o, nil
+	// 已分配行不可重复分配（允许整单再分配时覆盖？——禁止已分配行）
+	want := normalizeItemIDSet(selected)
+	for _, it := range o.Items {
+		if _, ok := want[it.ID]; !ok {
+			continue
+		}
+		if strings.TrimSpace(it.AllocType) != "" {
+			return nil, nil, fmt.Errorf("商品「%s」已分配，请先撤回后再分配", strings.TrimSpace(it.ProductName))
+		}
+		if it.ShipStatus == model.ShipShipped || it.ShipStatus == model.ShipPartialShipped {
+			return nil, nil, fmt.Errorf("商品「%s」已发货，不可再分配", strings.TrimSpace(it.ProductName))
+		}
 	}
-	if o.ShipStatus == model.ShipPartialShipped || o.ShipStatus == model.ShipShipped {
-		return nil, fmt.Errorf("已部分发货的订单请整单分配或先处理发货，暂不支持再拆商品分配")
-	}
-	if strings.TrimSpace(o.PurchaseOrderID) != "" || strings.TrimSpace(o.SelfOrderNo) != "" {
-		return nil, fmt.Errorf("订单已关联代发/自营单，请先撤回分配后再按商品拆分")
-	}
-	child, err := s.splitOrderForAllocate(ctx, tenantID, operatorID, o, selected)
-	if err != nil {
-		return nil, err
-	}
-	return child, nil
+	return o, selected, nil
 }
 
 func normalizeItemIDSet(ids []uint64) map[uint64]struct{} {

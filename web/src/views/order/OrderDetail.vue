@@ -415,7 +415,7 @@ async function submitAllocate() {
 async function onRevokeAllocate() {
   try {
     await ElMessageBox.confirm(
-      '确认撤回分配？将同步在快递助手撤单（回到待推单），订单中心恢复为待分配；若为商品级拆分子单且原单也空闲，将自动合回原销售单。',
+      '确认撤回分配？将同步在快递助手撤单（回到待推单），订单中心恢复为待分配；若为历史商品级拆分子单且原单也空闲，将自动合回原销售单。',
       '撤回分配',
       {
         type: 'warning',
@@ -657,6 +657,7 @@ onMounted(load)
                 }}
                 <el-tag v-if="row.isSplitChild" size="small" type="warning" class="split-tag">拆分</el-tag>
                 <el-tag v-else-if="row.isSplitParent" size="small" type="info" class="split-tag">已拆分</el-tag>
+                <el-tag v-if="row.item.allocType" size="small" class="split-tag">{{ labelAlloc(row.item.allocType) }}</el-tag>
                 <el-tag v-if="itemRefundBadge(row.item)" size="small" type="danger" class="split-tag">{{ itemRefundBadge(row.item) }}</el-tag>
               </template>
             </div>
@@ -744,7 +745,7 @@ onMounted(load)
           </el-radio-group>
         </el-form-item>
         <p v-if="order?.sourceChannel === 'kdzs'" class="alloc-tip">
-          自营/采购：快递助手改为自营。代发：按厂家绑定自动推厂家，无绑定则快递助手改自营。勾选部分商品时会先拆出履约子单。
+          自营/采购：快递助手改为自营。代发：按厂家绑定自动推厂家，无绑定则快递助手改自营。勾选部分商品时按行履约，不拆子单。
         </p>
         <el-form-item v-if="allocForm.allocType === 'dropship'" label="OSMS供应商" required>
           <el-select
