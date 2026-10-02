@@ -57,11 +57,14 @@ func (r *Repos) ListOpenKDZSOrders(tenantID uint64, limit int) ([]model.Order, e
 		limit = 100
 	}
 	var list []model.Order
+	openStatuses := []string{model.StatusPendingAlloc, model.StatusAllocated, model.StatusPurchasing}
+	// 电商未发货 + 已挂快递助手的手工单（DFHAND），用于回采发货单号
 	err := r.db.Where(
-		"tenant_id = ? AND source_channel = ? AND status IN ? AND ship_status = ?",
-		tenantID, model.SourceKDZS,
-		[]string{model.StatusPendingAlloc, model.StatusAllocated, model.StatusPurchasing},
-		model.ShipWaitShip,
+		"tenant_id = ? AND ship_status = ? AND status IN ? AND ("+
+			"source_channel = ? OR (source_channel = ? AND (UPPER(platform) = ? OR platform_sys_tid <> '' OR platform_order_id <> ''))"+
+			")",
+		tenantID, model.ShipWaitShip, openStatuses,
+		model.SourceKDZS, model.SourceManual, "DFHAND",
 	).Order("updated_at ASC").Limit(limit).Find(&list).Error
 	return list, err
 }

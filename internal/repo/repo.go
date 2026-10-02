@@ -495,7 +495,8 @@ func (r *Repos) ClearOrderItemsFulfillment(tenantID, orderID uint64, itemIDs []u
 	return q.Updates(fields).Error
 }
 
-// UpsertOrderPackage 按 tenant+sysTid 幂等写入包裹；同 sysTid 已挂别的 order 时迁到 orderID。
+// UpsertOrderPackage 按 tenant+sysTid 幂等写入包裹。
+// 若 sysTid 已挂在另一张单上：同平台主单 tid 时保留更早的 order_id（防止影子单抢走 package）。
 func (r *Repos) UpsertOrderPackage(pkg *model.OrderPackage) error {
 	if pkg == nil {
 		return fmt.Errorf("package required")
@@ -513,9 +514,24 @@ func (r *Repos) UpsertOrderPackage(pkg *model.OrderPackage) error {
 		}
 		return err
 	}
+	targetOrderID := pkg.OrderID
+	if existing.OrderID > 0 && existing.OrderID != pkg.OrderID {
+		var oldOrd, newOrd model.Order
+		_ = r.db.Select("id, platform_order_id, created_at").Where("id = ?", existing.OrderID).First(&oldOrd).Error
+		_ = r.db.Select("id, platform_order_id, created_at").Where("id = ?", pkg.OrderID).First(&newOrd).Error
+		sameTid := strings.TrimSpace(oldOrd.PlatformOrderID) != "" &&
+			strings.TrimSpace(oldOrd.PlatformOrderID) == strings.TrimSpace(newOrd.PlatformOrderID)
+		if sameTid {
+			// 同 tid：package 留在较早建档的 OC
+			if oldOrd.ID > 0 && (newOrd.ID == 0 || oldOrd.ID < newOrd.ID) {
+				targetOrderID = oldOrd.ID
+			}
+		}
+	}
 	pkg.ID = existing.ID
+	pkg.OrderID = targetOrderID
 	fields := map[string]any{
-		"order_id":             pkg.OrderID,
+		"order_id":             targetOrderID,
 		"fen_fa_remark":        pkg.FenFaRemark,
 		"printer_remark":       pkg.PrinterRemark,
 		"platform_status":      pkg.PlatformStatus,
@@ -528,7 +544,7 @@ func (r *Repos) UpsertOrderPackage(pkg *model.OrderPackage) error {
 	if pkg.IsPrimary {
 		fields["is_primary"] = true
 		_ = r.db.Model(&model.OrderPackage{}).
-			Where("tenant_id = ? AND order_id = ? AND id <> ?", pkg.TenantID, pkg.OrderID, existing.ID).
+			Where("tenant_id = ? AND order_id = ? AND id <> ?", pkg.TenantID, targetOrderID, existing.ID).
 			Update("is_primary", false).Error
 	}
 	return r.db.Model(&model.OrderPackage{}).Where("id = ?", existing.ID).Updates(fields).Error

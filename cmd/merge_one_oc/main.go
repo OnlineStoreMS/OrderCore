@@ -128,17 +128,49 @@ func main() {
 		}
 
 		itemIDs := make([]uint64, 0, len(full.Items))
+		keeperOID := map[string]struct{}{}
+		keeperFull, _ := r.GetOrder(*tenantID, keeper.ID)
+		if keeperFull != nil {
+			for _, it := range keeperFull.Items {
+				if oid := strings.TrimSpace(it.PlatformOid); oid != "" {
+					keeperOID[oid] = struct{}{}
+				}
+			}
+		}
 		for _, it := range full.Items {
+			oid := strings.TrimSpace(it.PlatformOid)
+			if oid != "" {
+				if _, ok := keeperOID[oid]; ok {
+					continue // 同 oid 已在 keeper，不重复迁入
+				}
+			}
 			itemIDs = append(itemIDs, it.ID)
 		}
-		if err := r.MoveOrderItems(*tenantID, full.ID, keeper.ID, itemIDs); err != nil {
-			log.Printf("move items %s: %v", full.OrderNo, err)
-			continue
+		if len(itemIDs) > 0 {
+			if err := r.MoveOrderItems(*tenantID, full.ID, keeper.ID, itemIDs); err != nil {
+				log.Printf("move items %s: %v", full.OrderNo, err)
+				continue
+			}
 		}
-		// 迁运单
-		_ = db.Exec(`UPDATE order_shipments SET order_id = ? WHERE tenant_id = ? AND order_id = ?`, keeper.ID, *tenantID, full.ID).Error
-		_ = db.Exec(`UPDATE order_shipment_items SET order_id = ? WHERE tenant_id = ? AND order_id = ?`, keeper.ID, *tenantID, full.ID).Error
-
+		// 迁运单（同快递单号跳过）
+		keeperExpress := map[string]struct{}{}
+		if keeperFull != nil {
+			for _, sh := range keeperFull.Shipments {
+				if no := strings.TrimSpace(sh.ExpressNo); no != "" {
+					keeperExpress[no] = struct{}{}
+				}
+			}
+		}
+		for _, sh := range full.Shipments {
+			no := strings.TrimSpace(sh.ExpressNo)
+			if no != "" {
+				if _, ok := keeperExpress[no]; ok {
+					continue
+				}
+			}
+			_ = db.Exec(`UPDATE order_shipments SET order_id = ? WHERE tenant_id = ? AND id = ?`, keeper.ID, *tenantID, sh.ID).Error
+			_ = db.Exec(`UPDATE order_shipment_items SET order_id = ? WHERE tenant_id = ? AND shipment_id = ?`, keeper.ID, *tenantID, sh.ID).Error
+		}
 		if err := r.DeleteOrderCascade(*tenantID, full.ID); err != nil {
 			log.Printf("delete sibling %s: %v", full.OrderNo, err)
 			continue

@@ -629,9 +629,21 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	mergeSameParentPkg := false
 	reqSysTid := strings.TrimSpace(req.PlatformSysTid)
 	reqTid := strings.TrimSpace(req.PlatformOrderID)
-	// 一平台主单 tid → 一个 OC：同 tid 多 sysTid 并入 keeper，包裹写入 order_packages。
+	// 一平台主单 tid → 一个 OC：优先按 tid 找 keeper，sysTid 只用于包裹表。
 	if channel == model.SourceKDZS {
-		if reqSysTid != "" {
+		if reqTid != "" {
+			if keeper := s.findKDZSParentKeeper(tenantID, reqTid); keeper != nil {
+				existing = keeper
+				keeperSys := basePlatformSysTid(keeper.PlatformSysTid)
+				if reqSysTid != "" && keeperSys != "" && keeperSys != reqSysTid {
+					mergeSameParentPkg = true
+				} else if reqSysTid != "" && keeperSys == "" {
+					mergeSameParentPkg = true
+				}
+			}
+		}
+		// 无 tid 或尚无 keeper：回退 sysTid / package
+		if existing == nil && reqSysTid != "" {
 			existing, err = s.repos.FindByPlatformSysTid(tenantID, channel, reqSysTid)
 			if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, false, err
@@ -639,38 +651,12 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				existing = nil
 			}
-			// 历史影子单：sysTid 命中但同 tid 另有更好的 keeper → 并入 keeper
-			if existing != nil && reqTid != "" {
-				if keeper := s.findKDZSParentKeeper(tenantID, reqTid); keeper != nil && keeper.ID != existing.ID {
-					log.Printf("[ordercore] ingest redirect sysTid=%s order=%s -> keeper=%s tid=%s",
-						reqSysTid, existing.OrderNo, keeper.OrderNo, reqTid)
-					existing = keeper
-					mergeSameParentPkg = true
-				}
-			}
-			// 也可经 package 表反查已并入的 OC
 			if existing == nil {
 				if pkg, perr := s.repos.FindPackageBySysTid(tenantID, reqSysTid); perr == nil && pkg != nil && pkg.OrderID > 0 {
 					if o, gerr := s.repos.GetOrder(tenantID, pkg.OrderID); gerr == nil && o != nil {
 						existing = o
 						mergeSameParentPkg = true
 					}
-				}
-			}
-		}
-		if existing == nil && reqTid != "" {
-			if keeper := s.findKDZSParentKeeper(tenantID, reqTid); keeper != nil {
-				existing = keeper
-				if reqSysTid != "" && strings.TrimSpace(keeper.PlatformSysTid) != "" &&
-					basePlatformSysTid(keeper.PlatformSysTid) != reqSysTid {
-					mergeSameParentPkg = true
-				} else if reqSysTid != "" && strings.TrimSpace(keeper.PlatformSysTid) == "" {
-					mergeSameParentPkg = true
-				} else if reqSysTid == "" {
-					mergeSameParentPkg = false
-				} else {
-					// 同 sysTid 主包裹更新
-					mergeSameParentPkg = false
 				}
 			}
 		}
@@ -699,6 +685,13 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		}
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			existing = nil
+		}
+	}
+	// 手工单在 OC 为 source_channel=manual，同步仍走 kdzs+DFHAND；按 tid/sysTid 回挂原单，避免重复建 kdzs 单且采不到发货单号。
+	if existing == nil && channel == model.SourceKDZS && isDFHANDPlatform(req.Platform) {
+		if mo := s.findExistingManualDFHAND(tenantID, reqTid, reqSysTid); mo != nil {
+			existing = mo
+			log.Printf("[ordercore] ingest DFHAND match manual order=%s tid=%s sysTid=%s", mo.OrderNo, reqTid, reqSysTid)
 		}
 	}
 
@@ -1077,6 +1070,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		s.reconcileCoveredChildOrders(ctx, tenantID, o, req)
 		s.reconcileSupersededSiblingPackages(ctx, tenantID, o, req)
 		s.upsertOrderPackageFromIngest(tenantID, o, req, !mergeSameParentPkg)
+		o = s.forceMergeKDZSSiblingsIntoKeeper(tenantID, o)
 		return o, false, nil
 	}
 
@@ -4139,7 +4133,7 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 		startTime = now.AddDate(0, 0, -29).Truncate(24*time.Hour).Format("2006-01-02") + " 00:00:00"
 	}
 
-	// 未指定平台：按已授权电商店铺覆盖全部平台（抖店/淘宝等）
+	// 未指定平台：电商平台 + 手工单 DFHAND（助手侧发货需回写运单号）
 	platforms := []string{}
 	if p := strings.TrimSpace(req.Platform); p != "" {
 		platforms = []string{p}
@@ -4151,6 +4145,16 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 		platforms = plats
 		if len(platforms) == 0 {
 			platforms = []string{"FXG"}
+		}
+		hasHand := false
+		for _, x := range platforms {
+			if strings.EqualFold(strings.TrimSpace(x), "DFHAND") {
+				hasHand = true
+				break
+			}
+		}
+		if !hasHand {
+			platforms = append(platforms, "DFHAND")
 		}
 	}
 
@@ -4217,6 +4221,23 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 							continue
 						}
 						seen[key] = struct{}{}
+					}
+					// DFHAND：只回写已有手工单/已有 kdzs 单，避免助手侧其它手工单新建影子单
+					if isDFHANDPlatform(platform) || isDFHANDPlatform(t.Platform) {
+						tid := strings.TrimSpace(ingest.PlatformOrderID)
+						sys := strings.TrimSpace(ingest.PlatformSysTid)
+						if s.findExistingManualDFHAND(tenantID, tid, sys) == nil {
+							existKDZS, _ := s.repos.FindByPlatformSysTid(tenantID, model.SourceKDZS, sys)
+							if existKDZS == nil && sys != "" {
+								existKDZS, _ = s.repos.FindByPlatformSysTid(tenantID, model.SourceKDZS, tid)
+							}
+							if existKDZS == nil && tid != "" {
+								existKDZS, _ = s.repos.FindBySourcePlatform(tenantID, model.SourceKDZS, tid)
+							}
+							if existKDZS == nil {
+								continue
+							}
+						}
 					}
 					_, isNew, err := s.Ingest(ctx, tenantID, operatorID, ingest, token)
 					if err != nil {
@@ -4393,12 +4414,27 @@ func (s *OrderService) RefreshOpenKDZSOrders(ctx context.Context, tenantID, oper
 		if platform == "" {
 			platform = "FXG"
 		}
+		if o.SourceChannel == model.SourceManual || isDFHANDPlatform(platform) {
+			platform = "DFHAND"
+		}
 		result, err := s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
 			Platform: platform,
 			Tid:      tid,
 			PageNo:   1,
 			PageSize: 5,
 		})
+		if err != nil {
+			// DFHAND tid/sysTid 偶发对调：用另一侧再查
+			if (o.SourceChannel == model.SourceManual || isDFHANDPlatform(o.Platform)) &&
+				strings.TrimSpace(o.PlatformSysTid) != "" && strings.TrimSpace(o.PlatformSysTid) != tid {
+				result, err = s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
+					Platform: "DFHAND",
+					Tid:      strings.TrimSpace(o.PlatformSysTid),
+					PageNo:   1,
+					PageSize: 5,
+				})
+			}
+		}
 		if err != nil {
 			lastErr = err
 			// 限流时再等一轮后继续，避免整批刷挂
@@ -5751,6 +5787,35 @@ func shouldSyncKDZSAgent(o *model.Order) bool {
 	}
 	platform := strings.ToUpper(strings.TrimSpace(o.Platform))
 	return platform == "DFHAND" && strings.TrimSpace(o.PlatformOrderID) != ""
+}
+
+func isDFHANDPlatform(platform string) bool {
+	return strings.EqualFold(strings.TrimSpace(platform), "DFHAND")
+}
+
+// findExistingManualDFHAND 用助手手工单 tid/sysTid（及互换）定位 OMS 手工销售单。
+func (s *OrderService) findExistingManualDFHAND(tenantID uint64, tid, sysTid string) *model.Order {
+	tid = strings.TrimSpace(tid)
+	sysTid = strings.TrimSpace(sysTid)
+	for _, sid := range []string{sysTid, tid} {
+		if sid == "" {
+			continue
+		}
+		o, err := s.repos.FindByPlatformSysTid(tenantID, model.SourceManual, sid)
+		if err == nil && o != nil {
+			return o
+		}
+	}
+	for _, pid := range []string{tid, sysTid} {
+		if pid == "" {
+			continue
+		}
+		o, err := s.repos.FindBySourcePlatform(tenantID, model.SourceManual, pid)
+		if err == nil && o != nil {
+			return o
+		}
+	}
+	return nil
 }
 
 func computeShipLock(channel, platformStatus string, agentType int, dropshipMode string) (bool, string) {
