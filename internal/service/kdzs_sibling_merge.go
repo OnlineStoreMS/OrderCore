@@ -52,6 +52,21 @@ func (s *OrderService) forceMergeKDZSSiblingsIntoKeeper(tenantID uint64, seed *m
 	s.rollupAfterSiblingMerge(tenantID, out)
 	out, _ = s.repos.GetOrder(tenantID, fullKeeper.ID)
 	if out != nil {
+		// 并入后按明细重算实付，避免残留单包裹金额
+		sum := sumItemAmounts(out.Items)
+		if sum > 0 && (roundMoney(out.PayAmount) != sum || roundMoney(out.TotalAmount) != sum) {
+			_ = s.repos.UpdateOrderFields(tenantID, out.ID, map[string]any{
+				"pay_amount":   sum,
+				"total_amount": sum,
+			})
+			out.PayAmount = sum
+			out.TotalAmount = sum
+		}
+		hydrateOrderPackageRemarks(out)
+		if fen := effectivePackageFenFaRemark(out); fen != "" && strings.TrimSpace(out.FenFaRemark) != fen {
+			_ = s.repos.UpdateOrderFields(tenantID, out.ID, map[string]any{"fen_fa_remark": fen})
+			out.FenFaRemark = fen
+		}
 		return out
 	}
 	return fullKeeper

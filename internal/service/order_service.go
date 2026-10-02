@@ -827,6 +827,19 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				delete(fields, "pay_amount")
 				delete(fields, "raw_payload")
 			}
+			// 一平台单一 OC：KDZS 单包裹金额/空备注不得覆盖整单头表（多包裹合计以明细为准）
+			if channel == model.SourceKDZS {
+				delete(fields, "total_amount")
+				delete(fields, "pay_amount")
+				delete(fields, "freight_amount")
+				// 空分发/打单备注不冲头表；备注以 order_packages 为准，upsert 后再回填
+				if strings.TrimSpace(req.FenFaRemark) == "" {
+					delete(fields, "fen_fa_remark")
+				}
+				if strings.TrimSpace(req.PrinterRemark) == "" {
+					delete(fields, "printer_remark")
+				}
+			}
 			// 纠正历史误写的子单 oid → 主单 tid（与快递助手「平台单号」一致）
 			if pid := strings.TrimSpace(req.PlatformOrderID); pid != "" {
 				fields["platform_order_id"] = pid
@@ -1069,7 +1082,8 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		if err != nil {
 			return nil, false, err
 		}
-		if mergeSameParentPkg && o != nil {
+		// KDZS 多包裹并入同一 OC：头表实付按明细合计回填，避免单包裹金额覆盖整单
+		if channel == model.SourceKDZS && o != nil {
 			sum := sumItemAmounts(o.Items)
 			if sum > 0 && (roundMoney(o.PayAmount) != sum || roundMoney(o.TotalAmount) != sum) {
 				_ = s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{
@@ -1079,7 +1093,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				o.PayAmount = sum
 				o.TotalAmount = sum
 			}
-			log.Printf("[ordercore] merge same-parent package into %s sysTid=%s from=%s", o.OrderNo, o.PlatformSysTid, req.PlatformSysTid)
+			if mergeSameParentPkg {
+				log.Printf("[ordercore] merge same-parent package into %s sysTid=%s from=%s pay=%.2f", o.OrderNo, o.PlatformSysTid, req.PlatformSysTid, sum)
+			}
 		}
 		closingNow := !terminalPre && status == model.StatusClosed
 		if closingNow && strings.TrimSpace(bearerToken) != "" {
@@ -2950,20 +2966,30 @@ func (s *OrderService) upsertOrderPackageFromIngest(tenantID uint64, o *model.Or
 		if strings.TrimSpace(o.PlatformSysTid) == "" || basePlatformSysTid(o.PlatformSysTid) != sysTid {
 			fields["platform_sys_tid"] = sysTid
 		}
-		// 主包裹备注写头表；次包裹仅存 packages
-		fields["fen_fa_remark"] = req.FenFaRemark
-		fields["printer_remark"] = req.PrinterRemark
-		if len(fields) > 0 {
-			_ = s.repos.UpdateOrderFields(tenantID, o.ID, fields)
+		// 主包裹：仅非空备注写头表；空不冲掉其它包裹已有的分发备注
+		if strings.TrimSpace(req.FenFaRemark) != "" {
+			fields["fen_fa_remark"] = req.FenFaRemark
 			o.FenFaRemark = req.FenFaRemark
+		}
+		if strings.TrimSpace(req.PrinterRemark) != "" {
+			fields["printer_remark"] = req.PrinterRemark
 			o.PrinterRemark = req.PrinterRemark
 		}
-	} else if strings.TrimSpace(o.FenFaRemark) == "" && strings.TrimSpace(req.FenFaRemark) != "" {
-		// 次包裹有分发备注、头表为空：把头表补成有效备注，供采购价同步（多包裹数字会在 Get 时再汇总）
-		_ = s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{
-			"fen_fa_remark": req.FenFaRemark,
-		})
-		o.FenFaRemark = req.FenFaRemark
+		if len(fields) > 0 {
+			_ = s.repos.UpdateOrderFields(tenantID, o.ID, fields)
+		}
+	} else if strings.TrimSpace(req.FenFaRemark) != "" {
+		// 次包裹有分发备注：头表用包裹汇总（供代发采购价同步）；分发备注是给供货商代发用的
+		pkgs, _ := s.repos.ListPackagesByOrderID(tenantID, o.ID)
+		o.Packages = pkgs
+		fen := effectivePackageFenFaRemark(o)
+		if fen == "" {
+			fen = strings.TrimSpace(req.FenFaRemark)
+		}
+		if fen != "" && strings.TrimSpace(o.FenFaRemark) != fen {
+			_ = s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{"fen_fa_remark": fen})
+			o.FenFaRemark = fen
+		}
 	}
 }
 
