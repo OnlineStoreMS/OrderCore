@@ -1100,9 +1100,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		closingNow := !terminalPre && status == model.StatusClosed
 		if (closingNow || existing.Status == model.StatusClosed || status == model.StatusClosed) && strings.TrimSpace(bearerToken) != "" {
 			reason := closeDetachReason(req)
-			poNos := orderDropshipPONos(existing)
+			poNos := s.linkedDropshipPONos(ctx, existing, bearerToken)
 			if o != nil {
-				poNos = append(poNos, orderDropshipPONos(o)...)
+				poNos = append(poNos, s.linkedDropshipPONos(ctx, o, bearerToken)...)
 			}
 			seenPO := map[string]struct{}{}
 			for _, poNo := range poNos {
@@ -1147,27 +1147,16 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		s.syncShippingShippedAtFromOrder(ctx, o, bearerToken)
 		// 合单发货：分发备注只保留在第一单，其余清空（快递助手常复制到每单）
 		o = s.dedupeMergeShipFenFa(ctx, tenantID, o)
-		// 分发备注变更或合单去重后，补写未付款代发采购小计（含仅次包裹有备注的情况）
-		if o != nil && (strings.TrimSpace(o.PurchaseOrderID) != "" || orderHasAllocType(o, model.AllocDropship)) {
-			newFen := strings.TrimSpace(req.FenFaRemark)
-			oldFen := strings.TrimSpace(existing.FenFaRemark)
-			curFen := strings.TrimSpace(o.FenFaRemark)
-			pkgFen := ""
-			if o.Packages != nil {
-				pkgFen = effectivePackageFenFaRemark(o)
-			} else if newFen != "" {
-				pkgFen = newFen
-			}
-			if newFen != oldFen || curFen != oldFen || pkgFen != oldFen || mergeSameParentPkg && newFen != "" || ingestHasLogistics(req) {
-				s.syncLinkedPOPurchasePrices(ctx, o, bearerToken)
-			}
-		}
 		s.reconcileCoveredChildOrders(ctx, tenantID, o, req)
 		s.reconcileSupersededSiblingPackages(ctx, tenantID, o, req)
 		s.upsertOrderPackageFromIngest(tenantID, o, req, !mergeSameParentPkg)
 		o = s.forceMergeKDZSSiblingsIntoKeeper(tenantID, o)
 		// 按本轮系统编号写行级履约（挂包 + alloc），再汇总头表
 		o = s.applyPackageItemFulfillmentFromIngest(tenantID, o, req, hint)
+		// 包裹备注落库后再同步采购小计（按销售单明细关联代发单，不依赖头表 po 号）
+		if o != nil && (strings.TrimSpace(o.PurchaseOrderID) != "" || orderHasAllocType(o, model.AllocDropship)) {
+			s.syncLinkedPOPurchasePrices(ctx, o, bearerToken)
+		}
 		return o, false, nil
 	}
 
@@ -1299,6 +1288,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	s.upsertOrderPackageFromIngest(tenantID, out, req, true)
 	out = s.forceMergeKDZSSiblingsIntoKeeper(tenantID, out)
 	out = s.applyPackageItemFulfillmentFromIngest(tenantID, out, req, hint)
+	if out != nil && (strings.TrimSpace(out.PurchaseOrderID) != "" || orderHasAllocType(out, model.AllocDropship)) {
+		s.syncLinkedPOPurchasePrices(ctx, out, bearerToken)
+	}
 	return out, true, nil
 }
 
@@ -2558,6 +2550,34 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 func (s *OrderService) detachDropshipPOOnClose(ctx context.Context, tenantID, orderID uint64, orderNo, poNo, reason string, beforeShip bool, bearerToken string) error {
 	_ = beforeShip
 	return s.markDropshipPORefundOnClose(ctx, tenantID, orderID, orderNo, poNo, reason, bearerToken)
+}
+
+func (s *OrderService) linkedDropshipPONos(ctx context.Context, o *model.Order, bearerToken string) []string {
+	out := orderDropshipPONos(o)
+	if s.supply == nil || o == nil || o.ID == 0 || strings.TrimSpace(bearerToken) == "" {
+		return out
+	}
+	seen := map[string]struct{}{}
+	for _, n := range out {
+		seen[n] = struct{}{}
+	}
+	list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, o.ID, "dropship", "", 1, 50)
+	if err != nil {
+		log.Printf("[ordercore] list linked dropship PO order=%s: %v", o.OrderNo, err)
+		return out
+	}
+	for _, it := range list {
+		n := strings.TrimSpace(it.PoNo)
+		if n == "" {
+			continue
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	return out
 }
 
 func (s *OrderService) markDropshipPORefundOnClose(ctx context.Context, tenantID, orderID uint64, orderNo, poNo, reason, bearerToken string) error {
