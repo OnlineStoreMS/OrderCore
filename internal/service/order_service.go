@@ -1098,18 +1098,27 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			}
 		}
 		closingNow := !terminalPre && status == model.StatusClosed
-		if closingNow && strings.TrimSpace(bearerToken) != "" {
+		if (closingNow || existing.Status == model.StatusClosed || status == model.StatusClosed) && strings.TrimSpace(bearerToken) != "" {
 			reason := closeDetachReason(req)
-			poNo := strings.TrimSpace(existing.PurchaseOrderID)
-			if poNo != "" {
-				// 发货前：仅划线提醒待人工解绑；已发货/部分发货：仍自动划线解绑
-				beforeShip := existing.ShipStatus != model.ShipShipped && existing.ShipStatus != model.ShipPartialShipped
-				if err := s.detachDropshipPOOnClose(ctx, tenantID, existing.ID, existing.OrderNo, poNo, reason, beforeShip, bearerToken); err != nil {
-					log.Printf("[ordercore] auto detach dropship on close order=%s po=%s: %v", existing.OrderNo, poNo, err)
-				} else {
-					o, _ = s.repos.GetOrder(tenantID, existing.ID)
+			poNos := orderDropshipPONos(existing)
+			if o != nil {
+				poNos = append(poNos, orderDropshipPONos(o)...)
+			}
+			seenPO := map[string]struct{}{}
+			for _, poNo := range poNos {
+				poNo = strings.TrimSpace(poNo)
+				if poNo == "" {
+					continue
+				}
+				if _, ok := seenPO[poNo]; ok {
+					continue
+				}
+				seenPO[poNo] = struct{}{}
+				if err := s.markDropshipPORefundOnClose(ctx, tenantID, existing.ID, existing.OrderNo, poNo, reason, bearerToken); err != nil {
+					log.Printf("[ordercore] mark dropship refund on close order=%s po=%s: %v", existing.OrderNo, poNo, err)
 				}
 			}
+			o, _ = s.repos.GetOrder(tenantID, existing.ID)
 		}
 		// 销售单已关闭（本轮关单或历史已关）：关联自营单改为已取消
 		if strings.TrimSpace(bearerToken) != "" && o != nil && o.Status == model.StatusClosed &&
@@ -1123,14 +1132,14 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		hadDropshipAlloc := existing.AllocType == model.AllocDropship && existing.SupplierID > 0
 		s.TryAutoAllocateBySKU(ctx, tenantID, operatorID, o, bearerToken)
 		o, _ = s.repos.GetOrder(tenantID, existing.ID)
-		o = s.clearStalePurchaseOrderRef(ctx, tenantID, o, bearerToken)
-		// 本轮新分配：自动建单。
-		// 例外：仍待发货且缺代发单的开放订单也补建（含代发单被删除后留下的脏关联已清理的情况）。
-		needPO := needsDropshipPO(o) && (!hadDropshipAlloc ||
-			(o.ShipStatus == model.ShipWaitShip && (o.Status == model.StatusAllocated || o.Status == model.StatusPendingShip)))
-		if needPO {
-			s.queueOrCreateDropshipPO(ctx, tenantID, o, bearerToken)
-			o, _ = s.repos.GetOrder(tenantID, existing.ID)
+		if o != nil && o.Status != model.StatusClosed && o.Status != model.StatusCompleted {
+			o = s.clearStalePurchaseOrderRef(ctx, tenantID, o, bearerToken)
+			needPO := needsDropshipPO(o) && (!hadDropshipAlloc ||
+				(o.ShipStatus == model.ShipWaitShip && (o.Status == model.StatusAllocated || o.Status == model.StatusPendingShip)))
+			if needPO {
+				s.queueOrCreateDropshipPO(ctx, tenantID, o, bearerToken)
+				o, _ = s.repos.GetOrder(tenantID, existing.ID)
+			}
 		}
 		o = s.ensureSelfOrderAfterIngest(ctx, tenantID, o, bearerToken)
 		s.autoSyncDropshipLogistics(ctx, o, req, bearerToken)
@@ -2542,35 +2551,28 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 }
 
 // detachDropshipPOOnClose 退款完成/交易关闭时处理代发采购单。
-// beforeShip=true：仅划线提醒「待人工解绑」，保留订单采购单号与 PO 关联。
-// beforeShip=false：划线解绑并清空采购单号（保留分配痕迹）。
+// 只划红线并写原因（退款完成），保留采购单关联，不自动解绑、不整单取消。
 func (s *OrderService) detachDropshipPOOnClose(ctx context.Context, tenantID, orderID uint64, orderNo, poNo, reason string, beforeShip bool, bearerToken string) error {
+	_ = beforeShip
+	return s.markDropshipPORefundOnClose(ctx, tenantID, orderID, orderNo, poNo, reason, bearerToken)
+}
+
+func (s *OrderService) markDropshipPORefundOnClose(ctx context.Context, tenantID, orderID uint64, orderNo, poNo, reason, bearerToken string) error {
 	if s.supply == nil || strings.TrimSpace(poNo) == "" {
 		return nil
 	}
-	if beforeShip {
-		if _, err := s.supply.DetachSalesOrderEx(ctx, bearerToken, poNo, orderNo, orderID, reason, true); err != nil && !isSupplyNotFound(err) {
-			return err
-		}
-		_ = s.repos.AddStatusLog(&model.OrderStatusLog{
-			TenantID:   tenantID,
-			OrderID:    orderID,
-			FromStatus: model.StatusClosed,
-			ToStatus:   model.StatusClosed,
-			Action:     "dropship_po_pending_unbind",
-			Remark:     fmt.Sprintf("%s；代发单 %s 已划线，请人工解绑", reason, poNo),
-		})
-		return nil
-	}
-	if _, err := s.supply.DetachSalesOrder(ctx, bearerToken, poNo, orderNo, orderID, reason); err != nil && !isSupplyNotFound(err) {
+	if _, err := s.supply.DetachSalesOrderEx(ctx, bearerToken, poNo, orderNo, orderID, reason, true); err != nil && !isSupplyNotFound(err) {
 		return err
 	}
-	_, err := s.UnlinkDropshipPO(ctx, tenantID, 0, dto.UnlinkDropshipPORequest{
-		OrderIDs:   []uint64{orderID},
-		Remark:     reason,
-		ClearAlloc: false,
-	}, bearerToken)
-	return err
+	_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+		TenantID:   tenantID,
+		OrderID:    orderID,
+		FromStatus: model.StatusClosed,
+		ToStatus:   model.StatusClosed,
+		Action:     "dropship_po_refund_mark",
+		Remark:     fmt.Sprintf("%s；代发单 %s 已划线", reason, poNo),
+	})
+	return nil
 }
 
 func closeDetachReason(req dto.IngestOrderRequest) string {
