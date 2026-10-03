@@ -2298,6 +2298,9 @@ func (s *OrderService) createAndBindDropshipPOs(ctx context.Context, tenantID ui
 			if force {
 				actionRemark = fmt.Sprintf("补建代发单 po=%s → %s", po.PoNo, supplierName)
 			}
+			if s.repos.HasStatusLogActionRemark(o.TenantID, o.ID, "auto_dropship_po", actionRemark) {
+				continue
+			}
 			_ = s.repos.AddStatusLog(&model.OrderStatusLog{
 				TenantID:   tenantID,
 				OrderID:    o.ID,
@@ -2561,18 +2564,22 @@ func (s *OrderService) markDropshipPORefundOnClose(ctx context.Context, tenantID
 	if s.supply == nil || strings.TrimSpace(poNo) == "" {
 		return nil
 	}
+	remark := fmt.Sprintf("%s；代发单 %s 已划线", reason, poNo)
+	if s.repos.HasStatusLogActionRemark(tenantID, orderID, "dropship_po_refund_mark", remark) ||
+		s.repos.HasStatusLogContaining(tenantID, orderID, "dropship_po_pending_unbind", poNo) {
+		return nil
+	}
 	if _, err := s.supply.DetachSalesOrderEx(ctx, bearerToken, poNo, orderNo, orderID, reason, true); err != nil && !isSupplyNotFound(err) {
 		return err
 	}
-	_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+	return s.repos.AddStatusLog(&model.OrderStatusLog{
 		TenantID:   tenantID,
 		OrderID:    orderID,
 		FromStatus: model.StatusClosed,
 		ToStatus:   model.StatusClosed,
 		Action:     "dropship_po_refund_mark",
-		Remark:     fmt.Sprintf("%s；代发单 %s 已划线", reason, poNo),
+		Remark:     remark,
 	})
-	return nil
 }
 
 func closeDetachReason(req dto.IngestOrderRequest) string {

@@ -877,7 +877,51 @@ func (r *Repos) UpsertAddress(addr *model.OrderAddress) error {
 	return r.db.Save(addr).Error
 }
 
+func (r *Repos) HasStatusLogActionRemark(tenantID, orderID uint64, action, remark string) bool {
+	if tenantID == 0 || orderID == 0 || strings.TrimSpace(action) == "" {
+		return false
+	}
+	var n int64
+	q := r.db.Model(&model.OrderStatusLog{}).
+		Where("tenant_id = ? AND order_id = ? AND action = ?", tenantID, orderID, action)
+	if remark != "" {
+		q = q.Where("remark = ?", remark)
+	}
+	if err := q.Limit(1).Count(&n).Error; err != nil {
+		return false
+	}
+	return n > 0
+}
+
+func (r *Repos) HasStatusLogContaining(tenantID, orderID uint64, action, needle string) bool {
+	if tenantID == 0 || orderID == 0 || strings.TrimSpace(action) == "" || strings.TrimSpace(needle) == "" {
+		return false
+	}
+	var n int64
+	if err := r.db.Model(&model.OrderStatusLog{}).
+		Where("tenant_id = ? AND order_id = ? AND action = ? AND remark LIKE ?", tenantID, orderID, action, "%"+needle+"%").
+		Limit(1).Count(&n).Error; err != nil {
+		return false
+	}
+	return n > 0
+}
+
 func (r *Repos) AddStatusLog(log *model.OrderStatusLog) error {
+	if log == nil {
+		return nil
+	}
+	if log.TenantID > 0 && log.OrderID > 0 {
+		var last model.OrderStatusLog
+		err := r.db.Where("tenant_id = ? AND order_id = ?", log.TenantID, log.OrderID).
+			Order("id DESC").Limit(1).Take(&last).Error
+		if err == nil &&
+			last.Action == log.Action &&
+			last.FromStatus == log.FromStatus &&
+			last.ToStatus == log.ToStatus &&
+			last.Remark == log.Remark {
+			return nil
+		}
+	}
 	return r.db.Create(log).Error
 }
 
