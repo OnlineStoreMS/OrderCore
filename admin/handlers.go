@@ -153,14 +153,20 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 		Page:              page,
 		PageSize:          pageSize,
 	}
+	lookupID := platformOrderID
+	if lookupID == "" {
+		lookupID = keyword
+	}
+	orderLookup := platformOrderID != "" || looksLikeOrderLookup(keyword)
+
 	// 按单号搜索时放宽时间窗，避免日期筛选把补拉订单挡住
 	if keyword != "" || platformOrderID != "" {
 		q.OrderedAtStart, q.OrderedAtEnd = nil, nil
 		q.ShippedAtStart, q.ShippedAtEnd = nil, nil
 		q.PayTimeStart, q.PayTimeEnd = nil, nil
 	}
-	// 按平台单号定位时，默认「待发货」会把已发货单滤掉
-	if platformOrderID != "" || looksLikePlatformOrderID(keyword) {
+	// 按平台单号 / OC 单号 / 系统编号定位时，默认「待发货」会把已发货单滤掉
+	if orderLookup {
 		q.Status = ""
 		q.ShipStatus = ""
 		q.AllocType = ""
@@ -171,10 +177,6 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 		response.Fail(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	lookupID := platformOrderID
-	if lookupID == "" {
-		lookupID = keyword
-	}
 	// 本地没有且像平台单号时，尝试从快递助手补拉后再查一次
 	if total == 0 && looksLikePlatformOrderID(lookupID) {
 		if err := h.orders.EnsureKDZSOrderByPlatformID(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), lookupID, authcontext.BearerToken(c)); err == nil {
@@ -183,6 +185,16 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 				response.Fail(c, http.StatusInternalServerError, err.Error())
 				return
 			}
+		}
+	}
+	// 按单号精确检索：多系统编号拆成多行（与快递助手「一 tid 多包」列表一致）
+	if orderLookup && len(list) > 0 {
+		before := len(list)
+		list = service.ExpandOrdersByPackages(list)
+		if int64(before) == total {
+			total = int64(len(list))
+		} else if len(list) > before {
+			total += int64(len(list) - before)
 		}
 	}
 	response.OK(c, response.PageResult(list, total, page, pageSize))
@@ -785,6 +797,28 @@ func looksLikePlatformOrderID(s string) bool {
 		}
 	}
 	return true
+}
+
+// looksLikeOrderLookup 平台单号 / 系统编号 / OC 销售单号，用于放宽筛选并按包展开。
+func looksLikeOrderLookup(s string) bool {
+	s = strings.TrimSpace(s)
+	if looksLikePlatformOrderID(s) {
+		return true
+	}
+	up := strings.ToUpper(s)
+	if strings.HasPrefix(up, "OC") || strings.HasPrefix(up, "SO") {
+		rest := s[2:]
+		if len(rest) < 6 {
+			return false
+		}
+		for _, r := range rest {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func parseQueryTime(s string) *time.Time {
