@@ -26,6 +26,7 @@ import {
   shipOrder,
   updateOrderRemarks,
   type Order,
+  type OrderItem,
   type SupplierBinding,
   type SupplierItem,
 } from '../../api/orders'
@@ -52,6 +53,13 @@ const canDecryptPhone = computed(() => {
   const o = order.value
   return !!o && canDecryptRealPhone(o)
 })
+
+function packageSysTid(item?: OrderItem) {
+  const pid = item?.packageId
+  if (!pid || !order.value?.packages?.length) return ''
+  const pkg = order.value.packages.find((p) => p.id === pid)
+  return pkg?.platformSysTid || ''
+}
 
 async function onDecrypt() {
   if (!order.value || !canDecrypt.value) return
@@ -539,6 +547,19 @@ onMounted(load)
         </el-descriptions-item>
         <el-descriptions-item label="平台">{{ order.platform || '-' }} / {{ order.shopName || '-' }}</el-descriptions-item>
         <el-descriptions-item label="平台单号">{{ order.platformOrderId || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="系统编号" :span="2">
+          <template v-if="order.packages?.length">
+            <div v-for="p in order.packages" :key="p.id" class="sys-tid-row">
+              <el-tag v-if="p.isPrimary" size="small" type="success">主包</el-tag>
+              <el-tag v-else size="small" type="info">次包</el-tag>
+              <code class="sys-tid">{{ p.platformSysTid }}</code>
+              <span v-if="p.mailNo" class="muted"> · {{ p.mailNo }}</span>
+              <span v-if="p.platformStatusText" class="muted"> · {{ p.platformStatusText }}</span>
+              <span v-if="p.fenFaRemark" class="muted"> · 分发 {{ p.fenFaRemark }}</span>
+            </div>
+          </template>
+          <template v-else>{{ order.platformSysTid || '-' }}</template>
+        </el-descriptions-item>
         <el-descriptions-item label="履约状态">{{ labelStatus(order.status) }}</el-descriptions-item>
         <el-descriptions-item label="发货状态">{{ labelShipStatus(order.shipStatus) }}</el-descriptions-item>
         <el-descriptions-item label="快递助手状态">
@@ -667,7 +688,14 @@ onMounted(load)
           <template #default="{ row }">
             <span v-if="row.fullGroupHeader || row.isSplitChild">—</span>
             <span v-else-if="row.item.skuSpecs && row.item.skuSpecs !== row.item.productName">{{ row.item.skuSpecs }}</span>
-            <span v-else>—</span>
+            <span v-else class="muted">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="系统编号" min-width="150">
+          <template #default="{ row }">
+            <span v-if="row.fullGroupHeader || row.isSplitChild" class="muted">—</span>
+            <code v-else-if="packageSysTid(row.item)" class="sys-tid">{{ packageSysTid(row.item) }}</code>
+            <span v-else class="muted">—</span>
           </template>
         </el-table-column>
         <el-table-column prop="platformSkuId" label="平台SKU" width="130" show-overflow-tooltip>
@@ -830,6 +858,8 @@ onMounted(load)
 h3 { margin: 8px 0 0; font-size: 15px; color: #334155; }
 .hint { margin-left: 10px; color: #94a3b8; font-size: 12px; }
 .muted { color: #94a3b8; font-size: 12px; }
+.sys-tid-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 2px 0; }
+.sys-tid { font-size: 12px; color: #334155; word-break: break-all; }
 .split-child { color: #475569; }
 .split-prefix { color: #8f959e; }
 .split-tag { margin-left: 6px; vertical-align: middle; }

@@ -430,10 +430,10 @@ async function copyOrderText(order: Order, ev?: Event) {
           />
         </el-form-item>
         <el-form-item label="平台单号">
-          <el-input v-model="filters.platformOrderId" clearable placeholder="淘宝/抖店等单号" style="width: 200px" @keyup.enter="onFilterChange" />
+          <el-input v-model="filters.platformOrderId" clearable placeholder="平台单号/系统编号" style="width: 200px" @keyup.enter="onFilterChange" />
         </el-form-item>
         <el-form-item>
-          <el-input v-model="filters.keyword" clearable placeholder="单号/买家/手机" style="width: 180px" @keyup.enter="onFilterChange" />
+          <el-input v-model="filters.keyword" clearable placeholder="单号/系统编号/买家/手机" style="width: 200px" @keyup.enter="onFilterChange" />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="onFilterChange">查询</el-button>
@@ -460,6 +460,17 @@ async function copyOrderText(order: Order, ev?: Event) {
       <el-table-column prop="orderNo" label="订单号" min-width="150" width="160" show-overflow-tooltip />
       <el-table-column prop="platformOrderId" label="平台单号" min-width="180" width="200" show-overflow-tooltip>
         <template #default="{ row }">{{ row.platformOrderId || '-' }}</template>
+      </el-table-column>
+      <el-table-column label="系统编号" min-width="160" width="180" show-overflow-tooltip>
+        <template #default="{ row }">
+          <template v-if="row.packages?.length">
+            <div v-for="p in row.packages" :key="p.id" class="sys-tid-cell">
+              {{ p.platformSysTid }}
+              <span v-if="row.packages.length > 1" class="muted">{{ p.isPrimary ? '主' : '次' }}</span>
+            </div>
+          </template>
+          <span v-else>{{ row.platformSysTid || '-' }}</span>
+        </template>
       </el-table-column>
       <el-table-column label="平台" min-width="180" show-overflow-tooltip>
         <template #default="{ row }">{{ formatPlatformShop(row) }}</template>
@@ -711,4 +722,5 @@ async function copyOrderText(order: Order, ev?: Event) {
   word-break: break-all;
 }
 .muted { color: #c0c4cc; }
+.sys-tid-cell { font-size: 12px; line-height: 1.4; word-break: break-all; }
 </style>

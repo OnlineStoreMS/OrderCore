@@ -95,8 +95,12 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	if oid := strings.TrimSpace(q.PlatformOrderID); oid != "" {
 		like := "%" + strings.ToLower(oid) + "%"
 		tx = tx.Where(
-			"LOWER(platform_order_id) LIKE ? OR LOWER(platform_sys_tid) LIKE ?",
-			like, like,
+			`LOWER(platform_order_id) LIKE ? OR LOWER(platform_sys_tid) LIKE ? OR EXISTS (
+				SELECT 1 FROM order_packages p
+				WHERE p.order_id = orders.id AND p.tenant_id = orders.tenant_id
+				  AND LOWER(p.platform_sys_tid) LIKE ?
+			)`,
+			like, like, like,
 		)
 	}
 	switch strings.ToLower(strings.TrimSpace(q.SalesChannel)) {
@@ -141,8 +145,14 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	if kw := strings.TrimSpace(q.Keyword); kw != "" {
 		like := "%" + strings.ToLower(kw) + "%"
 		tx = tx.Where(
-			"LOWER(order_no) LIKE ? OR LOWER(platform_order_id) LIKE ? OR LOWER(platform_sys_tid) LIKE ? OR LOWER(buyer_name) LIKE ? OR LOWER(buyer_phone) LIKE ? OR LOWER(buyer_nick) LIKE ?",
-			like, like, like, like, like, like,
+			`LOWER(order_no) LIKE ? OR LOWER(platform_order_id) LIKE ? OR LOWER(platform_sys_tid) LIKE ?
+			 OR LOWER(buyer_name) LIKE ? OR LOWER(buyer_phone) LIKE ? OR LOWER(buyer_nick) LIKE ?
+			 OR EXISTS (
+				SELECT 1 FROM order_packages p
+				WHERE p.order_id = orders.id AND p.tenant_id = orders.tenant_id
+				  AND LOWER(p.platform_sys_tid) LIKE ?
+			 )`,
+			like, like, like, like, like, like, like,
 		)
 	}
 	var total int64
@@ -150,7 +160,9 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 		return nil, 0, err
 	}
 	var list []model.Order
-	err := tx.Preload("Items").Preload("Address").Preload("Shipments").Preload("Shipments.Items").
+	err := tx.Preload("Items").
+		Preload("Packages", func(db *gorm.DB) *gorm.DB { return db.Order("is_primary DESC, id ASC") }).
+		Preload("Address").Preload("Shipments").Preload("Shipments.Items").
 		Order("COALESCE(ordered_at, created_at) DESC, id DESC").
 		Offset((q.Page - 1) * q.PageSize).Limit(q.PageSize).
 		Find(&list).Error

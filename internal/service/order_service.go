@@ -1157,6 +1157,8 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		s.reconcileSupersededSiblingPackages(ctx, tenantID, o, req)
 		s.upsertOrderPackageFromIngest(tenantID, o, req, !mergeSameParentPkg)
 		o = s.forceMergeKDZSSiblingsIntoKeeper(tenantID, o)
+		// 按本轮系统编号写行级履约（挂包 + alloc），再汇总头表
+		o = s.applyPackageItemFulfillmentFromIngest(tenantID, o, req, hint)
 		return o, false, nil
 	}
 
@@ -1286,6 +1288,8 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	s.reconcileCoveredChildOrders(ctx, tenantID, out, req)
 	s.reconcileSupersededSiblingPackages(ctx, tenantID, out, req)
 	s.upsertOrderPackageFromIngest(tenantID, out, req, true)
+	out = s.forceMergeKDZSSiblingsIntoKeeper(tenantID, out)
+	out = s.applyPackageItemFulfillmentFromIngest(tenantID, out, req, hint)
 	return out, true, nil
 }
 
@@ -5551,6 +5555,14 @@ func (s *OrderService) reconcileSupersededSiblingPackages(ctx context.Context, t
 		}
 		if !orderSafeToSupersedeAsChildDup(other) {
 			log.Printf("[ordercore] skip sibling supersede order=%s covered_by=%s (has fulfillment/active)", other.OrderNo, keeper.OrderNo)
+			continue
+		}
+		// 另一系统编号上仍有本轮包裹未覆盖的商品 → 属并行拆包，交给 forceMerge，不可当换包删除
+		otherFull, _ := s.repos.GetOrder(tenantID, other.ID)
+		otherOIDs := orderItemOIDs(otherFull)
+		reqOIDs := ingestItemOIDs(req)
+		if len(otherOIDs) > 0 && !tidSetCovers(reqOIDs, otherOIDs) {
+			log.Printf("[ordercore] skip sibling supersede order=%s (distinct package goods, keep for merge)", other.OrderNo)
 			continue
 		}
 		otherTids := parseOrderRawTids(other.RawPayload, other.PlatformOrderID)
