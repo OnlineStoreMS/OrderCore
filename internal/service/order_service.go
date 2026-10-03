@@ -2584,12 +2584,17 @@ func (s *OrderService) markDropshipPORefundOnClose(ctx context.Context, tenantID
 	if s.supply == nil || strings.TrimSpace(poNo) == "" {
 		return nil
 	}
+	o, _ := s.repos.GetOrder(tenantID, orderID)
+	strikeIDs := dropshipItemIDsAfterSaleFinished(o)
+	if len(strikeIDs) == 0 {
+		return nil
+	}
 	remark := fmt.Sprintf("%s；代发单 %s 已划线", reason, poNo)
 	if s.repos.HasStatusLogActionRemark(tenantID, orderID, "dropship_po_refund_mark", remark) ||
 		s.repos.HasStatusLogContaining(tenantID, orderID, "dropship_po_pending_unbind", poNo) {
 		return nil
 	}
-	if _, err := s.supply.DetachSalesOrderEx(ctx, bearerToken, poNo, orderNo, orderID, reason, true); err != nil && !isSupplyNotFound(err) {
+	if _, err := s.supply.DetachSalesOrderEx(ctx, bearerToken, poNo, orderNo, orderID, reason, true, strikeIDs...); err != nil && !isSupplyNotFound(err) {
 		return err
 	}
 	return s.repos.AddStatusLog(&model.OrderStatusLog{
@@ -2600,6 +2605,43 @@ func (s *OrderService) markDropshipPORefundOnClose(ctx context.Context, tenantID
 		Action:     "dropship_po_refund_mark",
 		Remark:     remark,
 	})
+}
+
+func dropshipItemIDsAfterSaleFinished(o *model.Order) []uint64 {
+	if o == nil {
+		return nil
+	}
+	ids := make([]uint64, 0)
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		at := strings.TrimSpace(it.AllocType)
+		if at != model.AllocDropship && !(at == "" && o.AllocType == model.AllocDropship) {
+			continue
+		}
+		if !orderItemAfterSaleFinished(it) {
+			continue
+		}
+		ids = append(ids, it.ID)
+	}
+	return ids
+}
+
+func orderItemAfterSaleFinished(it model.OrderItem) bool {
+	as := strings.ToUpper(strings.TrimSpace(it.AfterSaleStatus))
+	text := strings.TrimSpace(it.AfterSaleStatusText)
+	if strings.Contains(as, "APPLY") || strings.Contains(text, "申请退款") || strings.Contains(text, "退款中") {
+		return false
+	}
+	if strings.Contains(as, "FINISH") || strings.Contains(as, "SUCCESS") || strings.Contains(as, "DONE") {
+		return true
+	}
+	if strings.Contains(text, "退款完成") || strings.Contains(text, "退款成功") {
+		return true
+	}
+	los := strings.ToUpper(strings.TrimSpace(it.LineOrderStatus))
+	return strings.Contains(los, "CANCEL")
 }
 
 func closeDetachReason(req dto.IngestOrderRequest) string {

@@ -552,6 +552,15 @@ func (r *Repos) UpsertOrderPackage(pkg *model.OrderPackage) error {
 	err := r.db.Where("tenant_id = ? AND platform_sys_tid = ?", pkg.TenantID, sysTid).First(&existing).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if pkg.MailNo != "" {
+				var n int64
+				_ = r.db.Model(&model.OrderPackage{}).
+					Where("tenant_id = ? AND order_id = ? AND mail_no = ?", pkg.TenantID, pkg.OrderID, pkg.MailNo).
+					Count(&n).Error
+				if n > 0 {
+					pkg.MailNo = ""
+				}
+			}
 			return r.db.Create(pkg).Error
 		}
 		return err
@@ -581,7 +590,13 @@ func (r *Repos) UpsertOrderPackage(pkg *model.OrderPackage) error {
 		"updated_at":           time.Now(),
 	}
 	if pkg.MailNo != "" {
-		fields["mail_no"] = pkg.MailNo
+		var n int64
+		_ = r.db.Model(&model.OrderPackage{}).
+			Where("tenant_id = ? AND order_id = ? AND id <> ? AND mail_no = ?", pkg.TenantID, targetOrderID, existing.ID, pkg.MailNo).
+			Count(&n).Error
+		if n == 0 {
+			fields["mail_no"] = pkg.MailNo
+		}
 	}
 	if pkg.IsPrimary {
 		fields["is_primary"] = true

@@ -293,18 +293,22 @@ func (c *Client) DetachSalesOrder(ctx context.Context, bearerToken, poNo, orderN
 }
 
 // DetachSalesOrderEx pendingManualUnbind=true 时仅划线提醒，不回写订单中心解绑。
-func (c *Client) DetachSalesOrderEx(ctx context.Context, bearerToken, poNo, orderNo string, soID uint64, reason string, pendingManualUnbind bool) (*PurchaseOrderDetail, error) {
+func (c *Client) DetachSalesOrderEx(ctx context.Context, bearerToken, poNo, orderNo string, soID uint64, reason string, pendingManualUnbind bool, orderItemIDs ...uint64) (*PurchaseOrderDetail, error) {
 	reqURL := c.baseURL + "/api/v1/admin/purchase-orders/detach-sales-order"
 	var wrapped struct {
 		PurchaseOrder *PurchaseOrderDetail `json:"purchaseOrder"`
 	}
-	if err := c.doJSON(ctx, http.MethodPost, reqURL, bearerToken, map[string]any{
+	body := map[string]any{
 		"poNo":                poNo,
 		"orderNo":             orderNo,
 		"soId":                soID,
 		"reason":              reason,
 		"pendingManualUnbind": pendingManualUnbind,
-	}, &wrapped); err != nil {
+	}
+	if len(orderItemIDs) > 0 {
+		body["orderItemIds"] = orderItemIDs
+	}
+	if err := c.doJSON(ctx, http.MethodPost, reqURL, bearerToken, body, &wrapped); err != nil {
 		return nil, err
 	}
 	if wrapped.PurchaseOrder != nil {
