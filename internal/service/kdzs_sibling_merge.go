@@ -34,6 +34,7 @@ func (s *OrderService) forceMergeKDZSSiblingsIntoKeeper(tenantID uint64, seed *m
 		log.Printf("[ordercore] force-merge list tid=%s: %v", tid, err)
 		return fullKeeper
 	}
+	merged := 0
 	for i := range list {
 		sib := &list[i]
 		if sib.ID == fullKeeper.ID {
@@ -43,14 +44,17 @@ func (s *OrderService) forceMergeKDZSSiblingsIntoKeeper(tenantID uint64, seed *m
 			log.Printf("[ordercore] force-merge sibling=%s -> keeper=%s: %v", sib.OrderNo, fullKeeper.OrderNo, err)
 			continue
 		}
+		merged++
 		log.Printf("[ordercore] force-merged sibling=%s into keeper=%s tid=%s", sib.OrderNo, fullKeeper.OrderNo, tid)
 	}
 	out, err := s.repos.GetOrder(tenantID, fullKeeper.ID)
 	if err != nil {
 		return fullKeeper
 	}
-	s.rollupAfterSiblingMerge(tenantID, out)
-	out, _ = s.repos.GetOrder(tenantID, fullKeeper.ID)
+	if merged > 0 {
+		s.rollupAfterSiblingMerge(tenantID, out, merged)
+		out, _ = s.repos.GetOrder(tenantID, fullKeeper.ID)
+	}
 	if out != nil {
 		// 并入后按明细重算实付，避免残留单包裹金额
 		sum := sumItemAmounts(out.Items)
@@ -226,22 +230,21 @@ func coalesceShip(s string) string {
 	return s
 }
 
-func (s *OrderService) rollupAfterSiblingMerge(tenantID uint64, o *model.Order) {
-	if o == nil {
+func (s *OrderService) rollupAfterSiblingMerge(tenantID uint64, o *model.Order, merged int) {
+	if o == nil || merged <= 0 {
 		return
 	}
 	fields := rollupOrderFulfillmentFields(o)
-	if len(fields) == 0 {
-		return
-	}
-	// 已发货/完成的头表状态不要被 rollup 打回 wait_ship
-	if o.ShipStatus == model.ShipShipped || o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
-		delete(fields, "status")
-		if o.ShipStatus == model.ShipShipped {
-			fields["ship_status"] = model.ShipShipped
+	if len(fields) > 0 {
+		// 已发货/完成的头表状态不要被 rollup 打回 wait_ship
+		if o.ShipStatus == model.ShipShipped || o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
+			delete(fields, "status")
+			if o.ShipStatus == model.ShipShipped {
+				fields["ship_status"] = model.ShipShipped
+			}
 		}
+		_ = s.repos.UpdateOrderFields(tenantID, o.ID, fields)
 	}
-	_ = s.repos.UpdateOrderFields(tenantID, o.ID, fields)
 	_ = s.repos.Transaction(func(tx *repo.Repos) error {
 		return tx.AddStatusLog(&model.OrderStatusLog{
 			TenantID:   tenantID,
@@ -249,7 +252,7 @@ func (s *OrderService) rollupAfterSiblingMerge(tenantID uint64, o *model.Order) 
 			FromStatus: o.Status,
 			ToStatus:   o.Status,
 			Action:     "kdzs_sibling_merge",
-			Remark:     "同主单多包裹强制并入单一 OC",
+			Remark:     fmt.Sprintf("同主单 %d 个包裹并入单一 OC", merged),
 		})
 	})
 }

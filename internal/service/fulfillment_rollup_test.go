@@ -49,6 +49,32 @@ func TestResolveAllocateTargetNoSplit(t *testing.T) {
 	}
 }
 
+func TestRollupOrderFulfillmentFieldsHeaderPOFallback(t *testing.T) {
+	o := &model.Order{
+		PurchaseOrderID: "PO-H",
+		Items: []model.OrderItem{
+			{ID: 1, Quantity: 1, AllocType: model.AllocDropship, ShipStatus: model.ShipWaitShip},
+		},
+	}
+	fields := rollupOrderFulfillmentFields(o)
+	if fields["purchase_order_id"] != "PO-H" {
+		t.Fatalf("header PO fallback got %v", fields["purchase_order_id"])
+	}
+}
+
+func TestNeedsDropshipPOSkipsBoundLine(t *testing.T) {
+	o := &model.Order{
+		AllocType:  model.AllocDropship,
+		SupplierID: 16,
+		Items: []model.OrderItem{
+			{ID: 1, Quantity: 1, AllocType: model.AllocDropship, PurchaseOrderID: "PO1"},
+		},
+	}
+	if needsDropshipPO(o) {
+		t.Fatal("bound dropship line should not need another PO")
+	}
+}
+
 func TestRollupOrderFulfillmentFieldsMixed(t *testing.T) {
 	o := &model.Order{
 		Items: []model.OrderItem{

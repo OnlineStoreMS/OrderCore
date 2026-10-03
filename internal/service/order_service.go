@@ -1781,11 +1781,24 @@ func (s *OrderService) mapOrderToPOLines(ctx context.Context, bearerToken string
 		return nil
 	}
 	items := make([]model.OrderItem, 0, len(o.Items))
+	hasLineAlloc := false
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		if strings.TrimSpace(it.AllocType) != "" {
+			hasLineAlloc = true
+			break
+		}
+	}
 	for _, it := range o.Items {
 		if strings.TrimSpace(it.SplitKind) != "" {
 			continue
 		}
 		if orderItemExcludedFromFulfillment(it) {
+			continue
+		}
+		if hasLineAlloc && strings.TrimSpace(it.AllocType) != model.AllocDropship {
 			continue
 		}
 		items = append(items, it)
@@ -2063,16 +2076,39 @@ func (s *OrderService) BatchAllocateDropship(ctx context.Context, tenantID, oper
 }
 
 func needsDropshipPO(o *model.Order) bool {
-	if o == nil || o.AllocType != model.AllocDropship || o.SupplierID == 0 {
+	if o == nil || o.SupplierID == 0 {
 		return false
 	}
 	if o.Status == model.StatusClosed {
 		return false
 	}
+	if !orderHasAllocType(o, model.AllocDropship) && o.AllocType != model.AllocDropship && o.AllocType != model.AllocMixed {
+		return false
+	}
 	if strings.TrimSpace(o.PurchaseOrderID) != "" {
 		return false
 	}
-	return len(o.Items) > 0
+	unboundDropship := false
+	anyDropshipLine := false
+	anyRoot := false
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		anyRoot = true
+		if strings.TrimSpace(it.AllocType) != model.AllocDropship {
+			continue
+		}
+		anyDropshipLine = true
+		if strings.TrimSpace(it.PurchaseOrderID) == "" {
+			unboundDropship = true
+		}
+	}
+	if anyDropshipLine {
+		return unboundDropship
+	}
+	// 行尚未写下 alloc 时，头表整单代发仍可建单
+	return o.AllocType == model.AllocDropship && anyRoot
 }
 
 // clearStalePurchaseOrderRef 若销售单挂着已删除的代发单号，清空以便同步可重建。
@@ -2242,16 +2278,13 @@ func (s *OrderService) createAndBindDropshipPOs(ctx context.Context, tenantID ui
 			}
 		}
 		for _, o := range group {
-			if err := s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{
-				"purchase_order_id": po.PoNo,
-			}); err != nil {
+			if err := s.bindDropshipPOToOrder(tenantID, o, po.PoNo); err != nil {
 				log.Printf("[ordercore] bind dropship PO order=%s po=%s: %v", o.OrderNo, po.PoNo, err)
 				if firstErr == nil {
 					firstErr = err
 				}
 				continue
 			}
-			o.PurchaseOrderID = po.PoNo
 			actionRemark := fmt.Sprintf("同步自动创建代发单 po=%s → %s", po.PoNo, supplierName)
 			if force {
 				actionRemark = fmt.Sprintf("补建代发单 po=%s → %s", po.PoNo, supplierName)
@@ -2267,6 +2300,49 @@ func (s *OrderService) createAndBindDropshipPOs(ctx context.Context, tenantID ui
 		}
 	}
 	return firstErr
+}
+
+func (s *OrderService) bindDropshipPOToOrder(tenantID uint64, o *model.Order, poNo string) error {
+	poNo = strings.TrimSpace(poNo)
+	if o == nil || poNo == "" {
+		return nil
+	}
+	now := time.Now()
+	if err := s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{
+		"purchase_order_id": poNo,
+		"updated_at":        now,
+	}); err != nil {
+		return err
+	}
+	o.PurchaseOrderID = poNo
+	for i := range o.Items {
+		it := &o.Items[i]
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		at := strings.TrimSpace(it.AllocType)
+		if at != "" && at != model.AllocDropship {
+			continue
+		}
+		if strings.TrimSpace(it.PurchaseOrderID) != "" {
+			continue
+		}
+		fields := map[string]any{
+			"purchase_order_id": poNo,
+			"updated_at":        now,
+		}
+		if at == "" && o.AllocType == model.AllocDropship {
+			fields["alloc_type"] = model.AllocDropship
+			fields["dropship_mode"] = o.DropshipMode
+			fields["supplier_id"] = o.SupplierID
+			fields["supplier_name"] = o.SupplierName
+		}
+		if err := s.repos.UpdateOrderItemFields(tenantID, it.ID, fields); err != nil {
+			return err
+		}
+		it.PurchaseOrderID = poNo
+	}
+	return nil
 }
 
 func isKDZSFactoryGroup(orders []*model.Order) bool {

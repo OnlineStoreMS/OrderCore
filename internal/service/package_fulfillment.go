@@ -88,6 +88,11 @@ func (s *OrderService) applyPackageItemFulfillmentFromIngest(tenantID uint64, o 
 					fields["supplier_id"] = sid
 					fields["supplier_name"] = sname
 				}
+				if po := strings.TrimSpace(it.PurchaseOrderID); po != "" {
+					fields["purchase_order_id"] = po
+				} else if po := strings.TrimSpace(cur.PurchaseOrderID); po != "" {
+					fields["purchase_order_id"] = po
+				}
 			} else if alloc == model.AllocSelfShip || alloc == model.AllocChannelShip {
 				fields["supplier_id"] = 0
 				fields["supplier_name"] = ""

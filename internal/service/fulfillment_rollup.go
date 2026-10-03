@@ -102,6 +102,10 @@ func rollupOrderFulfillmentFields(o *model.Order) map[string]any {
 		shipStatuses[ss] = struct{}{}
 		if po := strings.TrimSpace(it.PurchaseOrderID); po != "" {
 			poNos[po] = struct{}{}
+		} else if at == model.AllocDropship {
+			if po := strings.TrimSpace(o.PurchaseOrderID); po != "" {
+				poNos[po] = struct{}{}
+			}
 		}
 		if so := strings.TrimSpace(it.SelfOrderNo); so != "" {
 			selfNos[so] = struct{}{}
