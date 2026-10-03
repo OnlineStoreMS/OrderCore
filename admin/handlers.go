@@ -157,21 +157,8 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 	if lookupID == "" {
 		lookupID = keyword
 	}
+	// 单号检索仍按包展开；时间/发货状态等筛选与关键字同时生效（不再放宽）
 	orderLookup := platformOrderID != "" || looksLikeOrderLookup(keyword)
-
-	// 按单号搜索时放宽时间窗，避免日期筛选把补拉订单挡住
-	if keyword != "" || platformOrderID != "" {
-		q.OrderedAtStart, q.OrderedAtEnd = nil, nil
-		q.ShippedAtStart, q.ShippedAtEnd = nil, nil
-		q.PayTimeStart, q.PayTimeEnd = nil, nil
-	}
-	// 按平台单号 / OC 单号 / 系统编号定位时，默认「待发货」会把已发货单滤掉
-	if orderLookup {
-		q.Status = ""
-		q.ShipStatus = ""
-		q.AllocType = ""
-		q.SalesChannel = ""
-	}
 	list, total, err := h.orders.List(authcontext.TenantID(c), q)
 	if err != nil {
 		response.Fail(c, http.StatusInternalServerError, err.Error())
@@ -799,7 +786,7 @@ func looksLikePlatformOrderID(s string) bool {
 	return true
 }
 
-// looksLikeOrderLookup 平台单号 / 系统编号 / OC 销售单号，用于放宽筛选并按包展开。
+// looksLikeOrderLookup 平台单号 / 系统编号 / OC 销售单号，用于列表按包裹展开。
 func looksLikeOrderLookup(s string) bool {
 	s = strings.TrimSpace(s)
 	if looksLikePlatformOrderID(s) {
