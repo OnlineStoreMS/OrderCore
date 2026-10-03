@@ -596,6 +596,9 @@ func (r *Repos) UpsertOrderPackage(pkg *model.OrderPackage) error {
 			Count(&n).Error
 		if n == 0 {
 			fields["mail_no"] = pkg.MailNo
+		} else if strings.TrimSpace(existing.MailNo) == pkg.MailNo || strings.TrimSpace(existing.MailNo) == "" {
+			// 同单其它包裹已占该运单号：本包裹不共享（混单自营/代发串号）
+			fields["mail_no"] = ""
 		}
 	}
 	if pkg.IsPrimary {

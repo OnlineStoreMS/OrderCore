@@ -228,6 +228,21 @@ func orderHasUnallocatedRoots(o *model.Order) bool {
 	return false
 }
 
+func orderHasDropshipPOItems(o *model.Order) bool {
+	if o == nil {
+		return false
+	}
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		if strings.TrimSpace(it.AllocType) == model.AllocDropship && strings.TrimSpace(it.PurchaseOrderID) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func orderHasAllocType(o *model.Order, allocType string) bool {
 	if o == nil || allocType == "" {
 		return false

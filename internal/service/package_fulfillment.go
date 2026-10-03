@@ -67,12 +67,17 @@ func (s *OrderService) applyPackageItemFulfillmentFromIngest(tenantID uint64, o 
 			fields["ship_status"] = model.ShipWaitShip
 			fields["allocated_at"] = nil
 		} else if hint.ApplySyncAlloc && strings.TrimSpace(hint.AllocType) != "" {
-			// 已自营分配的行，同步到已发货时不要改成渠道已发
+			// 已自营/代发分配的行，同步到已发货时不要被渠道态冲掉
 			alloc := hint.AllocType
 			mode := hint.DropshipMode
 			if alloc == model.AllocChannelShip &&
 				(it.AllocType == model.AllocSelfShip || it.AllocType == model.AllocPurchaseThenShip) {
 				alloc = it.AllocType
+				mode = it.DropshipMode
+			}
+			if alloc == model.AllocChannelShip && it.AllocType == model.AllocDropship &&
+				strings.TrimSpace(it.PurchaseOrderID) != "" {
+				alloc = model.AllocDropship
 				mode = it.DropshipMode
 			}
 			fields["alloc_type"] = alloc
@@ -81,12 +86,17 @@ func (s *OrderService) applyPackageItemFulfillmentFromIngest(tenantID uint64, o 
 			if it.AllocatedAt == nil {
 				fields["allocated_at"] = now
 			}
-			if alloc == model.AllocDropship && mode == model.DropshipKDZSFactory {
-				fields["factory_id"] = strings.TrimSpace(req.FactoryID)
-				fields["factory_name"] = strings.TrimSpace(req.FactoryName)
-				if sid, sname := s.resolveBoundSupplier(tenantID, req.FactoryID, req.FactoryName); sid > 0 {
-					fields["supplier_id"] = sid
-					fields["supplier_name"] = sname
+			if alloc == model.AllocDropship {
+				if mode == model.DropshipKDZSFactory {
+					fields["factory_id"] = firstNonEmpty(strings.TrimSpace(it.FactoryID), strings.TrimSpace(req.FactoryID))
+					fields["factory_name"] = firstNonEmpty(strings.TrimSpace(it.FactoryName), strings.TrimSpace(req.FactoryName))
+					if it.SupplierID > 0 {
+						fields["supplier_id"] = it.SupplierID
+						fields["supplier_name"] = it.SupplierName
+					} else if sid, sname := s.resolveBoundSupplier(tenantID, req.FactoryID, req.FactoryName); sid > 0 {
+						fields["supplier_id"] = sid
+						fields["supplier_name"] = sname
+					}
 				}
 				if po := strings.TrimSpace(it.PurchaseOrderID); po != "" {
 					fields["purchase_order_id"] = po

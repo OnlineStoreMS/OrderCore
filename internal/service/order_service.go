@@ -2121,6 +2121,10 @@ func (s *OrderService) clearStalePurchaseOrderRef(ctx context.Context, tenantID 
 	if poNo == "" {
 		return o
 	}
+	// 已发货/完成单不因列表漏检误清（合单/划线残留时 keyword 可能扫不到）
+	if o.ShipStatus == model.ShipShipped || o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
+		return o
+	}
 	list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, 0, "dropship", poNo, 1, 20)
 	if err != nil {
 		// 下游短暂失败时不误清，避免重复建单
@@ -2129,6 +2133,17 @@ func (s *OrderService) clearStalePurchaseOrderRef(ctx context.Context, tenantID 
 	for _, it := range list {
 		if strings.TrimSpace(it.PoNo) == poNo {
 			return o
+		}
+	}
+	// 按销售单再查一次：头关键字没命中时，明细关联仍可能挂着
+	if o.ID > 0 {
+		bySO, _, serr := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, o.ID, "dropship", "", 1, 20)
+		if serr == nil {
+			for _, it := range bySO {
+				if strings.TrimSpace(it.PoNo) == poNo {
+					return o
+				}
+			}
 		}
 	}
 	if err := s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{"purchase_order_id": ""}); err != nil {
@@ -2457,10 +2472,33 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 		if err != nil || o == nil {
 			continue
 		}
+		clearItemPOs := func() error {
+			for _, it := range o.Items {
+				if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+					continue
+				}
+				if strings.TrimSpace(it.AllocType) != model.AllocDropship && strings.TrimSpace(it.PurchaseOrderID) == "" {
+					continue
+				}
+				if strings.TrimSpace(it.PurchaseOrderID) == "" {
+					continue
+				}
+				if err := s.repos.UpdateOrderItemFields(tenantID, it.ID, map[string]any{
+					"purchase_order_id": "",
+					"updated_at":        time.Now(),
+				}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 		if o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
 			// 终态只清采购单号，不清分配
-			if strings.TrimSpace(o.PurchaseOrderID) == "" {
+			if strings.TrimSpace(o.PurchaseOrderID) == "" && !orderHasDropshipPOItems(o) {
 				continue
+			}
+			if err := clearItemPOs(); err != nil {
+				return updated, err
 			}
 			if err := s.repos.UpdateOrderFields(tenantID, id, map[string]any{"purchase_order_id": ""}); err != nil {
 				return updated, err
@@ -2471,6 +2509,9 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 			})
 			updated++
 			continue
+		}
+		if err := clearItemPOs(); err != nil {
+			return updated, err
 		}
 		fields := map[string]any{"purchase_order_id": ""}
 		toStatus := o.Status
