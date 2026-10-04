@@ -1132,9 +1132,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		hadDropshipAlloc := existing.AllocType == model.AllocDropship && existing.SupplierID > 0
 		s.TryAutoAllocateBySKU(ctx, tenantID, operatorID, o, bearerToken)
 		o, _ = s.repos.GetOrder(tenantID, existing.ID)
-		if o != nil && o.Status != model.StatusClosed && o.Status != model.StatusCompleted {
-			o = s.clearStalePurchaseOrderRef(ctx, tenantID, o, bearerToken)
-			needPO := needsDropshipPO(o) && (!hadDropshipAlloc ||
+		if o != nil && o.Status != model.StatusClosed {
+			o = s.alignDropshipPORef(ctx, tenantID, o, bearerToken)
+			needPO := o.Status != model.StatusCompleted && needsDropshipPO(o) && (!hadDropshipAlloc ||
 				(o.ShipStatus == model.ShipWaitShip && (o.Status == model.StatusAllocated || o.Status == model.StatusPendingShip)))
 			if needPO {
 				s.queueOrCreateDropshipPO(ctx, tenantID, o, bearerToken)
@@ -1273,6 +1273,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	}
 	s.TryAutoAllocateBySKU(ctx, tenantID, operatorID, out, bearerToken)
 	out, _ = s.repos.GetOrder(tenantID, o.ID)
+	out = s.alignDropshipPORef(ctx, tenantID, out, bearerToken)
 	// 新单：本轮已代发分配且无采购单号 → 可自动建单（同步批次内合并）
 	if needsDropshipPO(out) {
 		s.queueOrCreateDropshipPO(ctx, tenantID, out, bearerToken)
@@ -2112,6 +2113,104 @@ func needsDropshipPO(o *model.Order) bool {
 	return o.AllocType == model.AllocDropship && anyRoot
 }
 
+// alignDropshipPORef 以本租户 Supply 活单为准校正销售单代发单号。
+// 已发货单也会改绑：避免挂到其它租户同号 PO / 已删单号，导致物流同步找不到本单。
+func (s *OrderService) alignDropshipPORef(ctx context.Context, tenantID uint64, o *model.Order, bearerToken string) *model.Order {
+	if o == nil || s.supply == nil || strings.TrimSpace(bearerToken) == "" {
+		return o
+	}
+	live := s.listLiveDropshipPONos(ctx, bearerToken, o.ID)
+	target, relink := pickLiveDropshipPO(orderDropshipPONos(o), live)
+	if relink && target != "" {
+		liveSet := map[string]struct{}{}
+		for _, p := range live {
+			liveSet[p] = struct{}{}
+		}
+		if err := s.relinkDropshipItemsToLivePO(tenantID, o, target, liveSet); err != nil {
+			log.Printf("[ordercore] relink live PO order=%s -> %s: %v", o.OrderNo, target, err)
+			return o
+		}
+		log.Printf("[ordercore] relinked dropship PO order=%s -> %s (live=%v)", o.OrderNo, target, live)
+		cur, err := s.repos.GetOrder(tenantID, o.ID)
+		if err != nil || cur == nil {
+			return o
+		}
+		return cur
+	}
+	if len(live) > 0 {
+		return o
+	}
+	return s.clearStalePurchaseOrderRef(ctx, tenantID, o, bearerToken)
+}
+
+func (s *OrderService) listLiveDropshipPONos(ctx context.Context, bearerToken string, soID uint64) []string {
+	if s.supply == nil || strings.TrimSpace(bearerToken) == "" || soID == 0 {
+		return nil
+	}
+	list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, soID, "dropship", "", 1, 50)
+	if err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(list))
+	for _, it := range list {
+		poNo := strings.TrimSpace(it.PoNo)
+		if poNo == "" {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(it.Status), "cancelled") {
+			continue
+		}
+		out = append(out, poNo)
+	}
+	return uniqueNonEmptyStrings(out)
+}
+
+func (s *OrderService) relinkDropshipItemsToLivePO(tenantID uint64, o *model.Order, target string, liveSet map[string]struct{}) error {
+	target = strings.TrimSpace(target)
+	if o == nil || target == "" {
+		return nil
+	}
+	now := time.Now()
+	head := strings.TrimSpace(o.PurchaseOrderID)
+	if head != target {
+		if _, ok := liveSet[head]; !ok || head == "" {
+			if err := s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{
+				"purchase_order_id": target,
+				"updated_at":        now,
+			}); err != nil {
+				return err
+			}
+			o.PurchaseOrderID = target
+		}
+	}
+	for i := range o.Items {
+		it := &o.Items[i]
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		if strings.TrimSpace(it.AllocType) != model.AllocDropship {
+			continue
+		}
+		cur := strings.TrimSpace(it.PurchaseOrderID)
+		if cur == target {
+			continue
+		}
+		if cur != "" {
+			if _, ok := liveSet[cur]; ok {
+				continue
+			}
+		}
+		if err := s.repos.UpdateOrderItemFields(tenantID, it.ID, map[string]any{
+			"purchase_order_id": target,
+			"updated_at":        now,
+		}); err != nil {
+			return err
+		}
+		it.PurchaseOrderID = target
+	}
+	return nil
+}
+
 // clearStalePurchaseOrderRef 若销售单挂着已删除的代发单号，清空以便同步可重建。
 func (s *OrderService) clearStalePurchaseOrderRef(ctx context.Context, tenantID uint64, o *model.Order, bearerToken string) *model.Order {
 	if o == nil || s.supply == nil || strings.TrimSpace(bearerToken) == "" {
@@ -2146,11 +2245,29 @@ func (s *OrderService) clearStalePurchaseOrderRef(ctx context.Context, tenantID 
 			}
 		}
 	}
-	if err := s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{"purchase_order_id": ""}); err != nil {
+	now := time.Now()
+	if err := s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{"purchase_order_id": "", "updated_at": now}); err != nil {
 		log.Printf("[ordercore] clear stale po ref order=%s po=%s: %v", o.OrderNo, poNo, err)
 		return o
 	}
 	o.PurchaseOrderID = ""
+	for i := range o.Items {
+		it := &o.Items[i]
+		if strings.TrimSpace(it.AllocType) != model.AllocDropship {
+			continue
+		}
+		if strings.TrimSpace(it.PurchaseOrderID) != poNo {
+			continue
+		}
+		if err := s.repos.UpdateOrderItemFields(tenantID, it.ID, map[string]any{
+			"purchase_order_id": "",
+			"updated_at":        now,
+		}); err != nil {
+			log.Printf("[ordercore] clear stale item po order=%s item=%d: %v", o.OrderNo, it.ID, err)
+			continue
+		}
+		it.PurchaseOrderID = ""
+	}
 	log.Printf("[ordercore] cleared stale purchase_order_id=%s order=%s (PO missing in SupplyCore)", poNo, o.OrderNo)
 	return o
 }
@@ -6302,7 +6419,7 @@ func (s *OrderService) autoSyncDropshipLogistics(ctx context.Context, o *model.O
 	if o.AllocType != model.AllocDropship && o.AllocType != model.AllocMixed && !orderHasAllocType(o, model.AllocDropship) {
 		return
 	}
-	poNos := orderDropshipPONos(o)
+	poNos := s.listLiveDropshipPONos(ctx, bearerToken, o.ID)
 	if len(poNos) == 0 {
 		return
 	}

@@ -287,6 +287,59 @@ func orderDropshipPONos(o *model.Order) []string {
 	return out
 }
 
+func uniqueNonEmptyStrings(groups ...[]string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0)
+	for _, g := range groups {
+		for _, v := range g {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			if _, ok := seen[v]; ok {
+				continue
+			}
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// pickLiveDropshipPO 销售单上的代发单号若已不是本租户活单，改绑到 Supply 按销售单查到的活单。
+// 本单已指向某一张活单时保留该号；多张开着的活单不擅自合并。
+func pickLiveDropshipPO(orderPOs, livePOs []string) (target string, relink bool) {
+	live := uniqueNonEmptyStrings(livePOs)
+	if len(live) == 0 {
+		return "", false
+	}
+	liveSet := map[string]struct{}{}
+	for _, p := range live {
+		liveSet[p] = struct{}{}
+	}
+	var matched []string
+	stale := false
+	anyOrder := false
+	for _, p := range uniqueNonEmptyStrings(orderPOs) {
+		anyOrder = true
+		if _, ok := liveSet[p]; ok {
+			matched = append(matched, p)
+		} else {
+			stale = true
+		}
+	}
+	if !anyOrder {
+		return live[0], true
+	}
+	if len(matched) == 0 {
+		return live[0], true
+	}
+	if stale {
+		return matched[0], true
+	}
+	return "", false
+}
+
 func platformOidsForItemIDs(o *model.Order, itemIDs []uint64) []string {
 	want := normalizeItemIDSet(itemIDs)
 	seen := map[string]struct{}{}

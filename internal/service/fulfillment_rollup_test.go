@@ -127,6 +127,24 @@ func TestRollupOrderFulfillmentFieldsUniform(t *testing.T) {
 	}
 }
 
+func TestPickLiveDropshipPO(t *testing.T) {
+	if got, relink := pickLiveDropshipPO([]string{"PO202610040001"}, []string{"PO202610030025"}); !relink || got != "PO202610030025" {
+		t.Fatalf("stale other-tenant-looking PO should relink, got %s relink=%v", got, relink)
+	}
+	if got, relink := pickLiveDropshipPO([]string{"PO202610030025"}, []string{"PO202610030025"}); relink || got != "" {
+		t.Fatalf("already live should keep, got %s relink=%v", got, relink)
+	}
+	if got, relink := pickLiveDropshipPO(nil, []string{"PO202610030025"}); !relink || got != "PO202610030025" {
+		t.Fatalf("empty order PO should bind live, got %s relink=%v", got, relink)
+	}
+	if got, relink := pickLiveDropshipPO([]string{"PO-A", "PO-B"}, []string{"PO-A", "PO-B"}); relink || got != "" {
+		t.Fatalf("two live POs should not collapse, got %s relink=%v", got, relink)
+	}
+	if got, relink := pickLiveDropshipPO([]string{"PO-STALE", "PO-LIVE"}, []string{"PO-LIVE"}); !relink || got != "PO-LIVE" {
+		t.Fatalf("mixed stale+live should keep live, got %s relink=%v", got, relink)
+	}
+}
+
 func TestOrderDropshipPONos(t *testing.T) {
 	o := &model.Order{
 		PurchaseOrderID: "PO-H",

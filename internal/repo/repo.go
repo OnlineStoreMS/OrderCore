@@ -1073,25 +1073,47 @@ func (r *Repos) DeleteBinding(tenantID, id uint64) error {
 }
 
 func (r *Repos) NextOrderNo(tenantID uint64) (string, error) {
+	_ = tenantID
 	prefix := "OC" + time.Now().Format("20060102")
-	seq, err := nextSeqFromLast(r.db.Model(&model.Order{}).
-		Where("tenant_id = ? AND order_no LIKE ?", tenantID, prefix+"%"),
-		"order_no", prefix)
-	if err != nil {
-		return "", err
+	for attempt := 0; attempt < 20; attempt++ {
+		seq, err := nextSeqFromLast(r.db.Model(&model.Order{}).
+			Where("order_no LIKE ?", prefix+"%"),
+			"order_no", prefix)
+		if err != nil {
+			return "", err
+		}
+		no := fmt.Sprintf("%s%04d", prefix, seq)
+		var n int64
+		if err := r.db.Model(&model.Order{}).Where("order_no = ?", no).Count(&n).Error; err != nil {
+			return "", err
+		}
+		if n == 0 {
+			return no, nil
+		}
 	}
-	return fmt.Sprintf("%s%04d", prefix, seq), nil
+	return "", fmt.Errorf("订单号冲突")
 }
 
 func (r *Repos) NextShipmentNo(tenantID uint64) (string, error) {
+	_ = tenantID
 	prefix := "SH" + time.Now().Format("20060102")
-	seq, err := nextSeqFromLast(r.db.Model(&model.OrderShipment{}).
-		Where("tenant_id = ? AND shipment_no LIKE ?", tenantID, prefix+"%"),
-		"shipment_no", prefix)
-	if err != nil {
-		return "", err
+	for attempt := 0; attempt < 20; attempt++ {
+		seq, err := nextSeqFromLast(r.db.Model(&model.OrderShipment{}).
+			Where("shipment_no LIKE ?", prefix+"%"),
+			"shipment_no", prefix)
+		if err != nil {
+			return "", err
+		}
+		no := fmt.Sprintf("%s%04d", prefix, seq)
+		var n int64
+		if err := r.db.Model(&model.OrderShipment{}).Where("shipment_no = ?", no).Count(&n).Error; err != nil {
+			return "", err
+		}
+		if n == 0 {
+			return no, nil
+		}
 	}
-	return fmt.Sprintf("%s%04d", prefix, seq), nil
+	return "", fmt.Errorf("运单号冲突")
 }
 
 // nextSeqFromLast 取当日最大单号序号 +1，避免 COUNT+1 在删单留洞时撞唯一索引。
