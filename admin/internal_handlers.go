@@ -3,6 +3,7 @@ package admin
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"ordercore/internal/dto"
 	"ordercore/internal/pkg/response"
@@ -44,4 +45,30 @@ func (h *Handlers) InternalIngest(c *gin.Context) {
 		return
 	}
 	response.OK(c, gin.H{"order": o, "created": created})
+}
+
+func (h *Handlers) InternalFenFaRemarks(c *gin.Context) {
+	got := strings.TrimSpace(c.GetHeader("X-Internal-Token"))
+	want := strings.TrimSpace(h.internalToken)
+	if want == "" || got == "" || got != want {
+		response.Fail(c, http.StatusUnauthorized, "invalid internal token")
+		return
+	}
+	var in struct {
+		OrderNos []string `json:"orderNos"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		response.Fail(c, http.StatusBadRequest, "参数无效")
+		return
+	}
+	if len(in.OrderNos) > 2000 {
+		response.Fail(c, http.StatusBadRequest, "订单号过多")
+		return
+	}
+	data, err := h.orders.FenFaRemarks(internalTenantID(c), in.OrderNos)
+	if err != nil {
+		response.Fail(c, http.StatusInternalServerError, err.Error())
+		return
+	}
+	response.OK(c, data)
 }

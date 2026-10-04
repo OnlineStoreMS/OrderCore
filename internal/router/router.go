@@ -41,7 +41,7 @@ func Setup(db *gorm.DB, cfg *config.Config) (*gin.Engine, *scheduler.SyncSchedul
 	orderSvc := service.NewOrderService(repos, ssClient, scClient, supplyClient, selfClient, productClient, customerClient, shippingClient, agentsClient)
 	jwtMgr := jwtmgr.NewManager(cfg.Auth.JWTSecret)
 	settingsSvc := service.NewSettingsService(repos, orderSvc, jwtMgr)
-	h := admin.NewHandlers(orderSvc, supplyClient)
+	h := admin.NewHandlers(orderSvc, supplyClient, cfg.Auth.InternalToken)
 	sh := admin.NewSettingsHandlers(settingsSvc)
 
 	r.GET("/health", func(c *gin.Context) {

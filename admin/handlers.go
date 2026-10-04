@@ -19,12 +19,13 @@ import (
 )
 
 type Handlers struct {
-	orders *service.OrderService
-	supply *supplycore.Client
+	orders        *service.OrderService
+	supply        *supplycore.Client
+	internalToken string
 }
 
-func NewHandlers(orders *service.OrderService, supply *supplycore.Client) *Handlers {
-	return &Handlers{orders: orders, supply: supply}
+func NewHandlers(orders *service.OrderService, supply *supplycore.Client, internalToken string) *Handlers {
+	return &Handlers{orders: orders, supply: supply, internalToken: strings.TrimSpace(internalToken)}
 }
 
 func (h *Handlers) Dashboard(c *gin.Context) {

@@ -28,8 +28,9 @@ type DatabaseConfig struct {
 }
 
 type AuthConfig struct {
-	Enabled   bool
-	JWTSecret string `mapstructure:"jwt_secret"`
+	Enabled       bool
+	JWTSecret     string `mapstructure:"jwt_secret"`
+	InternalToken string `mapstructure:"internal_token"`
 }
 
 type IntegrationsConfig struct {
@@ -57,9 +58,9 @@ type MinIOConfig struct {
 	AccessKey  string `mapstructure:"access_key"`
 	SecretKey  string `mapstructure:"secret_key"`
 	Bucket     string
-	UseSSL     bool   `mapstructure:"use_ssl"`
+	UseSSL     bool `mapstructure:"use_ssl"`
 	Prefix     string
-	PublicRead bool   `mapstructure:"public_read"`
+	PublicRead bool `mapstructure:"public_read"`
 }
 
 type CORSConfig struct {
@@ -92,6 +93,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Auth.JWTSecret == "" {
 		cfg.Auth.JWTSecret = "change-me-in-production-use-long-random-string"
+	}
+	if cfg.Auth.InternalToken == "" {
+		cfg.Auth.InternalToken = cfg.Auth.JWTSecret
 	}
 	if cfg.Integrations.ProductCoreAPIURL == "" {
 		cfg.Integrations.ProductCoreAPIURL = "http://127.0.0.1:8090"

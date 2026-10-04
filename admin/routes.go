@@ -77,4 +77,5 @@ func RegisterRoutes(g *gin.RouterGroup, h *Handlers, sh *SettingsHandlers) {
 
 func RegisterInternalRoutes(g *gin.RouterGroup, h *Handlers) {
 	g.POST("/orders/ingest", h.InternalIngest)
+	g.POST("/orders/fenfa-remarks", h.InternalFenFaRemarks)
 }
