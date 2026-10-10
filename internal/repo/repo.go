@@ -185,6 +185,51 @@ func (r *Repos) GetOrder(tenantID, id uint64) (*model.Order, error) {
 	return &o, nil
 }
 
+// FenFaRemarkSKUSep 分发备注查找键分隔：orderNo/平台单号 + 规格。售后按规格对齐拆单备注。
+const FenFaRemarkSKUSep = "\x1f"
+
+func FenFaRemarkLookupKey(orderNo, sku string) string {
+	orderNo = strings.TrimSpace(orderNo)
+	sku = strings.TrimSpace(sku)
+	if orderNo == "" {
+		return ""
+	}
+	if sku == "" {
+		return orderNo
+	}
+	return orderNo + FenFaRemarkSKUSep + sku
+}
+
+func orderFenFaRemarkFromPackages(o *model.Order) string {
+	remark := strings.TrimSpace(o.FenFaRemark)
+	if remark != "" {
+		return remark
+	}
+	var sum float64
+	nNum := 0
+	first := ""
+	for _, p := range o.Packages {
+		t := strings.TrimSpace(p.FenFaRemark)
+		if t == "" {
+			continue
+		}
+		if first == "" {
+			first = t
+		}
+		if v, err := strconv.ParseFloat(strings.TrimRight(strings.TrimSpace(t), "元块￥$ "), 64); err == nil && v >= 0 {
+			sum += v
+			nNum++
+		}
+	}
+	if nNum > 1 && sum > 0 {
+		if sum == float64(int64(sum)) {
+			return strconv.FormatInt(int64(sum), 10)
+		}
+		return strconv.FormatFloat(sum, 'f', 2, 64)
+	}
+	return first
+}
+
 func (r *Repos) FenFaRemarksByOrderNos(tenantID uint64, orderNos []string) (map[string]string, error) {
 	seen := map[string]struct{}{}
 	nos := make([]string, 0, len(orderNos))
@@ -203,6 +248,8 @@ func (r *Repos) FenFaRemarksByOrderNos(tenantID uint64, orderNos []string) (map[
 	if len(nos) == 0 {
 		return out, nil
 	}
+	// 同一平台单可能拆成多张销售单；裸平台单号仅在备注一致时回填，规格键用于精确匹配。
+	platformRemarks := map[string]map[string]struct{}{}
 	const chunk = 300
 	for i := 0; i < len(nos); i += chunk {
 		end := i + chunk
@@ -212,48 +259,52 @@ func (r *Repos) FenFaRemarksByOrderNos(tenantID uint64, orderNos []string) (map[
 		part := nos[i:end]
 		var list []model.Order
 		err := r.db.Preload("Packages").
+			Preload("Items", "parent_order_item_id = 0").
 			Select("id, order_no, platform_order_id, fen_fa_remark").
 			Where("tenant_id = ? AND (order_no IN ? OR platform_order_id IN ?)", tenantID, part, part).
 			Find(&list).Error
 		if err != nil {
 			return nil, err
 		}
-		for _, o := range list {
-			remark := strings.TrimSpace(o.FenFaRemark)
-			if remark == "" {
-				// 头表空：汇总包裹分发备注（与 Get 水合一致）
-				var sum float64
-				nNum := 0
-				first := ""
-				for _, p := range o.Packages {
-					t := strings.TrimSpace(p.FenFaRemark)
-					if t == "" {
-						continue
-					}
-					if first == "" {
-						first = t
-					}
-					if v, err := strconv.ParseFloat(strings.TrimRight(strings.TrimSpace(t), "元块￥$ "), 64); err == nil && v >= 0 {
-						sum += v
-						nNum++
-					}
+		for i := range list {
+			o := &list[i]
+			remark := orderFenFaRemarkFromPackages(o)
+			if on := strings.TrimSpace(o.OrderNo); on != "" {
+				out[on] = remark
+			}
+			pid := strings.TrimSpace(o.PlatformOrderID)
+			for _, it := range o.Items {
+				sku := strings.TrimSpace(it.SkuSpecs)
+				if sku == "" {
+					sku = strings.TrimSpace(it.SkuCode)
 				}
-				if nNum > 1 && sum > 0 {
-					if sum == float64(int64(sum)) {
-						remark = strconv.FormatInt(int64(sum), 10)
-					} else {
-						remark = strconv.FormatFloat(sum, 'f', 2, 64)
-					}
-				} else {
-					remark = first
+				if sku == "" {
+					continue
+				}
+				if on := strings.TrimSpace(o.OrderNo); on != "" {
+					out[FenFaRemarkLookupKey(on, sku)] = remark
+				}
+				if pid != "" {
+					out[FenFaRemarkLookupKey(pid, sku)] = remark
 				}
 			}
-			if o.OrderNo != "" {
-				out[o.OrderNo] = remark
+			if pid == "" {
+				continue
 			}
-			if o.PlatformOrderID != "" {
-				out[o.PlatformOrderID] = remark
+			if platformRemarks[pid] == nil {
+				platformRemarks[pid] = map[string]struct{}{}
 			}
+			if remark != "" {
+				platformRemarks[pid][remark] = struct{}{}
+			}
+		}
+	}
+	for pid, set := range platformRemarks {
+		if len(set) != 1 {
+			continue
+		}
+		for remark := range set {
+			out[pid] = remark
 		}
 	}
 	return out, nil
