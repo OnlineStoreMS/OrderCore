@@ -1027,15 +1027,26 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			}
 
 			// 发货状态独立更新（关闭单不写入待发货）；合并包裹时不覆盖头表发货态
+			// 自建物流/本地已出运单后，快递助手常仍停在「待发货」，禁止同步回退。
 			closingNow := status == model.StatusClosed
 			if shipStatus != "" && existing.Status != model.StatusClosed && !closingNow && !skipHeaderFulfillment {
-				fields["ship_status"] = shipStatus
-				if shipStatus == model.ShipShipped {
-					if t := parseTime(req.ShippedAt); t != nil {
-						fields["shipped_at"] = t
-					} else if existing.ShippedAt == nil {
-						now := time.Now()
-						fields["shipped_at"] = &now
+				if preserveLocalShipAgainstKDZSWait(existing, shipStatus) {
+					if restored := restoreShipStatusFromLocalShipments(existing); restored != "" {
+						fields["ship_status"] = restored
+						if restored == model.ShipShipped && existing.ShippedAt == nil {
+							now := time.Now()
+							fields["shipped_at"] = &now
+						}
+					}
+				} else {
+					fields["ship_status"] = shipStatus
+					if shipStatus == model.ShipShipped {
+						if t := parseTime(req.ShippedAt); t != nil {
+							fields["shipped_at"] = t
+						} else if existing.ShippedAt == nil {
+							now := time.Now()
+							fields["shipped_at"] = &now
+						}
 					}
 				}
 			}
@@ -2589,12 +2600,18 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 		if err != nil || o == nil {
 			continue
 		}
-		clearItemPOs := func() error {
+		dropshipItemIDs := make([]uint64, 0, len(o.Items))
+		for _, it := range o.Items {
+			if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+				continue
+			}
+			if strings.TrimSpace(it.AllocType) == model.AllocDropship || strings.TrimSpace(it.PurchaseOrderID) != "" {
+				dropshipItemIDs = append(dropshipItemIDs, it.ID)
+			}
+		}
+		clearItemPOsOnly := func() error {
 			for _, it := range o.Items {
 				if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
-					continue
-				}
-				if strings.TrimSpace(it.AllocType) != model.AllocDropship && strings.TrimSpace(it.PurchaseOrderID) == "" {
 					continue
 				}
 				if strings.TrimSpace(it.PurchaseOrderID) == "" {
@@ -2614,7 +2631,7 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 			if strings.TrimSpace(o.PurchaseOrderID) == "" && !orderHasDropshipPOItems(o) {
 				continue
 			}
-			if err := clearItemPOs(); err != nil {
+			if err := clearItemPOsOnly(); err != nil {
 				return updated, err
 			}
 			if err := s.repos.UpdateOrderFields(tenantID, id, map[string]any{"purchase_order_id": ""}); err != nil {
@@ -2627,24 +2644,41 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 			updated++
 			continue
 		}
-		if err := clearItemPOs(); err != nil {
-			return updated, err
-		}
 		fields := map[string]any{"purchase_order_id": ""}
 		toStatus := o.Status
 		logRemark := remark
 		if req.ClearAlloc && o.ShipStatus != model.ShipShipped {
-			fields["alloc_type"] = ""
-			fields["dropship_mode"] = ""
-			fields["supplier_id"] = 0
-			fields["supplier_name"] = ""
-			fields["factory_id"] = ""
-			fields["factory_name"] = ""
+			// 行级代发字段必须一并清掉，否则单头已是待分配、行仍带 alloc_type，再分配会报「已分配」
+			if len(dropshipItemIDs) > 0 {
+				if err := s.repos.ClearOrderItemsFulfillment(tenantID, id, dropshipItemIDs); err != nil {
+					return updated, err
+				}
+			} else if err := clearItemPOsOnly(); err != nil {
+				return updated, err
+			}
+			fresh, gerr := s.repos.GetOrder(tenantID, id)
+			if gerr != nil {
+				return updated, gerr
+			}
+			if rolled := rollupOrderFulfillmentFields(fresh); rolled != nil {
+				for k, v := range rolled {
+					fields[k] = v
+				}
+			} else {
+				fields["alloc_type"] = ""
+				fields["dropship_mode"] = ""
+				fields["supplier_id"] = 0
+				fields["supplier_name"] = ""
+				fields["factory_id"] = ""
+				fields["factory_name"] = ""
+				fields["self_order_no"] = ""
+				fields["allocated_at"] = nil
+				fields["status"] = model.StatusPendingAlloc
+				fields["ship_status"] = model.ShipWaitShip
+				fields["agent_type"] = model.AgentTypeSelf
+			}
+			fields["purchase_order_id"] = ""
 			fields["alloc_remark"] = ""
-			fields["allocated_at"] = nil
-			fields["status"] = model.StatusPendingAlloc
-			fields["ship_status"] = model.ShipWaitShip
-			fields["agent_type"] = model.AgentTypeSelf
 			fields["skip_auto_alloc"] = true
 			if o.SourceChannel == model.SourceKDZS {
 				kdzsBackToAudit := false
@@ -2685,6 +2719,11 @@ func (s *OrderService) UnlinkDropshipPO(ctx context.Context, tenantID, operatorI
 				fields["ship_lock_reason"] = ""
 			}
 			toStatus = model.StatusPendingAlloc
+			if st, ok := fields["status"].(string); ok && st != "" {
+				toStatus = st
+			}
+		} else if err := clearItemPOsOnly(); err != nil {
+			return updated, err
 		}
 		from := o.Status
 		if err := s.repos.Transaction(func(tx *repo.Repos) error {
@@ -2953,12 +2992,12 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 	if o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
 		return nil, fmt.Errorf("订单已发货，不可撤回分配")
 	}
-	if o.AllocType == "" && o.Status == model.StatusPendingAlloc {
+	if o.AllocType == "" && o.Status == model.StatusPendingAlloc && !orderHasItemLevelAlloc(o) {
 		return nil, fmt.Errorf("订单尚未分配")
 	}
 
 	// 先处理关联代发采购单（已付款则禁止撤回）
-	if o.AllocType == model.AllocDropship || strings.TrimSpace(o.PurchaseOrderID) != "" {
+	if o.AllocType == model.AllocDropship || strings.TrimSpace(o.PurchaseOrderID) != "" || orderHasDropshipPOItems(o) {
 		if err := s.cancelLinkedDropshipPOs(ctx, tenantID, o.ID, o.PurchaseOrderID, bearerToken); err != nil {
 			return nil, err
 		}
@@ -3621,8 +3660,10 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	if req.Callback != nil {
 		doCallback = *req.Callback
 	} else {
-		// 默认：电商/小程序订单自动回传（顺丰等填单）；快递助手侧已发货请显式传 callback=false
-		doCallback = o.SourceChannel == model.SourceKDZS || o.SourceChannel == model.SourceWXMall
+		// 默认：电商/小程序自动回传；手工单已挂 DFHAND 时也回传（自建物流出单→助手手动填单号发货）
+		// 快递助手侧已打单发货请显式传 callback=false，避免重复回传
+		doCallback = o.SourceChannel == model.SourceKDZS || o.SourceChannel == model.SourceWXMall ||
+			manualNeedsKDZSShipCallback(o)
 	}
 
 	// 同一运单号再次发货：追加明细到已有运单（避免拆成两条同号运单，自营同步按单号去重会丢商品）
@@ -3702,8 +3743,11 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 				OperatorID: operatorID,
 			})
 		}
-		// 同运单再次「回传」：仅失败态重试；skipped（如快递助手同步/无需回传）不重复打平台
-		needRetryCB := doCallback && existingSh.CallbackStatus != model.CallbackSucceeded && existingSh.CallbackStatus != model.CallbackSkipped
+		// 同运单再次「回传」：失败/待回传重试；曾误标「无需回传」的手工单也允许补回传
+		needRetryCB := doCallback && (
+			existingSh.CallbackStatus == model.CallbackFailed ||
+				existingSh.CallbackStatus == model.CallbackPending ||
+				(existingSh.CallbackStatus == model.CallbackSucceeded && isNoopShipCallbackMsg(existingSh.CallbackMessage)))
 		if needRetryCB {
 			if company := strings.TrimSpace(req.ExpressCompany); company != "" {
 				existingSh.ExpressCompany = company
@@ -3759,6 +3803,8 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		sh.CallbackStatus = model.CallbackSkipped
 		if o.SourceChannel == model.SourceKDZS {
 			sh.CallbackMessage = "快递助手侧已发货，无需回传"
+		} else if o.SourceChannel == model.SourceManual && !manualNeedsKDZSShipCallback(o) {
+			sh.CallbackMessage = "手工订单未绑定快递助手编号，跳过回传"
 		} else {
 			sh.CallbackMessage = "未回传来源平台"
 		}
@@ -4447,37 +4493,68 @@ func computeShipStatusAfter(o *model.Order, lines []resolvedShipLine) string {
 func (s *OrderService) callbackSource(ctx context.Context, o *model.Order, sh *model.OrderShipment, token string) (string, error) {
 	switch o.SourceChannel {
 	case model.SourceKDZS:
-		if s.storeSync == nil {
-			return "", fmt.Errorf("StoreSyncAgent 未配置")
-		}
-		// 与请求上下文解耦：前端/网关超时取消时，仍尽量把快递助手发货跑完并落库
-		cbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 150*time.Second)
-		defer cancel()
-		res, err := s.storeSync.ShipCallback(cbCtx, token, storesync.ShipCallbackRequest{
-			Platform:       o.Platform,
-			ShopID:         o.ShopID,
-			PlatformTid:    o.PlatformOrderID,
-			PlatformSysTid: o.PlatformSysTid,
-			ExpressCompany: sh.ExpressCompany,
-			ExpressNo:      sh.ExpressNo,
-			OrderNo:        o.OrderNo,
-			Remark:         sh.Remark,
-		})
-		if err != nil {
-			return "", err
-		}
-		if res != nil && res.Message != "" {
-			return res.Message, nil
-		}
-		return "已回传 StoreSyncAgent", nil
+		return s.callbackKDZSShip(ctx, o, sh, token)
 	case model.SourceWXMall:
 		// 预留：微信小程序商城后台接入后实现
 		return "", fmt.Errorf("微信小程序商城物流回传接口待开发")
-	case model.SourceStore, model.SourceManual:
-		return "门店/手工订单无需平台回传", nil
+	case model.SourceManual:
+		// 已推快递助手的手工单：自建物流出单后走助手「手动填写单号」发货，否则助手一直待发货
+		if !manualNeedsKDZSShipCallback(o) {
+			return "手工订单未绑定快递助手编号，跳过回传", nil
+		}
+		return s.callbackKDZSShip(ctx, o, sh, token)
+	case model.SourceStore:
+		return "门店订单无需平台回传", nil
 	default:
 		return "", fmt.Errorf("未知来源渠道: %s", o.SourceChannel)
 	}
+}
+
+func manualNeedsKDZSShipCallback(o *model.Order) bool {
+	if o == nil || o.SourceChannel != model.SourceManual {
+		return false
+	}
+	return strings.TrimSpace(o.PlatformSysTid) != "" || strings.TrimSpace(o.PlatformOrderID) != ""
+}
+
+func isNoopShipCallbackMsg(msg string) bool {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return false
+	}
+	return strings.Contains(msg, "无需平台回传") ||
+		strings.Contains(msg, "未绑定快递助手") ||
+		strings.Contains(msg, "跳过回传")
+}
+
+func (s *OrderService) callbackKDZSShip(ctx context.Context, o *model.Order, sh *model.OrderShipment, token string) (string, error) {
+	if s.storeSync == nil {
+		return "", fmt.Errorf("StoreSyncAgent 未配置")
+	}
+	platform := strings.TrimSpace(o.Platform)
+	if o.SourceChannel == model.SourceManual || isDFHANDPlatform(platform) {
+		platform = "DFHAND"
+	}
+	// 与请求上下文解耦：前端/网关超时取消时，仍尽量把快递助手发货跑完并落库
+	cbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 150*time.Second)
+	defer cancel()
+	res, err := s.storeSync.ShipCallback(cbCtx, token, storesync.ShipCallbackRequest{
+		Platform:       platform,
+		ShopID:         o.ShopID,
+		PlatformTid:    o.PlatformOrderID,
+		PlatformSysTid: o.PlatformSysTid,
+		ExpressCompany: sh.ExpressCompany,
+		ExpressNo:      sh.ExpressNo,
+		OrderNo:        o.OrderNo,
+		Remark:         sh.Remark,
+	})
+	if err != nil {
+		return "", err
+	}
+	if res != nil && res.Message != "" {
+		return res.Message, nil
+	}
+	return "已回传 StoreSyncAgent", nil
 }
 
 func expandKDZSTradeStatuses(statuses []string) []string {
@@ -6667,6 +6744,37 @@ func orderHasExpressShipments(o *model.Order) bool {
 		}
 	}
 	return false
+}
+
+// preserveLocalShipAgainstKDZSWait 助手仍报待发货时，若本单已发货或已有本地运单，则不回退。
+func preserveLocalShipAgainstKDZSWait(o *model.Order, incoming string) bool {
+	if o == nil {
+		return false
+	}
+	in := strings.TrimSpace(incoming)
+	if in != "" && in != model.ShipWaitShip {
+		return false
+	}
+	if o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
+		return true
+	}
+	return orderHasExpressShipments(o)
+}
+
+// restoreShipStatusFromLocalShipments 头表被助手打回 wait_ship 时，按本地运单重算；无法升则返回空（保持原字段不写 wait）。
+func restoreShipStatusFromLocalShipments(o *model.Order) string {
+	if o == nil || !orderHasExpressShipments(o) {
+		return ""
+	}
+	got := computeShipStatusAfter(o, nil)
+	if got == model.ShipWaitShip {
+		// 有运单但按行算仍待发：至少保住 partial，避免再进待发货队列误导
+		if o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
+			return o.ShipStatus
+		}
+		return model.ShipPartialShipped
+	}
+	return got
 }
 
 // syncIngestLogistics 把快递助手物流写入 order_shipments（按单号幂等）。

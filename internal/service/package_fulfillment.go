@@ -82,7 +82,21 @@ func (s *OrderService) applyPackageItemFulfillmentFromIngest(tenantID uint64, o 
 			}
 			fields["alloc_type"] = alloc
 			fields["dropship_mode"] = mode
-			fields["ship_status"] = coalesceShip(hint.ShipStatus)
+			itemShip := coalesceShip(hint.ShipStatus)
+			// 本地已出运单/头表或行已发货时，助手「待发货」不得冲掉行级发货态
+			if itemShip == model.ShipWaitShip &&
+				(it.ShipStatus == model.ShipShipped || it.ShipStatus == model.ShipPartialShipped ||
+					cur.ShipStatus == model.ShipShipped || cur.ShipStatus == model.ShipPartialShipped ||
+					orderHasExpressShipments(cur) || itemCoveredByExpressShipment(cur, id)) {
+				if cov := itemCoveredByExpressShipment(cur, id); cov {
+					fields["ship_status"] = model.ShipShipped
+				} else if it.ShipStatus == model.ShipShipped || it.ShipStatus == model.ShipPartialShipped {
+					fields["ship_status"] = it.ShipStatus
+				}
+				// else: 不写 ship_status，保留现值
+			} else {
+				fields["ship_status"] = itemShip
+			}
 			if it.AllocatedAt == nil {
 				fields["allocated_at"] = now
 			}
@@ -209,16 +223,44 @@ func (s *OrderService) rollupPackageFulfillmentHeader(tenantID uint64, o *model.
 	if len(fields) == 0 {
 		return
 	}
-	// 已完成/关闭保留头表状态；已发货保留 ship_status
+	// 已完成/关闭保留头表状态；已发货/有本地运单时不被行级 wait_ship rollup 打回
 	if o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
 		delete(fields, "status")
 	}
-	if o.ShipStatus == model.ShipShipped {
-		fields["ship_status"] = model.ShipShipped
+	if o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
+		fields["ship_status"] = o.ShipStatus
+	} else if restored := restoreShipStatusFromLocalShipments(o); restored != "" {
+		fields["ship_status"] = restored
 	}
 	if err := s.repos.UpdateOrderFields(tenantID, o.ID, fields); err != nil {
 		log.Printf("[ordercore] rollup package fulfill order=%s: %v", o.OrderNo, err)
 	}
+}
+
+func itemCoveredByExpressShipment(o *model.Order, itemID uint64) bool {
+	if o == nil || itemID == 0 {
+		return false
+	}
+	shipped := 0
+	for _, sh := range o.Shipments {
+		if strings.TrimSpace(sh.ExpressNo) == "" {
+			continue
+		}
+		for _, si := range sh.Items {
+			if si.OrderItemID == itemID {
+				shipped += si.Qty
+			}
+		}
+	}
+	if shipped <= 0 {
+		return false
+	}
+	for _, it := range o.Items {
+		if it.ID == itemID {
+			return shipped >= it.Quantity
+		}
+	}
+	return shipped > 0
 }
 
 // ingestItemOIDs 本轮包裹商品 oid 集合。
