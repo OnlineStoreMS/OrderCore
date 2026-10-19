@@ -4657,6 +4657,16 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 		if !hasHand {
 			platforms = append(platforms, "DFHAND")
 		}
+		// 全量电商同步经常在超时前跑不完。手工单放前面，助手已发货才能回写。
+		hand, rest := make([]string, 0, 1), make([]string, 0, len(platforms))
+		for _, x := range platforms {
+			if strings.EqualFold(strings.TrimSpace(x), "DFHAND") {
+				hand = append(hand, x)
+				continue
+			}
+			rest = append(rest, x)
+		}
+		platforms = append(hand, rest...)
 	}
 
 	created, updated, fetched, reportedTotal := 0, 0, 0, 0
