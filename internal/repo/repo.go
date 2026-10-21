@@ -790,7 +790,7 @@ func (r *Repos) replaceItems(tenantID, orderID uint64, items []model.OrderItem, 
 			it.LineNo = i + 1
 		}
 
-		matched := matchExistingRoot(roots, *it, used)
+		matched := matchExistingRoot(roots, *it, used, keepUnmatched)
 		if matched == nil {
 			it.ID = 0
 			if keepUnmatched {
@@ -867,7 +867,7 @@ func firstNonEmptyRepo(vals ...string) string {
 	return ""
 }
 
-func matchExistingRoot(roots []model.OrderItem, want model.OrderItem, used map[uint64]struct{}) *model.OrderItem {
+func matchExistingRoot(roots []model.OrderItem, want model.OrderItem, used map[uint64]struct{}, mergeKeepUnmatched bool) *model.OrderItem {
 	key := func(platformItemID, platformSkuID, productName, skuSpecs string) string {
 		return strings.TrimSpace(platformItemID) + "\x00" +
 			strings.TrimSpace(platformSkuID) + "\x00" +
@@ -885,40 +885,32 @@ func matchExistingRoot(roots []model.OrderItem, want model.OrderItem, used map[u
 			}
 		}
 	}
-	// 1) 平台商品/货品 ID
-	if pid := strings.TrimSpace(want.PlatformItemID); pid != "" {
+	// 1) 平台商品/货品 ID + SKU（仅 itemId 太宽，同 SPU 多规格会串行）
+	wantItemID := strings.TrimSpace(want.PlatformItemID)
+	wantSkuID := strings.TrimSpace(want.PlatformSkuID)
+	if wantItemID != "" && wantSkuID != "" {
 		for i := range roots {
 			if _, ok := used[roots[i].ID]; ok {
 				continue
 			}
-			if strings.TrimSpace(roots[i].PlatformItemID) == pid {
+			if strings.TrimSpace(roots[i].PlatformItemID) == wantItemID &&
+				strings.TrimSpace(roots[i].PlatformSkuID) == wantSkuID {
 				return &roots[i]
 			}
 		}
 	}
 	// 2) 平台 SKU
-	if ps := strings.TrimSpace(want.PlatformSkuID); ps != "" {
+	if wantSkuID != "" {
 		for i := range roots {
 			if _, ok := used[roots[i].ID]; ok {
 				continue
 			}
-			if strings.TrimSpace(roots[i].PlatformSkuID) == ps {
+			if strings.TrimSpace(roots[i].PlatformSkuID) == wantSkuID {
 				return &roots[i]
 			}
 		}
 	}
-	// 3) 行号
-	if want.LineNo > 0 {
-		for i := range roots {
-			if _, ok := used[roots[i].ID]; ok {
-				continue
-			}
-			if roots[i].LineNo == want.LineNo {
-				return &roots[i]
-			}
-		}
-	}
-	// 4) 品名+规格
+	// 3) 品名+规格
 	wantKey := key("", "", want.ProductName, want.SkuSpecs)
 	if strings.TrimSpace(want.ProductName) != "" || strings.TrimSpace(want.SkuSpecs) != "" {
 		for i := range roots {
@@ -926,6 +918,17 @@ func matchExistingRoot(roots []model.OrderItem, want model.OrderItem, used map[u
 				continue
 			}
 			if key("", "", roots[i].ProductName, roots[i].SkuSpecs) == wantKey {
+				return &roots[i]
+			}
+		}
+	}
+	// 4) 行号：仅整单替换时使用。多包裹合并若按 line_no=1 会把另一规格盖掉。
+	if !mergeKeepUnmatched && want.LineNo > 0 {
+		for i := range roots {
+			if _, ok := used[roots[i].ID]; ok {
+				continue
+			}
+			if roots[i].LineNo == want.LineNo {
 				return &roots[i]
 			}
 		}

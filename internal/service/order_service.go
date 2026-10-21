@@ -771,6 +771,37 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	if existing != nil {
 		fromStatus := existing.Status
 		terminalPre := existing.Status == model.StatusCompleted || existing.Status == model.StatusClosed
+		incomingFulfillable := ingestHasFulfillableItems(req.Items)
+		existingFulfillable := orderHasFulfillableItems(existing)
+		// 部分退：本包已关/退完，但同主单其它行仍可履约 → 不整单关闭
+		if status == model.StatusClosed && (existingFulfillable || incomingFulfillable) {
+			if existing.Status == model.StatusClosed && incomingFulfillable {
+				// 历史误关：可履约包再次同步时重开
+				reopen := deriveKDZSIngest(channel, req)
+				// 强制去掉关闭（derive 因本包可履约本就不会关；若仍关则落待分配）
+				if reopen.Status == model.StatusClosed {
+					reopen.Status = model.StatusPendingAlloc
+					reopen.ShipStatus = model.ShipWaitShip
+					reopen.ClearAlloc = true
+					reopen.ApplySyncAlloc = false
+					reopen.LogRemark = "部分退款后恢复可履约商品"
+				}
+				hint = reopen
+				status = hint.Status
+				shipStatus = hint.ShipStatus
+				platformStatus = coalesceStr(hint.PlatformStatus, req.PlatformStatus)
+				platformStatusText = coalesceStr(hint.PlatformStatusText, req.PlatformStatusText)
+				terminalPre = false
+				log.Printf("[ordercore] reopen partial-refund order=%s status=%s", existing.OrderNo, status)
+			} else if existingFulfillable {
+				status = existing.Status
+				shipStatus = existing.ShipStatus
+				hint.Status = status
+				hint.ShipStatus = shipStatus
+				hint.LogRemark = "部分退款/取消，保留可履约商品"
+				log.Printf("[ordercore] skip close partial-refund order=%s keep status=%s", existing.OrderNo, status)
+			}
+		}
 		// 仅「待推单/明确 ClearAlloc」才同步撤回代发/自营单。
 		// 电商取消/退款关单默认保留分配与采购单，避免误撤供应商履约。
 		needDetachPO := !terminalPre && hint.ClearAlloc &&
@@ -883,7 +914,8 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 			}
 
 			statusChanged := false
-			terminal := existing.Status == model.StatusCompleted || existing.Status == model.StatusClosed
+			// 用 terminalPre：部分退重开时已置 false，允许从 closed 恢复待分配/待发货
+			terminal := terminalPre
 			// 同主单另一包裹同步：不覆盖头表履约/发货态（物流与备注落在 package）
 			skipHeaderFulfillment := mergeSameParentPkg && (strings.TrimSpace(existing.AllocType) != "" || orderHasItemLevelAlloc(existing))
 			// 退款成功/交易关闭：同步关单，但默认保留履约分配与代发采购单（人工撤回除外）
@@ -4819,47 +4851,83 @@ func sleepKDZSRateLimit(ctx context.Context, attempt int) error {
 }
 
 func (s *OrderService) syncKDZSByTid(ctx context.Context, tenantID, operatorID uint64, tid, platform, token string) (map[string]int, error) {
-	// 按列表态探测：tid 回查常用 ALL/电商态，会把「待推单」误成「待发货」
-	probeStatuses := []string{model.KDZSWaitAudit, model.KDZSWaitSend, "shipped", "completed", ""}
-	var (
-		result        *storesync.OrderListResult
-		err           error
-		matchedStatus string
-	)
+	// 按列表态探测：部分退时同 tid 常拆成「已取消包 + 待推/待发包」，必须扫全态合并，不能命中一个就停。
+	probeStatuses := []string{model.KDZSWaitAudit, model.KDZSWaitSend, "shipped", "completed", "all", ""}
+	type taggedTrade struct {
+		trade  storesync.TradeOrder
+		listSt string
+	}
+	seenSys := map[string]struct{}{}
+	var all []taggedTrade
+	var lastTotal int
 	for i, st := range probeStatuses {
 		if i > 0 {
 			if err := sleepKDZSGap(ctx); err != nil {
 				return nil, err
 			}
 		}
-		result, err = s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
+		result, err := s.storeSync.ListOrders(ctx, token, storesync.OrderQuery{
 			Platform:    platform,
 			Tid:         tid,
 			TradeStatus: st,
 			PageNo:      1,
-			PageSize:    5,
+			PageSize:    20,
 		})
 		if err != nil {
 			if isKDZSRateLimitErr(err) {
 				_ = sleepKDZSRateLimit(ctx, i)
 				continue
 			}
-			return nil, err
+			// 单态失败不中断，继续扫其它列表
+			log.Printf("[ordercore] syncKDZSByTid tid=%s status=%s: %v", tid, st, err)
+			continue
 		}
-		if result != nil && len(result.Items) > 0 {
-			matchedStatus = st
-			break
+		if result == nil || len(result.Items) == 0 {
+			continue
+		}
+		if result.Total > lastTotal {
+			lastTotal = result.Total
+		}
+		for _, t := range result.Items {
+			sysKey := ""
+			if len(t.SysTids) > 0 {
+				sysKey = strings.TrimSpace(t.SysTids[0])
+			}
+			if sysKey == "" && len(t.Tids) > 0 {
+				sysKey = strings.TrimSpace(t.Tids[0])
+			}
+			if sysKey == "" {
+				sysKey = fmt.Sprintf("%s#%d", st, len(all))
+			}
+			if _, ok := seenSys[sysKey]; ok {
+				continue
+			}
+			seenSys[sysKey] = struct{}{}
+			all = append(all, taggedTrade{trade: t, listSt: st})
 		}
 	}
-	if result == nil || len(result.Items) == 0 {
+	if len(all) == 0 {
 		return map[string]int{"created": 0, "updated": 0, "fetched": 0, "total": 0}, fmt.Errorf("快递助手未找到平台单号 %s", tid)
 	}
+	// 先可履约包再关单包，避免先关后开抖动
+	sort.SliceStable(all, func(i, j int) bool {
+		fi := !tradeOrderAllExcluded(all[i].trade)
+		fj := !tradeOrderAllExcluded(all[j].trade)
+		if fi != fj {
+			return fi
+		}
+		return i < j
+	})
 	created, updated := 0, 0
-	for _, t := range result.Items {
-		ingest := mapTradeToIngest(t)
-		if matchedStatus != "" {
-			ingest.PlatformStatus = matchedStatus
-			ingest.PlatformStatusText = kdzsPlatformStatusText(matchedStatus)
+	for _, row := range all {
+		ingest := mapTradeToIngest(row.trade)
+		listSt := strings.TrimSpace(row.listSt)
+		if listSt != "" && listSt != "all" {
+			// 仅助手列表态可覆盖；电商态 all/空串保留详情归一
+			if listSt == model.KDZSWaitAudit || listSt == model.KDZSWaitSend || listSt == "shipped" || listSt == "completed" {
+				ingest.PlatformStatus = listSt
+				ingest.PlatformStatusText = kdzsPlatformStatusText(listSt)
+			}
 		} else {
 			norm, text := normalizeKDZSPlatformStatus(ingest.PlatformStatus, ingest.PlatformStatusText)
 			if norm != "" {
@@ -4877,7 +4945,19 @@ func (s *OrderService) syncKDZSByTid(ctx context.Context, tenantID, operatorID u
 			updated++
 		}
 	}
-	return map[string]int{"created": created, "updated": updated, "fetched": len(result.Items), "total": result.Total}, nil
+	return map[string]int{"created": created, "updated": updated, "fetched": len(all), "total": lastTotal}, nil
+}
+
+func tradeOrderAllExcluded(t storesync.TradeOrder) bool {
+	if len(t.Goods) == 0 {
+		return true
+	}
+	for _, g := range t.Goods {
+		if !tradeGoodsExcludedFromFulfillment(g) {
+			return false
+		}
+	}
+	return true
 }
 
 // EnsureKDZSOrderByPlatformID 本地没有该平台单号时，尝试从快递助手补拉。
@@ -6150,11 +6230,12 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 	h.AgentType = agentType
 	isFactory := agentType == model.AgentTypeFactory
 
-	// 取消/关闭优先于列表态（避免 order_cancelled 落入 default→待分配）
-	if closed, reason := ecommerceShouldClose(req.EcommerceStatus, req.EcommerceStatusText, req.AfterSaleStatus); closed {
+	incomingFulfillable := ingestHasFulfillableItems(req.Items)
+	// 取消/关闭优先于列表态；若本包仍有可履约行（部分退）则不整单关闭
+	if closed, reason := ecommerceShouldCloseWithItems(req.EcommerceStatus, req.EcommerceStatusText, req.AfterSaleStatus, req.Items, incomingFulfillable); closed {
 		return applyClosedHint(&h, reason)
 	}
-	if platformStatus == "order_cancelled" || strings.Contains(platformStatus, "cancel") {
+	if (platformStatus == "order_cancelled" || strings.Contains(platformStatus, "cancel")) && !incomingFulfillable {
 		return applyClosedHint(&h, "快递助手/电商订单已取消")
 	}
 
@@ -6243,14 +6324,17 @@ func deriveKDZSIngest(channel string, req dto.IngestOrderRequest) kdzsIngestHint
 	}
 
 	// 电商订单/售后状态影响履约：关闭或锁定（再判一次，覆盖列表态）
-	if closed, reason := ecommerceShouldClose(req.EcommerceStatus, req.EcommerceStatusText, req.AfterSaleStatus); closed {
+	if closed, reason := ecommerceShouldCloseWithItems(req.EcommerceStatus, req.EcommerceStatusText, req.AfterSaleStatus, req.Items, incomingFulfillable); closed {
 		return applyClosedHint(&h, reason)
 	}
 	if blocked, reason := ecommerceBlocksFulfillment(req.EcommerceStatus, req.EcommerceStatusText, req.AfterSaleStatus, req.AfterSaleStatusText); blocked {
-		h.ShipEntryLocked = true
-		h.ShipLockReason = reason
-		if h.LogRemark == "" || strings.HasPrefix(h.LogRemark, "同步") {
-			h.LogRemark = h.LogRemark + "；" + reason
+		// 部分退：头表售后完成但行仍可发时，不锁整单履约
+		if !incomingFulfillable || !strings.Contains(reason, "退款完成") {
+			h.ShipEntryLocked = true
+			h.ShipLockReason = reason
+			if h.LogRemark == "" || strings.HasPrefix(h.LogRemark, "同步") {
+				h.LogRemark = h.LogRemark + "；" + reason
+			}
 		}
 	}
 	return h
@@ -6351,34 +6435,74 @@ func computeShipLock(channel, platformStatus string, agentType int, dropshipMode
 }
 
 func ecommerceShouldClose(ecomStatus, ecomText, afterSale string) (bool, string) {
+	return ecommerceShouldCloseWithItems(ecomStatus, ecomText, afterSale, nil, false)
+}
+
+// ecommerceShouldCloseWithItems 整单关闭判定。
+// hasFulfillable=true 表示本包或同主单仍有可履约行：售后完成/单包取消不得整单关闭（部分退）。
+func ecommerceShouldCloseWithItems(ecomStatus, ecomText, afterSale string, items []dto.OrderItemInput, knownFulfillable bool) (bool, string) {
 	code := strings.ToUpper(strings.TrimSpace(ecomStatus))
 	as := strings.ToUpper(strings.TrimSpace(afterSale))
 	text := ecomText
+	fulfillable := knownFulfillable
+	if !fulfillable && len(items) > 0 {
+		fulfillable = ingestHasFulfillableItems(items)
+	}
+	// 电商整单关闭码：若同步包仍带可履约行，视为部分取消，不关整单
 	switch code {
 	case "TRADE_CLOSED", "ORDER_CANCEL", "ORDER_CANCELLED", "CANCEL", "CANCELLED", "CLOSED",
 		"REFUND_SUCCESS", "REFUNDED", "SUCCESS_REFUND", "REFUND_MONEY_FINISH", "REFUND_MONEY_SUCCESS",
 		"TRADE_CLOSED_BY_TAOBAO", "TRADE_CLOSED_BY_USER":
+		if fulfillable {
+			return false, ""
+		}
 		return true, "电商订单已关闭/取消/退款完成"
 	}
 	if strings.Contains(code, "CANCEL") || strings.HasSuffix(code, "_CLOSED") {
+		if fulfillable {
+			return false, ""
+		}
 		return true, "电商订单已关闭/取消"
 	}
 	if strings.Contains(code, "REFUND") && (strings.Contains(code, "SUCCESS") || strings.Contains(code, "FINISH") || strings.Contains(code, "DONE")) {
+		if fulfillable {
+			return false, ""
+		}
 		return true, "电商订单退款完成"
 	}
 	switch as {
 	case "REFUND_SUCCESS", "REFUND_MONEY_FINISH", "REFUND_MONEY_SUCCESS", "REFUNDED", "SUCCESS_REFUND":
+		if fulfillable {
+			return false, ""
+		}
 		return true, "售后退款完成，订单关闭"
 	}
 	if strings.Contains(text, "退款成功") || strings.Contains(text, "退款完成") ||
 		strings.Contains(text, "交易关闭") || strings.Contains(text, "订单取消") ||
 		strings.Contains(text, "已取消") || strings.EqualFold(text, "ORDER_CANCELLED") {
+		if fulfillable {
+			return false, ""
+		}
 		return true, "电商订单状态：" + text
 	}
 	return false, ""
 }
 
+func ingestHasFulfillableItems(items []dto.OrderItemInput) bool {
+	if len(items) == 0 {
+		return false
+	}
+	for _, it := range items {
+		if orderLineExcludedFromFulfillment(it.Quantity, it.AfterSaleStatus, it.LineOrderStatus) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func ecommerceBlocksFulfillment(ecomStatus, ecomText, afterSale, afterSaleText string) (bool, string) {
+	// 无行明细时保持旧行为；有可履约行的部分退在 deriveKDZSIngest 里另行处理
 	if closed, reason := ecommerceShouldClose(ecomStatus, ecomText, afterSale); closed {
 		return true, reason
 	}

@@ -152,6 +152,36 @@ func TestDeriveKDZSRefundMoneyFinish(t *testing.T) {
 	}
 }
 
+func TestDeriveKDZSPartialRefundKeepsOpen(t *testing.T) {
+	// 同 tid 一包退完、另一包仍待发：本包售后完成不得整单关闭
+	h := deriveKDZSIngest(model.SourceKDZS, dto.IngestOrderRequest{
+		PlatformStatus:      "wait_audit",
+		PlatformStatusText:  "待推单",
+		EcommerceStatus:     "ORDER_PAID",
+		AfterSaleStatus:     "REFUND_MONEY_NONE",
+		AgentType:           1,
+		Items: []dto.OrderItemInput{
+			{ProductName: "R8170中套", SkuSpecs: "飞轮34T", Quantity: 1, LineOrderStatus: "ORDER_PAID"},
+		},
+	})
+	if h.Status != model.StatusPendingAlloc || h.Status == model.StatusClosed {
+		t.Fatalf("active package should stay pending_alloc, hint=%+v", h)
+	}
+	h2 := deriveKDZSIngest(model.SourceKDZS, dto.IngestOrderRequest{
+		PlatformStatus:      "order_cancelled",
+		EcommerceStatus:     "ORDER_CANCELLED",
+		AfterSaleStatus:     "REFUND_MONEY_FINISH",
+		AgentType:           1,
+		Items: []dto.OrderItemInput{
+			{ProductName: "R8101飞轮", Quantity: 1, AfterSaleStatus: "REFUND_MONEY_FINISH", LineOrderStatus: "ORDER_CANCELLED"},
+			{ProductName: "R8170中套", Quantity: 1, LineOrderStatus: "ORDER_PAID"},
+		},
+	})
+	if h2.Status == model.StatusClosed {
+		t.Fatalf("partial refund must not close whole order, hint=%+v", h2)
+	}
+}
+
 func TestCloseDetachReason(t *testing.T) {
 	if got := closeDetachReason(dto.IngestOrderRequest{
 		EcommerceStatus: "REFUND_MONEY_FINISH",
