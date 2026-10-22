@@ -472,6 +472,7 @@ func (r *Repos) ListBySourcePlatform(tenantID uint64, channel, platformOrderID s
 	}
 	var list []model.Order
 	err := r.db.Where("tenant_id = ? AND source_channel = ? AND platform_order_id = ?", tenantID, channel, platformOrderID).
+		Preload("Items").
 		Order("id ASC").
 		Find(&list).Error
 	return list, err

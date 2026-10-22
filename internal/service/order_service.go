@@ -769,37 +769,66 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		req.Items[i].AfterSaleStatusText = normalizeAfterSaleText(req.Items[i].AfterSaleStatus, req.Items[i].AfterSaleStatusText)
 	}
 	if existing != nil {
+		// ListBySourcePlatform/keeper 可能未带 Items，部分退判断必须看行
+		if len(existing.Items) == 0 && existing.ID > 0 {
+			if full, gerr := s.repos.GetOrder(tenantID, existing.ID); gerr == nil && full != nil {
+				existing = full
+			}
+		}
 		fromStatus := existing.Status
 		terminalPre := existing.Status == model.StatusCompleted || existing.Status == model.StatusClosed
 		incomingFulfillable := ingestHasFulfillableItems(req.Items)
 		existingFulfillable := orderHasFulfillableItems(existing)
-		// 部分退：本包已关/退完，但同主单其它行仍可履约 → 不整单关闭
+		// 部分退：本包已关/退完，但同主单其它行仍可履约 → 不整单关闭；已误关则重开
 		if status == model.StatusClosed && (existingFulfillable || incomingFulfillable) {
-			if existing.Status == model.StatusClosed && incomingFulfillable {
-				// 历史误关：可履约包再次同步时重开
-				reopen := deriveKDZSIngest(channel, req)
-				// 强制去掉关闭（derive 因本包可履约本就不会关；若仍关则落待分配）
-				if reopen.Status == model.StatusClosed {
-					reopen.Status = model.StatusPendingAlloc
-					reopen.ShipStatus = model.ShipWaitShip
-					reopen.ClearAlloc = true
-					reopen.ApplySyncAlloc = false
-					reopen.LogRemark = "部分退款后恢复可履约商品"
+			keepOpen := func(reason string) {
+				if existing.Status == model.StatusClosed || existing.Status == "" {
+					hint.Status = model.StatusPendingAlloc
+					hint.ShipStatus = model.ShipWaitShip
+					hint.ClearAlloc = true
+					hint.ApplySyncAlloc = false
+					hint.ShipEntryLocked = true
+					hint.ShipLockReason = "快递助手待推单，请先分配；仅自营待发货可填单号"
+				} else {
+					hint.Status = existing.Status
+					if strings.TrimSpace(existing.ShipStatus) != "" {
+						hint.ShipStatus = existing.ShipStatus
+					} else {
+						hint.ShipStatus = model.ShipWaitShip
+					}
 				}
-				hint = reopen
+				if incomingFulfillable {
+					// 可履约包带来的列表态优先
+					reopen := deriveKDZSIngest(channel, req)
+					if reopen.Status != model.StatusClosed {
+						hint = reopen
+					}
+				}
+				hint.LogRemark = reason
 				status = hint.Status
 				shipStatus = hint.ShipStatus
 				platformStatus = coalesceStr(hint.PlatformStatus, req.PlatformStatus)
 				platformStatusText = coalesceStr(hint.PlatformStatusText, req.PlatformStatusText)
 				terminalPre = false
-				log.Printf("[ordercore] reopen partial-refund order=%s status=%s", existing.OrderNo, status)
+				// 头表售后完成会再次触发关单文案；部分退时不要用退完包冲掉
+				if existingFulfillable && !incomingFulfillable {
+					req.AfterSaleStatus = existing.AfterSaleStatus
+					req.AfterSaleStatusText = existing.AfterSaleStatusText
+					if strings.TrimSpace(req.AfterSaleStatus) == "" ||
+						strings.EqualFold(req.AfterSaleStatus, "REFUND_MONEY_FINISH") ||
+						strings.EqualFold(req.AfterSaleStatus, "REFUND_SUCCESS") {
+						req.AfterSaleStatus = "REFUND_MONEY_NONE"
+						req.AfterSaleStatusText = "部分退款"
+					}
+				}
+				log.Printf("[ordercore] partial-refund keep-open order=%s status=%s reason=%s", existing.OrderNo, status, reason)
+			}
+			if existing.Status == model.StatusClosed {
+				keepOpen("部分退款后恢复可履约商品")
 			} else if existingFulfillable {
-				status = existing.Status
-				shipStatus = existing.ShipStatus
-				hint.Status = status
-				hint.ShipStatus = shipStatus
-				hint.LogRemark = "部分退款/取消，保留可履约商品"
-				log.Printf("[ordercore] skip close partial-refund order=%s keep status=%s", existing.OrderNo, status)
+				keepOpen("部分退款/取消，保留可履约商品")
+			} else if incomingFulfillable {
+				keepOpen("部分退款后同步可履约包裹")
 			}
 		}
 		// 仅「待推单/明确 ClearAlloc」才同步撤回代发/自营单。
@@ -1124,6 +1153,29 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		o, err := s.repos.GetOrder(tenantID, existing.ID)
 		if err != nil {
 			return nil, false, err
+		}
+		// 兜底：合并行后仍有可履约商品却头表 closed（keeper 未带 Items 等历史路径）→ 重开待分配
+		if channel == model.SourceKDZS && o != nil && o.Status == model.StatusClosed && orderHasFulfillableItems(o) {
+			reopenFields := map[string]any{
+				"status":                 model.StatusPendingAlloc,
+				"ship_status":            model.ShipWaitShip,
+				"after_sale_status":      "REFUND_MONEY_NONE",
+				"after_sale_status_text": "部分退款",
+				"ship_entry_locked":      true,
+				"ship_lock_reason":       "快递助手待推单，请先分配；仅自营待发货可填单号",
+				"skip_auto_alloc":        false,
+			}
+			if ps := strings.ToLower(strings.TrimSpace(o.PlatformStatus)); ps == "order_cancelled" || strings.Contains(ps, "cancel") {
+				reopenFields["platform_status"] = model.KDZSWaitAudit
+				reopenFields["platform_status_text"] = "待推单"
+			}
+			_ = s.repos.UpdateOrderFields(tenantID, o.ID, reopenFields)
+			_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+				TenantID: tenantID, OrderID: o.ID, FromStatus: model.StatusClosed, ToStatus: model.StatusPendingAlloc,
+				Action: "ingest_partial_refund_reopen", Remark: "部分退款兜底重开：仍有可履约商品", OperatorID: operatorID,
+			})
+			o, _ = s.repos.GetOrder(tenantID, existing.ID)
+			log.Printf("[ordercore] post-merge reopen partial-refund order=%s", existing.OrderNo)
 		}
 		// KDZS 多包裹并入同一 OC：头表实付按明细合计回填，避免单包裹金额覆盖整单
 		if channel == model.SourceKDZS && o != nil {
