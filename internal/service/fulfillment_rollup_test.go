@@ -159,3 +159,14 @@ func TestOrderDropshipPONos(t *testing.T) {
 		t.Fatalf("got=%v", got)
 	}
 }
+
+func TestFilterItemsForShippingDropsRefunded(t *testing.T) {
+	items := []model.OrderItem{
+		{ID: 1, ProductName: "飞轮", SkuSpecs: "R8101", Quantity: 1, AfterSaleStatus: "REFUND_MONEY_FINISH", LineOrderStatus: "ORDER_CANCELLED"},
+		{ID: 2, ProductName: "中套", SkuSpecs: "R8170", Quantity: 1, LineOrderStatus: "ORDER_PAID"},
+	}
+	got := filterItemsForShipping(items)
+	if len(got) != 1 || got[0].ID != 2 {
+		t.Fatalf("got=%+v", got)
+	}
+}

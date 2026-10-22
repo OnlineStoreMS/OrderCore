@@ -123,7 +123,46 @@ func (s *OrderService) Dashboard(tenantID uint64, start, end time.Time, timeType
 }
 
 func (s *OrderService) List(tenantID uint64, q repo.OrderListQuery) ([]model.Order, int64, error) {
-	return s.repos.ListOrders(tenantID, q)
+	list, total, err := s.repos.ListOrders(tenantID, q)
+	if err != nil {
+		return nil, 0, err
+	}
+	// 发货中心待发货队列：不返回已退款完成/已取消行（订单中心「全部」仍保留展示）
+	if q.ShipStatus == "need_ship" || q.ShipStatus == "unshipped" {
+		for i := range list {
+			list[i].Items = filterItemsForShipping(list[i].Items)
+		}
+	}
+	return list, total, nil
+}
+
+// filterItemsForShipping 待发货只保留可履约根行及其拆分子行，去掉退款完成/关闭行。
+func filterItemsForShipping(items []model.OrderItem) []model.OrderItem {
+	if len(items) == 0 {
+		return items
+	}
+	excludedRoots := map[uint64]struct{}{}
+	for _, it := range items {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		if orderItemExcludedFromFulfillment(it) {
+			excludedRoots[it.ID] = struct{}{}
+		}
+	}
+	out := make([]model.OrderItem, 0, len(items))
+	for _, it := range items {
+		if it.ParentOrderItemID > 0 {
+			if _, ok := excludedRoots[it.ParentOrderItemID]; ok {
+				continue
+			}
+		}
+		if orderItemExcludedFromFulfillment(it) {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
 }
 
 func (s *OrderService) FenFaRemarks(tenantID uint64, orderNos []string) (map[string]string, error) {
