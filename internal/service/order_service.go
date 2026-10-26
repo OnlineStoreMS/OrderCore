@@ -127,11 +127,22 @@ func (s *OrderService) List(tenantID uint64, q repo.OrderListQuery) ([]model.Ord
 	if err != nil {
 		return nil, 0, err
 	}
-	// 发货中心待发货队列：不返回已退款完成/已取消行（订单中心「全部」仍保留展示）
+	// 发货中心待发货队列：去掉退款完成行；整单无可履约商品则不返回（避免空单占待发货）
 	if q.ShipStatus == "need_ship" || q.ShipStatus == "unshipped" {
+		out := make([]model.Order, 0, len(list))
+		removed := 0
 		for i := range list {
 			list[i].Items = filterItemsForShipping(list[i].Items)
+			if !orderHasFulfillableItems(&list[i]) {
+				removed++
+				continue
+			}
+			out = append(out, list[i])
 		}
+		if removed > 0 && total >= int64(removed) {
+			total -= int64(removed)
+		}
+		list = out
 	}
 	return list, total, nil
 }
@@ -1193,28 +1204,52 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		if err != nil {
 			return nil, false, err
 		}
-		// 兜底：合并行后仍有可履约商品却头表 closed（keeper 未带 Items 等历史路径）→ 重开待分配
-		if channel == model.SourceKDZS && o != nil && o.Status == model.StatusClosed && orderHasFulfillableItems(o) {
-			reopenFields := map[string]any{
-				"status":                 model.StatusPendingAlloc,
-				"ship_status":            model.ShipWaitShip,
-				"after_sale_status":      "REFUND_MONEY_NONE",
-				"after_sale_status_text": "部分退款",
-				"ship_entry_locked":      true,
-				"ship_lock_reason":       "快递助手待推单，请先分配；仅自营待发货可填单号",
-				"skip_auto_alloc":        false,
+		// 兜底 A：合并行后仍有可履约商品却头表 closed → 重开待分配（部分退）
+		// 兜底 B：行已全部退款/取消，头表仍待分配/待发货 → 整单关闭（避免占发货中心）
+		if channel == model.SourceKDZS && o != nil {
+			if o.Status == model.StatusClosed && orderHasFulfillableItems(o) {
+				reopenFields := map[string]any{
+					"status":                 model.StatusPendingAlloc,
+					"ship_status":            model.ShipWaitShip,
+					"after_sale_status":      "REFUND_MONEY_NONE",
+					"after_sale_status_text": "部分退款",
+					"ship_entry_locked":      true,
+					"ship_lock_reason":       "快递助手待推单，请先分配；仅自营待发货可填单号",
+					"skip_auto_alloc":        false,
+				}
+				if ps := strings.ToLower(strings.TrimSpace(o.PlatformStatus)); ps == "order_cancelled" || strings.Contains(ps, "cancel") {
+					reopenFields["platform_status"] = model.KDZSWaitAudit
+					reopenFields["platform_status_text"] = "待推单"
+				}
+				_ = s.repos.UpdateOrderFields(tenantID, o.ID, reopenFields)
+				_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+					TenantID: tenantID, OrderID: o.ID, FromStatus: model.StatusClosed, ToStatus: model.StatusPendingAlloc,
+					Action: "ingest_partial_refund_reopen", Remark: "部分退款兜底重开：仍有可履约商品", OperatorID: operatorID,
+				})
+				o, _ = s.repos.GetOrder(tenantID, existing.ID)
+				log.Printf("[ordercore] post-merge reopen partial-refund order=%s", existing.OrderNo)
+			} else if o.Status != model.StatusClosed && o.Status != model.StatusCompleted && !orderHasFulfillableItems(o) && orderHasRootItems(o) {
+				closeReason := "售后退款完成，订单关闭"
+				if ps := strings.ToLower(strings.TrimSpace(o.PlatformStatus)); ps == "order_cancelled" || strings.Contains(ps, "cancel") {
+					closeReason = "快递助手/电商订单已取消"
+				}
+				closeFields := map[string]any{
+					"status":            model.StatusClosed,
+					"ship_entry_locked": true,
+					"ship_lock_reason":  closeReason,
+				}
+				if o.ShipStatus != model.ShipShipped {
+					closeFields["ship_status"] = ""
+				}
+				fromSt := o.Status
+				_ = s.repos.UpdateOrderFields(tenantID, o.ID, closeFields)
+				_ = s.repos.AddStatusLog(&model.OrderStatusLog{
+					TenantID: tenantID, OrderID: o.ID, FromStatus: fromSt, ToStatus: model.StatusClosed,
+					Action: "ingest_all_refunded_close", Remark: closeReason, OperatorID: operatorID,
+				})
+				o, _ = s.repos.GetOrder(tenantID, existing.ID)
+				log.Printf("[ordercore] post-merge close all-refunded order=%s", existing.OrderNo)
 			}
-			if ps := strings.ToLower(strings.TrimSpace(o.PlatformStatus)); ps == "order_cancelled" || strings.Contains(ps, "cancel") {
-				reopenFields["platform_status"] = model.KDZSWaitAudit
-				reopenFields["platform_status_text"] = "待推单"
-			}
-			_ = s.repos.UpdateOrderFields(tenantID, o.ID, reopenFields)
-			_ = s.repos.AddStatusLog(&model.OrderStatusLog{
-				TenantID: tenantID, OrderID: o.ID, FromStatus: model.StatusClosed, ToStatus: model.StatusPendingAlloc,
-				Action: "ingest_partial_refund_reopen", Remark: "部分退款兜底重开：仍有可履约商品", OperatorID: operatorID,
-			})
-			o, _ = s.repos.GetOrder(tenantID, existing.ID)
-			log.Printf("[ordercore] post-merge reopen partial-refund order=%s", existing.OrderNo)
 		}
 		// KDZS 多包裹并入同一 OC：头表实付按明细合计回填，避免单包裹金额覆盖整单
 		if channel == model.SourceKDZS && o != nil {
@@ -1266,15 +1301,6 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		hadDropshipAlloc := existing.AllocType == model.AllocDropship && existing.SupplierID > 0
 		s.TryAutoAllocateBySKU(ctx, tenantID, operatorID, o, bearerToken)
 		o, _ = s.repos.GetOrder(tenantID, existing.ID)
-		if o != nil && o.Status != model.StatusClosed {
-			o = s.alignDropshipPORef(ctx, tenantID, o, bearerToken)
-			needPO := o.Status != model.StatusCompleted && needsDropshipPO(o) && (!hadDropshipAlloc ||
-				(o.ShipStatus == model.ShipWaitShip && (o.Status == model.StatusAllocated || o.Status == model.StatusPendingShip)))
-			if needPO {
-				s.queueOrCreateDropshipPO(ctx, tenantID, o, bearerToken)
-				o, _ = s.repos.GetOrder(tenantID, existing.ID)
-			}
-		}
 		o = s.ensureSelfOrderAfterIngest(ctx, tenantID, o, bearerToken)
 		s.autoSyncDropshipLogistics(ctx, o, req, bearerToken)
 		s.autoSyncSelfLogisticsFromIngest(ctx, o, req, bearerToken)
@@ -1287,6 +1313,17 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		o = s.forceMergeKDZSSiblingsIntoKeeper(tenantID, o)
 		// 按本轮系统编号写行级履约（挂包 + alloc），再汇总头表
 		o = s.applyPackageItemFulfillmentFromIngest(tenantID, o, req, hint)
+		// 行级履约写完后再建代发单（此前可能头表尚未带上 supplier_id）
+		if o != nil && o.Status != model.StatusClosed && o.Status != model.StatusCompleted {
+			o = s.alignDropshipPORef(ctx, tenantID, o, bearerToken)
+			needPO := needsDropshipPO(o) && (!hadDropshipAlloc ||
+				o.ShipStatus == model.ShipWaitShip || o.ShipStatus == model.ShipPartialShipped ||
+				(o.AllocType == model.AllocDropship && strings.TrimSpace(o.PurchaseOrderID) == ""))
+			if needPO {
+				s.queueOrCreateDropshipPO(ctx, tenantID, o, bearerToken)
+				o, _ = s.repos.GetOrder(tenantID, existing.ID)
+			}
+		}
 		// 包裹备注落库后再同步采购小计（按销售单明细关联代发单，不依赖头表 po 号）
 		if o != nil && (strings.TrimSpace(o.PurchaseOrderID) != "" || orderHasAllocType(o, model.AllocDropship)) {
 			s.syncLinkedPOPurchasePrices(ctx, o, bearerToken)
@@ -1407,12 +1444,6 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	}
 	s.TryAutoAllocateBySKU(ctx, tenantID, operatorID, out, bearerToken)
 	out, _ = s.repos.GetOrder(tenantID, o.ID)
-	out = s.alignDropshipPORef(ctx, tenantID, out, bearerToken)
-	// 新单：本轮已代发分配且无采购单号 → 可自动建单（同步批次内合并）
-	if needsDropshipPO(out) {
-		s.queueOrCreateDropshipPO(ctx, tenantID, out, bearerToken)
-		out, _ = s.repos.GetOrder(tenantID, o.ID)
-	}
 	out = s.ensureSelfOrderAfterIngest(ctx, tenantID, out, bearerToken)
 	s.autoSyncDropshipLogistics(ctx, out, req, bearerToken)
 	s.autoSyncSelfLogisticsFromIngest(ctx, out, req, bearerToken)
@@ -1423,6 +1454,12 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	s.upsertOrderPackageFromIngest(tenantID, out, req, true)
 	out = s.forceMergeKDZSSiblingsIntoKeeper(tenantID, out)
 	out = s.applyPackageItemFulfillmentFromIngest(tenantID, out, req, hint)
+	out = s.alignDropshipPORef(ctx, tenantID, out, bearerToken)
+	// 行级履约写完后再建代发单
+	if needsDropshipPO(out) {
+		s.queueOrCreateDropshipPO(ctx, tenantID, out, bearerToken)
+		out, _ = s.repos.GetOrder(tenantID, o.ID)
+	}
 	if out != nil && (strings.TrimSpace(out.PurchaseOrderID) != "" || orderHasAllocType(out, model.AllocDropship)) {
 		s.syncLinkedPOPurchasePrices(ctx, out, bearerToken)
 	}
@@ -2454,7 +2491,8 @@ func (s *OrderService) flushDeferredDropshipPOs(ctx context.Context, tenantID ui
 type supplierPOFlags struct {
 	autoCreate bool
 	syncFrom   string
-	loaded     bool
+	loaded     bool // GetSupplier 成功
+	fetchErr   error
 }
 
 func (s *OrderService) loadSupplierPOFlags(ctx context.Context, bearerToken string, supplierID uint64, cache map[uint64]*supplierPOFlags) *supplierPOFlags {
@@ -2466,12 +2504,22 @@ func (s *OrderService) loadSupplierPOFlags(ctx context.Context, bearerToken stri
 			return v
 		}
 	}
-	flags := &supplierPOFlags{loaded: true}
+	flags := &supplierPOFlags{}
 	if s.supply != nil && strings.TrimSpace(bearerToken) != "" {
-		if sup, err := s.supply.GetSupplier(ctx, bearerToken, supplierID); err == nil && sup != nil {
+		sup, err := s.supply.GetSupplier(ctx, bearerToken, supplierID)
+		if err != nil {
+			flags.fetchErr = err
+			// 查询失败时不能默认 false：供应链抖动会导致厂家代发永远不建单
+			flags.autoCreate = true
+			log.Printf("[ordercore] GetSupplier %d failed, assume autoCreate=true: %v", supplierID, err)
+		} else if sup != nil {
+			flags.loaded = true
 			flags.autoCreate = sup.AutoCreateDropshipPO
 			flags.syncFrom = strings.TrimSpace(sup.SyncPurchasePriceFrom)
 		}
+	} else if strings.TrimSpace(bearerToken) == "" {
+		flags.fetchErr = fmt.Errorf("empty bearer token")
+		flags.autoCreate = true
 	}
 	if cache != nil {
 		cache[supplierID] = flags
@@ -2511,7 +2559,9 @@ func (s *OrderService) createAndBindDropshipPOs(ctx context.Context, tenantID ui
 		if len(group) == 0 {
 			continue
 		}
-		if !force && !s.loadSupplierPOFlags(ctx, bearerToken, supplierID, flagCache).autoCreate {
+		flags := s.loadSupplierPOFlags(ctx, bearerToken, supplierID, flagCache)
+		if !force && !flags.autoCreate {
+			log.Printf("[ordercore] skip auto dropship PO supplier=%d (autoCreate=false) n=%d", supplierID, len(group))
 			continue
 		}
 		supplierName := names[supplierID]
@@ -5948,12 +5998,25 @@ func orderHasFulfillableItems(o *model.Order) bool {
 		return false
 	}
 	for _, it := range o.Items {
-		if strings.TrimSpace(it.SplitKind) != "" {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
 			continue
 		}
 		if !orderItemExcludedFromFulfillment(it) {
 			return true
 		}
+	}
+	return false
+}
+
+func orderHasRootItems(o *model.Order) bool {
+	if o == nil {
+		return false
+	}
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		return true
 	}
 	return false
 }
