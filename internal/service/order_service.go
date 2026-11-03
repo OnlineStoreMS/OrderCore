@@ -860,16 +860,10 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				platformStatus = coalesceStr(hint.PlatformStatus, req.PlatformStatus)
 				platformStatusText = coalesceStr(hint.PlatformStatusText, req.PlatformStatusText)
 				terminalPre = false
-				// 头表售后完成会再次触发关单文案；部分退时不要用退完包冲掉
+				// 头表售后完成会再次触发关单文案；部分退时不要用退完包冲掉整单
 				if existingFulfillable && !incomingFulfillable {
-					req.AfterSaleStatus = existing.AfterSaleStatus
-					req.AfterSaleStatusText = existing.AfterSaleStatusText
-					if strings.TrimSpace(req.AfterSaleStatus) == "" ||
-						strings.EqualFold(req.AfterSaleStatus, "REFUND_MONEY_FINISH") ||
-						strings.EqualFold(req.AfterSaleStatus, "REFUND_SUCCESS") {
-						req.AfterSaleStatus = "REFUND_MONEY_NONE"
-						req.AfterSaleStatusText = "部分退款"
-					}
+					req.AfterSaleStatus = "REFUND_MONEY_NONE"
+					req.AfterSaleStatusText = "部分退款"
 				}
 				log.Printf("[ordercore] partial-refund keep-open order=%s status=%s reason=%s", existing.OrderNo, status, reason)
 			}
@@ -1234,9 +1228,11 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 					closeReason = "快递助手/电商订单已取消"
 				}
 				closeFields := map[string]any{
-					"status":            model.StatusClosed,
-					"ship_entry_locked": true,
-					"ship_lock_reason":  closeReason,
+					"status":                 model.StatusClosed,
+					"ship_entry_locked":      true,
+					"ship_lock_reason":       closeReason,
+					"after_sale_status":      "REFUND_MONEY_FINISH",
+					"after_sale_status_text": "退款完成",
 				}
 				if o.ShipStatus != model.ShipShipped {
 					closeFields["ship_status"] = ""
@@ -1249,6 +1245,10 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				})
 				o, _ = s.repos.GetOrder(tenantID, existing.ID)
 				log.Printf("[ordercore] post-merge close all-refunded order=%s", existing.OrderNo)
+			} else {
+				// 头表售后文案按行汇总，避免部分退仍显示「无退款」或申请中卡死
+				s.reconcileAfterSaleFromItems(tenantID, o)
+				o, _ = s.repos.GetOrder(tenantID, existing.ID)
 			}
 		}
 		// KDZS 多包裹并入同一 OC：头表实付按明细合计回填，避免单包裹金额覆盖整单
@@ -1315,7 +1315,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		o = s.applyPackageItemFulfillmentFromIngest(tenantID, o, req, hint)
 		// 行级履约写完后再建代发单（此前可能头表尚未带上 supplier_id）
 		if o != nil && o.Status != model.StatusClosed && o.Status != model.StatusCompleted {
-			o = s.alignDropshipPORef(ctx, tenantID, o, bearerToken)
+			if deferredDropshipFromCtx(ctx) == nil {
+				o = s.alignDropshipPORef(ctx, tenantID, o, bearerToken)
+			}
 			needPO := needsDropshipPO(o) && (!hadDropshipAlloc ||
 				o.ShipStatus == model.ShipWaitShip || o.ShipStatus == model.ShipPartialShipped ||
 				(o.AllocType == model.AllocDropship && strings.TrimSpace(o.PurchaseOrderID) == ""))
@@ -1324,8 +1326,9 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				o, _ = s.repos.GetOrder(tenantID, existing.ID)
 			}
 		}
-		// 包裹备注落库后再同步采购小计（按销售单明细关联代发单，不依赖头表 po 号）
-		if o != nil && (strings.TrimSpace(o.PurchaseOrderID) != "" || orderHasAllocType(o, model.AllocDropship)) {
+		// 批量同步跳过逐单询价：每单 ListPO 会把整次任务拖进 deadline
+		if deferredDropshipFromCtx(ctx) == nil && o != nil &&
+			(strings.TrimSpace(o.PurchaseOrderID) != "" || orderHasAllocType(o, model.AllocDropship)) {
 			s.syncLinkedPOPurchasePrices(ctx, o, bearerToken)
 		}
 		return o, false, nil
@@ -1454,13 +1457,16 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	s.upsertOrderPackageFromIngest(tenantID, out, req, true)
 	out = s.forceMergeKDZSSiblingsIntoKeeper(tenantID, out)
 	out = s.applyPackageItemFulfillmentFromIngest(tenantID, out, req, hint)
-	out = s.alignDropshipPORef(ctx, tenantID, out, bearerToken)
+	if deferredDropshipFromCtx(ctx) == nil {
+		out = s.alignDropshipPORef(ctx, tenantID, out, bearerToken)
+	}
 	// 行级履约写完后再建代发单
 	if needsDropshipPO(out) {
 		s.queueOrCreateDropshipPO(ctx, tenantID, out, bearerToken)
 		out, _ = s.repos.GetOrder(tenantID, o.ID)
 	}
-	if out != nil && (strings.TrimSpace(out.PurchaseOrderID) != "" || orderHasAllocType(out, model.AllocDropship)) {
+	if deferredDropshipFromCtx(ctx) == nil && out != nil &&
+		(strings.TrimSpace(out.PurchaseOrderID) != "" || orderHasAllocType(out, model.AllocDropship)) {
 		s.syncLinkedPOPurchasePrices(ctx, out, bearerToken)
 	}
 	return out, true, nil
@@ -2927,11 +2933,17 @@ func (s *OrderService) linkedDropshipPONos(ctx context.Context, o *model.Order, 
 	if s.supply == nil || o == nil || o.ID == 0 || strings.TrimSpace(bearerToken) == "" {
 		return out
 	}
+	// 批量同步只信本单已绑 PO，避免每单刷 Supply 列表把 ctx 拖死
+	if deferredDropshipFromCtx(ctx) != nil {
+		return out
+	}
 	seen := map[string]struct{}{}
 	for _, n := range out {
 		seen[n] = struct{}{}
 	}
-	list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, o.ID, "dropship", "", 1, 50)
+	listCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	list, _, err := s.supply.ListPurchaseOrdersEx(listCtx, bearerToken, o.ID, "dropship", "", 1, 50)
 	if err != nil {
 		log.Printf("[ordercore] list linked dropship PO order=%s: %v", o.OrderNo, err)
 		return out
@@ -4731,7 +4743,6 @@ func (s *OrderService) callbackKDZSShip(ctx context.Context, o *model.Order, sh 
 }
 
 func expandKDZSTradeStatuses(statuses []string) []string {
-	discrete := []string{model.KDZSWaitAudit, model.KDZSWaitSend, "shipped", "completed"}
 	out := make([]string, 0, len(statuses)+5)
 	seen := map[string]struct{}{}
 	wantAllCatchup := false
@@ -4742,13 +4753,6 @@ func expandKDZSTradeStatuses(statuses []string) []string {
 		}
 		if s == "all" {
 			wantAllCatchup = true
-			for _, d := range discrete {
-				if _, ok := seen[d]; ok {
-					continue
-				}
-				seen[d] = struct{}{}
-				out = append(out, d)
-			}
 			return
 		}
 		if _, ok := seen[s]; ok {
@@ -4760,13 +4764,27 @@ func expandKDZSTradeStatuses(statuses []string) []string {
 	for _, s := range statuses {
 		add(s)
 	}
-	// 退款/取消单会离开 wait_send 等 Tab，末尾补 ALL 兜底刷新（已见过的单号仍跳过）
-	if wantAllCatchup {
-		if _, ok := seen["all"]; !ok {
-			out = append(out, "all")
-		}
+	if !wantAllCatchup {
+		return out
 	}
-	return out
+	// all 插在 wait_send 之后：退款/取消离开待发货 Tab 后尽早兜底，避免 shipped/completed 历史页把时限吃光
+	preferred := []string{model.KDZSWaitAudit, model.KDZSWaitSend, "all", "shipped", "completed"}
+	reordered := make([]string, 0, len(preferred)+len(out))
+	reSeen := map[string]struct{}{}
+	push := func(s string) {
+		if _, ok := reSeen[s]; ok {
+			return
+		}
+		reSeen[s] = struct{}{}
+		reordered = append(reordered, s)
+	}
+	for _, s := range preferred {
+		push(s)
+	}
+	for _, s := range out {
+		push(s)
+	}
+	return reordered
 }
 
 func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID uint64, req dto.SyncKDZSRequest, token string) (map[string]int, error) {
@@ -4794,8 +4812,8 @@ func (s *OrderService) SyncFromKDZS(ctx context.Context, tenantID, operatorID ui
 	} else if strings.TrimSpace(req.TradeStatus) != "" {
 		statuses = append(statuses, strings.TrimSpace(req.TradeStatus))
 	} else {
-		// 按快递助手 Tab 分别拉，末尾 all 兜底退款/取消
-		statuses = []string{model.KDZSWaitAudit, model.KDZSWaitSend, "shipped", "completed", "all"}
+		// 按快递助手 Tab 分别拉；all 靠前兜底退款/取消（expand 会再规范顺序）
+		statuses = []string{model.KDZSWaitAudit, model.KDZSWaitSend, "all", "shipped", "completed"}
 	}
 	statuses = expandKDZSTradeStatuses(statuses)
 
@@ -4957,10 +4975,11 @@ func syncKDZSStats(created, updated, fetched, total int) map[string]int {
 }
 
 func sleepKDZSGap(ctx context.Context) error {
+	// 5s 间隔在多平台×多 Tab 翻页时会把 8–15 分钟任务时限吃光；1.5s 仍可避开多数 811
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-time.After(5 * time.Second):
+	case <-time.After(1500 * time.Millisecond):
 		return nil
 	}
 }
@@ -4974,14 +4993,14 @@ func isKDZSRateLimitErr(err error) bool {
 }
 
 func sleepKDZSRateLimit(ctx context.Context, attempt int) error {
-	// 限流后退避：5s、10s、20s、30s…
+	// 限流后退避：3s、6s、12s、24s…
 	shift := attempt
 	if shift > 3 {
 		shift = 3
 	}
-	d := time.Duration(5*(1<<shift)) * time.Second
-	if d > 30*time.Second {
-		d = 30 * time.Second
+	d := time.Duration(3*(1<<shift)) * time.Second
+	if d > 24*time.Second {
+		d = 24 * time.Second
 	}
 	select {
 	case <-ctx.Done():
@@ -6021,6 +6040,58 @@ func orderHasRootItems(o *model.Order) bool {
 	return false
 }
 
+// reconcileAfterSaleFromItems 按行汇总头表售后：全退→退款完成；部分退→部分退款（勿卡在申请中）。
+func (s *OrderService) reconcileAfterSaleFromItems(tenantID uint64, o *model.Order) {
+	if s == nil || o == nil || o.ID == 0 || !orderHasRootItems(o) {
+		return
+	}
+	roots, finished, applying := 0, 0, 0
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		roots++
+		if orderItemAfterSaleFinished(it) || orderItemExcludedFromFulfillment(it) {
+			finished++
+			continue
+		}
+		as := strings.ToUpper(strings.TrimSpace(it.AfterSaleStatus))
+		text := strings.TrimSpace(it.AfterSaleStatusText)
+		if strings.Contains(as, "APPLY") || strings.Contains(as, "ING") ||
+			strings.Contains(text, "申请退款") || strings.Contains(text, "退款中") {
+			applying++
+		}
+	}
+	if roots == 0 {
+		return
+	}
+	var code, text string
+	switch {
+	case finished >= roots:
+		code, text = "REFUND_MONEY_FINISH", "退款完成"
+	case finished > 0:
+		code, text = "REFUND_MONEY_NONE", "部分退款"
+	case applying > 0:
+		code, text = "REFUND_MONEY_APPLY_ING", "申请退款中"
+	default:
+		return
+	}
+	curCode := strings.TrimSpace(o.AfterSaleStatus)
+	curText := strings.TrimSpace(o.AfterSaleStatusText)
+	if strings.EqualFold(curCode, code) && curText == text {
+		return
+	}
+	// 已是完成/部分退时，不要被单包「申请中」冲回
+	if applying > 0 && finished == 0 &&
+		(strings.EqualFold(curCode, "REFUND_MONEY_FINISH") || curText == "部分退款" || curText == "退款完成") {
+		return
+	}
+	_ = s.repos.UpdateOrderFields(tenantID, o.ID, map[string]any{
+		"after_sale_status":      code,
+		"after_sale_status_text": text,
+	})
+}
+
 // ingestChildPlatformIDs 主单 tid 之外的子单 oid（快递助手 tids[1:]）。
 func ingestChildPlatformIDs(req dto.IngestOrderRequest) []string {
 	parent := strings.TrimSpace(req.PlatformOrderID)
@@ -6781,6 +6852,10 @@ func (s *OrderService) autoSyncDropshipLogistics(ctx context.Context, o *model.O
 	if o == nil || s.supply == nil || strings.TrimSpace(bearerToken) == "" {
 		return
 	}
+	// 批量同步跳过：每单 ListPO+SyncShipments 极易把整次任务拖进 deadline
+	if deferredDropshipFromCtx(ctx) != nil {
+		return
+	}
 	if o.AllocType != model.AllocDropship && o.AllocType != model.AllocMixed && !orderHasAllocType(o, model.AllocDropship) {
 		return
 	}
@@ -6821,6 +6896,10 @@ func (s *OrderService) syncShippingShippedAtFromOrder(ctx context.Context, o *mo
 	if o == nil || s.shipping == nil || !s.shipping.Enabled() || strings.TrimSpace(bearerToken) == "" {
 		return
 	}
+	// 批量同步跳过：Shipping upsert 继承同步 ctx，临近超时会整片 deadline
+	if deferredDropshipFromCtx(ctx) != nil {
+		return
+	}
 	// 自营/渠道已发：同步后要在发货中心可查；代发不建发货中心单
 	if o.AllocType != model.AllocSelfShip && o.AllocType != model.AllocChannelShip &&
 		o.AllocType != model.AllocMixed && !orderHasAllocType(o, model.AllocSelfShip) && !orderHasAllocType(o, model.AllocChannelShip) {
@@ -6846,7 +6925,10 @@ func (s *OrderService) syncShippingShippedAtFromOrder(ctx context.Context, o *mo
 		} else if o.ShippedAt != nil && !o.ShippedAt.IsZero() {
 			body["shippedAt"] = o.ShippedAt.Format(time.RFC3339)
 		}
-		if err := s.shipping.UpsertKdzsFromSync(ctx, bearerToken, body); err != nil {
+		shipCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		err := s.shipping.UpsertKdzsFromSync(shipCtx, bearerToken, body)
+		cancel()
+		if err != nil {
 			log.Printf("[ordercore] upsert shipping kdzs orderID=%d mailNo=%s: %v (best-effort)", o.ID, no, err)
 		}
 	}

@@ -144,7 +144,7 @@ func (s *SettingsService) RunSyncJob(ctx context.Context, tenantID, id uint64, b
 	}
 	token := strings.TrimPrefix(strings.TrimSpace(bearerToken), "Bearer ")
 	if token == "" && s.jwt != nil {
-		token, err = s.jwt.IssueServiceToken(tenantID, 30*time.Minute)
+		token, err = s.jwt.IssueServiceToken(tenantID, 45*time.Minute)
 		if err != nil {
 			return nil, fmt.Errorf("签发同步令牌失败: %w", err)
 		}
@@ -177,6 +177,10 @@ func (s *SettingsService) executeSyncJob(ctx context.Context, job *model.SyncJob
 	if params.DateRangeDays == 0 && params.TradeStatuses[0] == "all" {
 		// 「全部」状态建议带时间窗，避免全量过重；已有显式配置则尊重
 		params.DateRangeDays = 30
+	}
+	// 列表同步后回查未完结单，补齐退款完成等已离开 wait_* Tab 的状态
+	if !params.RefreshOpenOrders && job.JobType == model.SyncJobKDZS {
+		params.RefreshOpenOrders = true
 	}
 
 	// dateRangeDays<=0：不传时间窗，与工作台「同步电商订单」一致

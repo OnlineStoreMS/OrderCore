@@ -50,7 +50,8 @@ func (s *SyncScheduler) runOnce() {
 	if s.settings == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	// 租户1 电商全量（多平台×多 Tab×翻页+限流间隔）常需十余分钟；过短会在 all/退款兜底前被掐断
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
 	defer cancel()
 	log.Printf("[sync-scheduler] checking due sync jobs")
 	s.settings.RunDueSyncJobs(ctx)
