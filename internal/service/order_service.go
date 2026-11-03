@@ -34,11 +34,15 @@ const deferDropshipPOKey ctxKey = 1
 
 type deferredDropshipBatch struct {
 	mu     sync.Mutex
-	orders map[uint64]*model.Order
+	orders map[uint64]*model.Order // 待建代发单
+	side   map[uint64]struct{}     // 待回写采购价/物流（已有代发单也会进）
 }
 
 func withDeferDropshipPO(ctx context.Context) (context.Context, *deferredDropshipBatch) {
-	b := &deferredDropshipBatch{orders: map[uint64]*model.Order{}}
+	b := &deferredDropshipBatch{
+		orders: map[uint64]*model.Order{},
+		side:   map[uint64]struct{}{},
+	}
 	return context.WithValue(ctx, deferDropshipPOKey, b), b
 }
 
@@ -56,6 +60,18 @@ func (b *deferredDropshipBatch) add(o *model.Order) {
 	b.orders[o.ID] = o
 }
 
+func (b *deferredDropshipBatch) markSide(o *model.Order) {
+	if b == nil || o == nil || o.ID == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.side == nil {
+		b.side = map[uint64]struct{}{}
+	}
+	b.side[o.ID] = struct{}{}
+}
+
 func (b *deferredDropshipBatch) take() []*model.Order {
 	if b == nil {
 		return nil
@@ -67,6 +83,20 @@ func (b *deferredDropshipBatch) take() []*model.Order {
 		out = append(out, o)
 	}
 	b.orders = map[uint64]*model.Order{}
+	return out
+}
+
+func (b *deferredDropshipBatch) takeSideIDs() []uint64 {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]uint64, 0, len(b.side))
+	for id := range b.side {
+		out = append(out, id)
+	}
+	b.side = map[uint64]struct{}{}
 	return out
 }
 
@@ -1326,9 +1356,8 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 				o, _ = s.repos.GetOrder(tenantID, existing.ID)
 			}
 		}
-		// 批量同步跳过逐单询价：每单 ListPO 会把整次任务拖进 deadline
-		if deferredDropshipFromCtx(ctx) == nil && o != nil &&
-			(strings.TrimSpace(o.PurchaseOrderID) != "" || orderHasAllocType(o, model.AllocDropship)) {
+		// 批量同步时入队，flush 时按代发单去重回写分发备注采购价
+		if o != nil && (strings.TrimSpace(o.PurchaseOrderID) != "" || orderHasAllocType(o, model.AllocDropship)) {
 			s.syncLinkedPOPurchasePrices(ctx, o, bearerToken)
 		}
 		return o, false, nil
@@ -1465,8 +1494,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		s.queueOrCreateDropshipPO(ctx, tenantID, out, bearerToken)
 		out, _ = s.repos.GetOrder(tenantID, o.ID)
 	}
-	if deferredDropshipFromCtx(ctx) == nil && out != nil &&
-		(strings.TrimSpace(out.PurchaseOrderID) != "" || orderHasAllocType(out, model.AllocDropship)) {
+	if out != nil && (strings.TrimSpace(out.PurchaseOrderID) != "" || orderHasAllocType(out, model.AllocDropship)) {
 		s.syncLinkedPOPurchasePrices(ctx, out, bearerToken)
 	}
 	return out, true, nil
@@ -2474,10 +2502,15 @@ func (s *OrderService) queueOrCreateDropshipPO(ctx context.Context, tenantID uin
 }
 
 func (s *OrderService) flushDeferredDropshipPOs(ctx context.Context, tenantID uint64, bearerToken string, batch *deferredDropshipBatch) {
-	orders := batch.take()
-	if len(orders) == 0 {
+	if batch == nil {
 		return
 	}
+	orders := batch.take()
+	sideIDs := batch.takeSideIDs()
+	// 建单 / 回写用独立时限，避免列表同步吃光父 ctx 后物流与分发备注采购价永远不落
+	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 8*time.Minute)
+	defer cancel()
+
 	fresh := make([]*model.Order, 0, len(orders))
 	for _, o := range orders {
 		cur, err := s.repos.GetOrder(tenantID, o.ID)
@@ -2485,13 +2518,115 @@ func (s *OrderService) flushDeferredDropshipPOs(ctx context.Context, tenantID ui
 			continue
 		}
 		fresh = append(fresh, cur)
+		sideIDs = append(sideIDs, cur.ID)
 	}
-	if len(fresh) == 0 {
+	if len(fresh) > 0 {
+		if err := s.createAndBindDropshipPOs(flushCtx, tenantID, fresh, bearerToken, false); err != nil {
+			log.Printf("[ordercore] flush deferred dropship PO n=%d: %v", len(fresh), err)
+		}
+	}
+	s.flushDeferredDropshipSideEffects(flushCtx, tenantID, bearerToken, sideIDs)
+}
+
+// flushDeferredDropshipSideEffects 批量同步结束后：按销售单去重回写代发采购价（分发备注）与物流。
+func (s *OrderService) flushDeferredDropshipSideEffects(ctx context.Context, tenantID uint64, bearerToken string, orderIDs []uint64) {
+	if s.supply == nil || strings.TrimSpace(bearerToken) == "" || len(orderIDs) == 0 {
 		return
 	}
-	if err := s.createAndBindDropshipPOs(ctx, tenantID, fresh, bearerToken, false); err != nil {
-		log.Printf("[ordercore] flush deferred dropship PO n=%d: %v", len(fresh), err)
+	seenOrder := map[uint64]struct{}{}
+	seenPOPrice := map[uint64]struct{}{}
+	type poRef struct {
+		id       uint64
+		status   string
+		payStatus string
 	}
+	poCache := map[string]poRef{}
+	priceOK, shipOK := 0, 0
+	resolvePO := func(poNo string) poRef {
+		poNo = strings.TrimSpace(poNo)
+		if poNo == "" {
+			return poRef{}
+		}
+		if ref, ok := poCache[poNo]; ok {
+			return ref
+		}
+		list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, 0, "dropship", poNo, 1, 20)
+		if err != nil {
+			log.Printf("[ordercore] resolve dropship PO %s: %v", poNo, err)
+			poCache[poNo] = poRef{}
+			return poRef{}
+		}
+		ref := poRef{}
+		for _, it := range list {
+			if strings.TrimSpace(it.PoNo) == poNo {
+				ref = poRef{id: it.ID, status: it.Status, payStatus: it.PayStatus}
+				break
+			}
+		}
+		poCache[poNo] = ref
+		return ref
+	}
+	for _, id := range orderIDs {
+		if id == 0 {
+			continue
+		}
+		if _, ok := seenOrder[id]; ok {
+			continue
+		}
+		seenOrder[id] = struct{}{}
+		o, err := s.repos.GetOrder(tenantID, id)
+		if err != nil || o == nil {
+			continue
+		}
+		if o.AllocType != model.AllocDropship && o.AllocType != model.AllocMixed &&
+			!orderHasAllocType(o, model.AllocDropship) && strings.TrimSpace(o.PurchaseOrderID) == "" {
+			continue
+		}
+		hydrateOrderPackageRemarks(o)
+		poNos := orderDropshipPONos(o)
+		if strings.TrimSpace(o.FenFaRemark) != "" || effectivePackageFenFaRemark(o) != "" {
+			for _, poNo := range poNos {
+				ref := resolvePO(poNo)
+				if ref.id == 0 || ref.status == "cancelled" || ref.status == "completed" {
+					continue
+				}
+				if ref.payStatus == "paid" || ref.payStatus == "partial" {
+					continue
+				}
+				if _, ok := seenPOPrice[ref.id]; ok {
+					continue
+				}
+				seenPOPrice[ref.id] = struct{}{}
+				if serr := s.supply.SyncPurchasePrices(ctx, bearerToken, ref.id); serr != nil {
+					log.Printf("[ordercore] sync purchase prices po=%s order=%s: %v", poNo, o.OrderNo, serr)
+					continue
+				}
+				priceOK++
+			}
+			// 本单有备注但头表未绑 PO 号：仍走原列表查询兜底
+			if len(poNos) == 0 {
+				priceOK += s.syncLinkedPOPurchasePricesDedup(ctx, o, bearerToken, seenPOPrice)
+			}
+		}
+		if orderHasExpressShipments(o) || o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
+			for _, poNo := range poNos {
+				ref := resolvePO(poNo)
+				if ref.id == 0 || ref.status == "cancelled" {
+					continue
+				}
+				if err := s.supply.SyncShipmentsFromOrders(ctx, bearerToken, ref.id, o.ID); err != nil {
+					log.Printf("[ordercore] auto sync logistics PO=%s order=%s: %v", poNo, o.OrderNo, err)
+					continue
+				}
+				shipOK++
+			}
+			if len(poNos) == 0 {
+				shipOK += s.syncDropshipLogisticsForOrder(ctx, o, bearerToken)
+			}
+		}
+	}
+	log.Printf("[ordercore] flush deferred dropship side-effects orders=%d priceSync=%d logisticsSync=%d",
+		len(seenOrder), priceOK, shipOK)
 }
 
 type supplierPOFlags struct {
@@ -3748,9 +3883,28 @@ func (s *OrderService) syncLinkedPOPurchasePrices(ctx context.Context, o *model.
 	if s.supply == nil || o == nil || strings.TrimSpace(bearerToken) == "" {
 		return
 	}
+	if batch := deferredDropshipFromCtx(ctx); batch != nil {
+		// 批量只入队「有分发备注」的单，避免对历史已发货单全量刷 Supply
+		hydrateOrderPackageRemarks(o)
+		if strings.TrimSpace(o.FenFaRemark) == "" && effectivePackageFenFaRemark(o) == "" {
+			return
+		}
+		batch.markSide(o)
+		return
+	}
+	_ = s.syncLinkedPOPurchasePricesDedup(ctx, o, bearerToken, map[uint64]struct{}{})
+}
+
+func (s *OrderService) syncLinkedPOPurchasePricesDedup(ctx context.Context, o *model.Order, bearerToken string, seen map[uint64]struct{}) int {
+	if s.supply == nil || o == nil || strings.TrimSpace(bearerToken) == "" {
+		return 0
+	}
+	if seen == nil {
+		seen = map[uint64]struct{}{}
+	}
 	hydrateOrderPackageRemarks(o)
 	poNos := orderDropshipPONos(o)
-	seen := map[uint64]struct{}{}
+	synced := 0
 	collect := func(list []supplycore.PurchaseOrderListItem) {
 		for _, it := range list {
 			if it.ID == 0 {
@@ -3768,7 +3922,9 @@ func (s *OrderService) syncLinkedPOPurchasePrices(ctx context.Context, o *model.
 			seen[it.ID] = struct{}{}
 			if serr := s.supply.SyncPurchasePrices(ctx, bearerToken, it.ID); serr != nil {
 				log.Printf("[ordercore] sync purchase prices po=%s order=%s: %v", it.PoNo, o.OrderNo, serr)
+				continue
 			}
+			synced++
 		}
 	}
 	for _, poNo := range poNos {
@@ -3787,6 +3943,7 @@ func (s *OrderService) syncLinkedPOPurchasePrices(ctx context.Context, o *model.
 			collect(list)
 		}
 	}
+	return synced
 }
 
 func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID uint64, req dto.ShipRequest, bearerToken string) (*model.Order, error) {
@@ -6852,20 +7009,32 @@ func (s *OrderService) autoSyncDropshipLogistics(ctx context.Context, o *model.O
 	if o == nil || s.supply == nil || strings.TrimSpace(bearerToken) == "" {
 		return
 	}
-	// 批量同步跳过：每单 ListPO+SyncShipments 极易把整次任务拖进 deadline
-	if deferredDropshipFromCtx(ctx) != nil {
-		return
-	}
 	if o.AllocType != model.AllocDropship && o.AllocType != model.AllocMixed && !orderHasAllocType(o, model.AllocDropship) {
-		return
-	}
-	poNos := s.listLiveDropshipPONos(ctx, bearerToken, o.ID)
-	if len(poNos) == 0 {
 		return
 	}
 	if !ingestHasLogistics(req) && !orderHasExpressShipments(o) && o.ShipStatus != model.ShipShipped {
 		return
 	}
+	// 批量同步：先入队，整批结束后统一回写，避免每单 ListPO 拖垮任务
+	if batch := deferredDropshipFromCtx(ctx); batch != nil {
+		batch.markSide(o)
+		return
+	}
+	_ = s.syncDropshipLogisticsForOrder(ctx, o, bearerToken)
+}
+
+func (s *OrderService) syncDropshipLogisticsForOrder(ctx context.Context, o *model.Order, bearerToken string) int {
+	if o == nil || s.supply == nil || strings.TrimSpace(bearerToken) == "" {
+		return 0
+	}
+	poNos := orderDropshipPONos(o)
+	if len(poNos) == 0 {
+		poNos = s.listLiveDropshipPONos(ctx, bearerToken, o.ID)
+	}
+	if len(poNos) == 0 {
+		return 0
+	}
+	synced := 0
 	for _, poNo := range poNos {
 		list, _, err := s.supply.ListPurchaseOrdersEx(ctx, bearerToken, 0, "dropship", poNo, 1, 20)
 		if err != nil {
@@ -6886,8 +7055,10 @@ func (s *OrderService) autoSyncDropshipLogistics(ctx context.Context, o *model.O
 			log.Printf("[ordercore] auto sync logistics PO=%s order=%s: %v", poNo, o.OrderNo, err)
 			continue
 		}
+		synced++
 		log.Printf("[ordercore] auto synced logistics PO=%s order=%s", poNo, o.OrderNo)
 	}
+	return synced
 }
 
 // syncShippingShippedAtFromOrder 快递助手同步已发货后：补建/对齐发货中心发货单。
