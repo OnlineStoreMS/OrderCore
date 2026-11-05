@@ -73,11 +73,17 @@ func backfillFulfillmentShipStatus(db *gorm.DB) error {
 		`UPDATE orders SET ship_status = 'wait_ship'
 		 WHERE (ship_status IS NULL OR ship_status = '')
 		   AND status IN ('pending_alloc','allocated','purchasing','pending_payment')`,
-		// legacy shipped / partial_ship → allocated|purchasing + shipped
-		`UPDATE orders SET
-			status = CASE WHEN alloc_type = 'purchase_then_ship' THEN 'purchasing' ELSE 'allocated' END,
-			ship_status = 'shipped'
-		 WHERE status IN ('shipped','partial_ship')`,
+		// 已分配且已全部发货 → 履约「已发货」（与 ship_status 对齐，支持履约状态筛选）
+		`UPDATE orders SET status = 'shipped'
+		 WHERE status IN ('allocated','purchasing') AND ship_status = 'shipped'`,
+		// 已分配且部分发货 → 履约「部分发货」
+		`UPDATE orders SET status = 'partial_ship'
+		 WHERE status IN ('allocated','purchasing') AND ship_status = 'partial_shipped'`,
+		// 履约已发货/部分发货：补齐发货态
+		`UPDATE orders SET ship_status = 'shipped'
+		 WHERE status = 'shipped' AND (ship_status IS NULL OR ship_status = '' OR ship_status = 'wait_ship')`,
+		`UPDATE orders SET ship_status = 'partial_shipped'
+		 WHERE status = 'partial_ship' AND (ship_status IS NULL OR ship_status = '' OR ship_status = 'wait_ship')`,
 		// completed → ship shipped
 		`UPDATE orders SET ship_status = 'shipped'
 		 WHERE status = 'completed' AND (ship_status IS NULL OR ship_status = '' OR ship_status = 'wait_ship')`,

@@ -172,6 +172,17 @@ func rollupOrderFulfillmentFields(o *model.Order) map[string]any {
 	if allocType == model.AllocPurchaseThenShip && len(allocTypes) == 1 {
 		status = model.StatusPurchasing
 	}
+	// 发货进度回写履约态，便于列表/工作台按履约状态筛选（与 ship_status 对齐）
+	switch shipStatus {
+	case model.ShipShipped:
+		if status == model.StatusAllocated || status == model.StatusPurchasing {
+			status = model.StatusShipped
+		}
+	case model.ShipPartialShipped:
+		if status == model.StatusAllocated || status == model.StatusPurchasing {
+			status = model.StatusPartialShip
+		}
+	}
 
 	poNo := ""
 	if len(poNos) == 1 {

@@ -36,7 +36,8 @@ func (r *Repos) Transaction(fn func(txRepos *Repos) error) error {
 
 type OrderListQuery struct {
 	SourceChannel     string
-	Status            string
+	Status            string   // 单值兼容；多选用 Statuses
+	Statuses          []string // 履约状态多选
 	ShipStatus        string
 	AllocType         string
 	Keyword           string
@@ -45,6 +46,7 @@ type OrderListQuery struct {
 	PlatformSysTid    string
 	EcommerceWaitShip bool   // 兼容：按电商订单「待发货」筛选
 	SalesChannel      string // self | dropship | channel，与工作台自营/代发/渠道已发口径一致
+	ValidSales        bool   // 与工作台销售额同口径：排除关闭/取消/全额退款完成
 	OrderedAtStart    *time.Time
 	OrderedAtEnd      *time.Time
 	ShippedAtStart    *time.Time
@@ -66,8 +68,11 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	if q.SourceChannel != "" {
 		tx = tx.Where("source_channel = ?", q.SourceChannel)
 	}
-	if q.Status != "" {
-		tx = tx.Where("status = ?", q.Status)
+	statuses := normalizeStatusFilters(q.Statuses, q.Status)
+	if len(statuses) == 1 {
+		tx = tx.Where("status = ?", statuses[0])
+	} else if len(statuses) > 1 {
+		tx = tx.Where("status IN ?", statuses)
 	}
 	if q.ShipStatus != "" {
 		switch q.ShipStatus {
@@ -114,6 +119,10 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	case "channel", "channel_ship":
 		tx = tx.Where("alloc_type = ?", model.AllocChannelShip)
 		tx = scopeValidSales(tx)
+	default:
+		if q.ValidSales {
+			tx = scopeValidSales(tx)
+		}
 	}
 	if q.EcommerceWaitShip {
 		tx = tx.Where("ship_status = ?", model.ShipWaitShip).
@@ -1245,6 +1254,33 @@ func (r *Repos) RelinkPurchaseOrderIDs(tenantID uint64, fromPoNos []string, toPo
 		Where("tenant_id = ? AND purchase_order_id IN ?", tenantID, cleaned).
 		Update("purchase_order_id", toPoNo)
 	return res.RowsAffected, res.Error
+}
+
+// normalizeStatusFilters 合并 status / statuses，并把历史 pending_ship 归一为 pending_alloc。
+func normalizeStatusFilters(statuses []string, single string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(statuses)+1)
+	add := func(raw string) {
+		for _, p := range strings.Split(raw, ",") {
+			s := strings.ToLower(strings.TrimSpace(p))
+			if s == "" {
+				continue
+			}
+			if s == model.StatusPendingShip {
+				s = model.StatusPendingAlloc
+			}
+			if _, ok := seen[s]; ok {
+				continue
+			}
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	for _, s := range statuses {
+		add(s)
+	}
+	add(single)
+	return out
 }
 
 func (r *Repos) CountByStatus(tenantID uint64) (map[string]int64, error) {

@@ -82,6 +82,7 @@ func scopeTrendTime(tx *gorm.DB, timeType string, start, endEx time.Time) *gorm.
 }
 
 func scopeValidSales(tx *gorm.DB) *gorm.DB {
+	// 有效成交：排除关闭单、取消单、全额退款完成。部分退款仍计整单实付（头表 pay_amount）。
 	return tx.
 		Where("status <> ?", model.StatusClosed).
 		Where(`NOT (
@@ -100,6 +101,8 @@ func scopeValidSales(tx *gorm.DB) *gorm.DB {
 				)
 			)
 			OR UPPER(COALESCE(after_sale_status,'')) IN ('REFUND_SUCCESS','REFUND_MONEY_FINISH','REFUND_MONEY_SUCCESS','REFUNDED')
+			OR COALESCE(after_sale_status_text,'') LIKE '%退款成功%'
+			OR COALESCE(after_sale_status_text,'') LIKE '%退款完成%'
 			OR COALESCE(ecommerce_status_text,'') LIKE '%退款成功%'
 			OR COALESCE(ecommerce_status_text,'') LIKE '%退款完成%'
 			OR COALESCE(ecommerce_status_text,'') LIKE '%交易关闭%'
@@ -161,7 +164,9 @@ func (r *Repos) DashboardCards(tenantID uint64, rangeStart, rangeEnd time.Time, 
 		Count(&out.Purchasing).Error; err != nil {
 		return nil, err
 	}
-	if err := r.db.Model(&model.Order{}).Where("tenant_id = ? AND ship_status = ?", tenantID, model.ShipShipped).
+	// 已发货卡：履约「已发货/已完成」（关闭单不计入，与履约状态下钻一致）
+	if err := r.db.Model(&model.Order{}).
+		Where("tenant_id = ? AND status IN ?", tenantID, []string{model.StatusShipped, model.StatusCompleted}).
 		Count(&out.Shipped).Error; err != nil {
 		return nil, err
 	}

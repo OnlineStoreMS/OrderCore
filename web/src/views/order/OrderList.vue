@@ -16,6 +16,7 @@ import {
   labelAgentType,
   labelEcommerceStatus,
   labelKDZSStatus,
+  fulfillmentStatusOptions,
   labelShipStatus,
   labelSource,
   labelStatus,
@@ -75,8 +76,27 @@ function rangeFromQueryDates(startRaw?: unknown, endRaw?: unknown): [string, str
 
 function normalizeFulfillmentStatus(s: string) {
   if (s === 'pending_ship') return 'pending_alloc'
-  if (s === 'shipped') return '' // 已发货改用发货状态筛选
   return s
+}
+
+function parseStatusQuery(raw: unknown): string[] {
+  const parts: string[] = []
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item === 'string' && item) parts.push(...item.split(','))
+    }
+  } else if (typeof raw === 'string' && raw) {
+    parts.push(...raw.split(','))
+  }
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const p of parts) {
+    const s = normalizeFulfillmentStatus(p.trim())
+    if (!s || seen.has(s)) continue
+    seen.add(s)
+    out.push(s)
+  }
+  return out
 }
 
 function isMenuEntry(q = route.query) {
@@ -85,7 +105,6 @@ function isMenuEntry(q = route.query) {
 
 function shipStatusFromQuery(q = route.query) {
   if (typeof q.shipStatus === 'string' && q.shipStatus) return q.shipStatus
-  if (q.status === 'shipped') return 'shipped'
   if (q.ecommerceWaitShip === '1' || q.ecommerceWaitShip === 'true') return 'wait_ship'
   return ''
 }
@@ -94,11 +113,12 @@ const filters = reactive({
   page: 1,
   pageSize: 20,
   sourceChannel: '',
-  status: '',
+  status: [] as string[],
   shipStatus: '',
   platform: '',
   allocType: '',
   salesChannel: '',
+  validSales: false,
   keyword: '',
   platformOrderId: '',
   orderedRange: null as [string, string] | null,
@@ -112,14 +132,12 @@ function applyFiltersFromRoute() {
   const shipInit = shipStatusFromQuery(q)
   filters.page = 1
   filters.sourceChannel = typeof q.sourceChannel === 'string' ? q.sourceChannel : ''
-  filters.status =
-    shipInit === 'shipped'
-      ? ''
-      : normalizeFulfillmentStatus(typeof q.status === 'string' ? q.status : '')
+  filters.status = parseStatusQuery(q.status)
   // 仅左侧菜单进入时默认「待发货 + 最近7天」；其它跳转只吃 query，不擅自加默认
   filters.shipStatus = menu ? (shipInit || 'wait_ship') : shipInit
   filters.platform = typeof q.platform === 'string' ? q.platform : ''
   filters.salesChannel = typeof q.salesChannel === 'string' ? q.salesChannel : ''
+  filters.validSales = q.validSales === '1' || q.validSales === 'true'
   // 趋势卡会同时带 salesChannel + allocType；仅有 salesChannel 时也回填分配类型便于看见筛选
   if (typeof q.allocType === 'string' && q.allocType) {
     filters.allocType = q.allocType
@@ -146,12 +164,13 @@ async function load() {
       page: filters.page,
       pageSize: filters.pageSize,
       sourceChannel: filters.sourceChannel || undefined,
-      status: filters.status || undefined,
+      status: filters.status.length ? filters.status.join(',') : undefined,
       shipStatus: filters.shipStatus || undefined,
       platform: filters.platform || undefined,
       // 有销售渠道（工作台趋势口径）时优先用它，避免与分配类型 AND 过严
       allocType: filters.salesChannel ? undefined : filters.allocType || undefined,
       salesChannel: filters.salesChannel || undefined,
+      validSales: filters.validSales || !!filters.salesChannel ? '1' : undefined, // 与工作台销售额同口径
       keyword: filters.keyword || undefined,
       platformOrderId: filters.platformOrderId || undefined,
     }
@@ -348,15 +367,20 @@ async function copyOrderText(order: Order, ev?: Event) {
         <el-form-item label="履约状态">
           <el-select
             v-model="filters.status"
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
             clearable
-            style="width: 130px"
+            placeholder="全部"
+            style="width: 220px"
             @change="onFilterChange"
           >
-            <el-option label="待分配" value="pending_alloc" />
-            <el-option label="已分配" value="allocated" />
-            <el-option label="采购中" value="purchasing" />
-            <el-option label="已完成" value="completed" />
-            <el-option label="已关闭" value="closed" />
+            <el-option
+              v-for="opt in fulfillmentStatusOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
           </el-select>
         </el-form-item>
         <el-form-item label="发货状态">

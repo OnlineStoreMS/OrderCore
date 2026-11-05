@@ -202,11 +202,23 @@ const statusLabels: Record<string, string> = {
   pending_ship: '待分配', // 历史值兼容
   allocated: '已分配',
   purchasing: '采购中',
-  shipped: '已发货', // 历史履约值兼容
   partial_ship: '部分发货',
+  shipped: '已发货',
   completed: '已完成',
   closed: '已关闭',
 }
+
+/** 履约状态筛选项（稳定顺序，供多选） */
+export const fulfillmentStatusOptions = [
+  { value: 'pending_payment', label: '待付款' },
+  { value: 'pending_alloc', label: '待分配' },
+  { value: 'allocated', label: '已分配' },
+  { value: 'purchasing', label: '采购中' },
+  { value: 'partial_ship', label: '部分发货' },
+  { value: 'shipped', label: '已发货' },
+  { value: 'completed', label: '已完成' },
+  { value: 'closed', label: '已关闭' },
+] as const
 
 const shipStatusLabels: Record<string, string> = {
   wait_ship: '待发货',

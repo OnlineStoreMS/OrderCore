@@ -122,6 +122,9 @@ func TestRollupOrderFulfillmentFieldsUniform(t *testing.T) {
 	if fields["ship_status"] != model.ShipPartialShipped {
 		t.Fatalf("ship_status=%v", fields["ship_status"])
 	}
+	if fields["status"] != model.StatusPartialShip {
+		t.Fatalf("status=%v want partial_ship", fields["status"])
+	}
 	if fields["purchase_order_id"] != "PO1" {
 		t.Fatalf("po=%v", fields["purchase_order_id"])
 	}

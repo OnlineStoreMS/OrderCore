@@ -139,10 +139,10 @@ const workCards = computed(() => [
   {
     key: 'allocated',
     label: '已分配',
-    tip: '含厂家代发锁定',
+    tip: '已分配待发货',
     value: cards.value.allocated || 0,
     color: '#67c23a',
-    go: () => router.push({ path: '/allocate', query: { status: 'allocated', shipStatus: 'wait_ship' } }),
+    go: () => router.push({ path: '/allocate', query: { status: 'allocated' } }),
   },
   {
     key: 'purchasing',
@@ -155,10 +155,10 @@ const workCards = computed(() => [
   {
     key: 'shipped',
     label: '已发货',
-    tip: '发货状态已发货',
+    tip: '履约已发货/已完成',
     value: cards.value.shipped || 0,
     color: '#0f766e',
-    go: () => router.push({ path: '/orders', query: { shipStatus: 'shipped' } }),
+    go: () => router.push({ path: '/orders', query: { status: 'shipped,completed' } }),
   },
 ])
 
@@ -178,14 +178,16 @@ const metricCards = computed(() => {
   const weekStart = startOfDay()
   weekStart.setDate(weekStart.getDate() - 6)
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0)
+  const validSales = { validSales: '1' }
   return [
     {
       label: '今日已发货',
       value: cards.value.todayShipped || 0,
       sub: `¥${fmtMoney(cards.value.todayShippedAmount)}`,
-      tip: '今日发货订单 · 实际成交额',
+      tip: '今日发货 · 排除关闭/全额退款',
       go: () =>
         goOrders({
+          ...validSales,
           shipStatus: 'shipped',
           shippedAtStart: today.start,
           shippedAtEnd: today.end,
@@ -195,16 +197,17 @@ const metricCards = computed(() => {
       label: '今日订单',
       value: cards.value.todayOrders || 0,
       sub: `¥${fmtMoney(cards.value.todayAmount)}`,
-      tip: '今日下单',
-      go: () => goOrders({ orderedAtStart: today.start, orderedAtEnd: today.end }),
+      tip: '今日下单 · 排除关闭/全额退款',
+      go: () => goOrders({ ...validSales, orderedAtStart: today.start, orderedAtEnd: today.end }),
     },
     {
       label: '近7日订单',
       value: cards.value.weekOrders || 0,
       sub: `¥${fmtMoney(cards.value.weekAmount)}`,
-      tip: '近7日下单',
+      tip: '近7日下单 · 排除关闭/全额退款',
       go: () =>
         goOrders({
+          ...validSales,
           orderedAtStart: fmtDateTime(new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate(), 0, 0, 0)),
           orderedAtEnd: today.end,
         }),
@@ -213,8 +216,8 @@ const metricCards = computed(() => {
       label: '本月订单',
       value: cards.value.monthOrders || 0,
       sub: `¥${fmtMoney(cards.value.monthAmount)}`,
-      tip: '本月下单',
-      go: () => goOrders({ orderedAtStart: fmtDateTime(monthStart), orderedAtEnd: today.end }),
+      tip: '本月下单 · 排除关闭/全额退款',
+      go: () => goOrders({ ...validSales, orderedAtStart: fmtDateTime(monthStart), orderedAtEnd: today.end }),
     },
   ]
 })
@@ -222,17 +225,17 @@ const metricCards = computed(() => {
 const rangeSummaryCards = computed(() => [
   {
     label: '区间订单量',
-    tip: `${rangeLabel.value || '当前筛选'} · 按${timeTypeLabel.value}`,
+    tip: `${rangeLabel.value || '当前筛选'} · 按${timeTypeLabel.value} · 排除关闭/全额退款`,
     value: String(cards.value.rangeOrders || 0),
     color: '#1677ff',
-    go: () => goOrders(rangeQuery()),
+    go: () => goOrders(rangeQuery({ validSales: '1' })),
   },
   {
     label: '区间销售额',
-    tip: `排除关闭/退款 · 按${timeTypeLabel.value}`,
+    tip: `排除关闭/全额退款（部分退仍计整单）· 按${timeTypeLabel.value}`,
     value: `¥${fmtMoney(cards.value.rangeAmount)}`,
     color: '#13c2c2',
-    go: () => goOrders(rangeQuery()),
+    go: () => goOrders(rangeQuery({ validSales: '1' })),
   },
   {
     label: '自营销售额',

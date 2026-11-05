@@ -4061,6 +4061,7 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 				if newShipStatus == model.ShipShipped {
 					fields["shipped_at"] = now
 				}
+				applyFulfillmentStatusForShip(o, newShipStatus, fields)
 				action := "ship_append"
 				remark := fmt.Sprintf("同运单追加商品 %s %s（%d 行）→%s", req.ExpressCompany, expressNo, len(appendLines), shipStatusLabel(newShipStatus))
 				if fullyShipped {
@@ -4069,7 +4070,7 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 				}
 				return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
 					FromStatus: from,
-					ToStatus:   from,
+					ToStatus:   transitionToStatus(fields, from),
 					Action:     action,
 					Remark:     remark,
 					OperatorID: operatorID,
@@ -4193,9 +4194,10 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		if newShipStatus == model.ShipShipped {
 			fields["shipped_at"] = now
 		}
+		applyFulfillmentStatusForShip(o, newShipStatus, fields)
 		return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
 			FromStatus: from,
-			ToStatus:   from,
+			ToStatus:   transitionToStatus(fields, from),
 			Action:     action,
 			Remark:     remark,
 			OperatorID: operatorID,
@@ -4236,10 +4238,11 @@ func (s *OrderService) UnshipByExpressNo(ctx context.Context, tenantID, operator
 				if newShipStatus == model.ShipWaitShip {
 					fields["shipped_at"] = nil
 				}
+				applyFulfillmentStatusForShip(o, newShipStatus, fields)
 				_ = s.repos.Transaction(func(tx *repo.Repos) error {
 					return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
 						FromStatus: o.Status,
-						ToStatus:   o.Status,
+						ToStatus:   transitionToStatus(fields, o.Status),
 						Action:     "unship",
 						Remark:     fmt.Sprintf("取消快递单（幂等重算）%s →%s", expressNo, shipStatusLabel(newShipStatus)),
 						OperatorID: operatorID,
@@ -4275,13 +4278,14 @@ func (s *OrderService) UnshipByExpressNo(ctx context.Context, tenantID, operator
 		if newShipStatus == model.ShipWaitShip {
 			fields["shipped_at"] = nil
 		}
+		applyFulfillmentStatusForShip(o, newShipStatus, fields)
 		remark := strings.TrimSpace(req.Remark)
 		if remark == "" {
 			remark = fmt.Sprintf("取消快递单 %s %s →%s", sh.ExpressCompany, expressNo, shipStatusLabel(newShipStatus))
 		}
 		return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
 			FromStatus: from,
-			ToStatus:   from,
+			ToStatus:   transitionToStatus(fields, from),
 			Action:     "unship",
 			Remark:     remark,
 			OperatorID: operatorID,
@@ -4330,6 +4334,41 @@ func shipStatusLabel(v string) string {
 	default:
 		return "待发货"
 	}
+}
+
+// applyFulfillmentStatusForShip 发货进度回写履约态（allocated/purchasing/partial_ship/shipped），
+// 使列表「履约状态」多选与工作台卡片下钻一致。closed/completed/pending_* 不改。
+func applyFulfillmentStatusForShip(o *model.Order, newShipStatus string, fields map[string]any) {
+	if o == nil || fields == nil {
+		return
+	}
+	switch o.Status {
+	case model.StatusAllocated, model.StatusPurchasing, model.StatusPartialShip, model.StatusShipped:
+	default:
+		return
+	}
+	switch newShipStatus {
+	case model.ShipShipped:
+		fields["status"] = model.StatusShipped
+	case model.ShipPartialShipped:
+		fields["status"] = model.StatusPartialShip
+	case model.ShipWaitShip, "":
+		if o.AllocType == model.AllocPurchaseThenShip {
+			fields["status"] = model.StatusPurchasing
+		} else {
+			fields["status"] = model.StatusAllocated
+		}
+	}
+}
+
+func transitionToStatus(fields map[string]any, fallback string) string {
+	if fields == nil {
+		return fallback
+	}
+	if v, ok := fields["status"].(string); ok && strings.TrimSpace(v) != "" {
+		return v
+	}
+	return fallback
 }
 
 // autoSyncSelfLogistics 订单发货后，把运单同步到关联自营单。
@@ -6748,9 +6787,14 @@ func normalizeNonKDZSHint(h *kdzsIngestHint) {
 		if h.ShipStatus == "" {
 			h.ShipStatus = model.ShipWaitShip
 		}
-	case model.StatusShipped, model.StatusPartialShip:
-		h.Status = model.StatusAllocated
-		h.ShipStatus = model.ShipShipped
+	case model.StatusShipped:
+		if h.ShipStatus == "" {
+			h.ShipStatus = model.ShipShipped
+		}
+	case model.StatusPartialShip:
+		if h.ShipStatus == "" {
+			h.ShipStatus = model.ShipPartialShipped
+		}
 	case model.StatusCompleted:
 		if h.ShipStatus == "" {
 			h.ShipStatus = model.ShipShipped

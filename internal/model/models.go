@@ -20,20 +20,32 @@ var KnownSourceChannels = []string{
 	SourceManual,
 }
 
-// 履约状态（分配与履约进度；发货见 ShipStatus）
+// 履约状态（分配与履约进度；与 ShipStatus 并用：ShipStatus 看发货明细，Status 看履约阶段）
 const (
-	StatusPendingPayment = "pending_payment"
-	StatusPendingAlloc   = "pending_alloc" // 待分配
-	StatusAllocated      = "allocated"
-	StatusPurchasing     = "purchasing"
-	StatusCompleted      = "completed"
-	StatusClosed         = "closed"
+	StatusPendingPayment = "pending_payment" // 待付款
+	StatusPendingAlloc   = "pending_alloc"   // 待分配
+	StatusAllocated      = "allocated"       // 已分配（待发货）
+	StatusPurchasing     = "purchasing"      // 采购中
+	StatusPartialShip    = "partial_ship"    // 部分发货（履约）
+	StatusShipped        = "shipped"         // 已发货（履约完成发货，平台交易未必完结）
+	StatusCompleted      = "completed"       // 已完成
+	StatusClosed         = "closed"          // 已关闭
 
-	// 以下为历史履约值，仅用于回填/读旧日志，不再写入
+	// 历史值：读旧日志兼容，列表会归一到 pending_alloc
 	StatusPendingShip = "pending_ship"
-	StatusShipped     = "shipped"
-	StatusPartialShip = "partial_ship"
 )
+
+// FulfillmentStatuses 工作台/列表履约状态筛选项（稳定顺序）
+var FulfillmentStatuses = []string{
+	StatusPendingPayment,
+	StatusPendingAlloc,
+	StatusAllocated,
+	StatusPurchasing,
+	StatusPartialShip,
+	StatusShipped,
+	StatusCompleted,
+	StatusClosed,
+}
 
 // 发货状态
 const (

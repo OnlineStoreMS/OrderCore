@@ -134,9 +134,15 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
 	keyword := strings.TrimSpace(c.Query("keyword"))
 	platformOrderID := strings.TrimSpace(c.Query("platformOrderId"))
+	statusVals := append([]string{}, c.QueryArray("status")...)
+	if len(statusVals) == 0 {
+		if s := strings.TrimSpace(c.Query("status")); s != "" {
+			statusVals = append(statusVals, s)
+		}
+	}
 	q := repo.OrderListQuery{
 		SourceChannel:     c.Query("sourceChannel"),
-		Status:            c.Query("status"),
+		Statuses:          statusVals,
 		ShipStatus:        c.Query("shipStatus"),
 		AllocType:         c.Query("allocType"),
 		Keyword:           keyword,
@@ -144,6 +150,7 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 		PlatformOrderID:   platformOrderID,
 		PlatformSysTid:    c.Query("platformSysTid"),
 		SalesChannel:      c.Query("salesChannel"),
+		ValidSales:        c.Query("validSales") == "1" || c.Query("validSales") == "true",
 		EcommerceWaitShip: c.Query("ecommerceWaitShip") == "1" || c.Query("ecommerceWaitShip") == "true",
 		OrderedAtStart:    parseQueryTime(c.Query("orderedAtStart")),
 		OrderedAtEnd:      parseQueryTime(c.Query("orderedAtEnd")),
