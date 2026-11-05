@@ -2535,9 +2535,10 @@ func (s *OrderService) flushDeferredDropshipSideEffects(ctx context.Context, ten
 	}
 	seenOrder := map[uint64]struct{}{}
 	seenPOPrice := map[uint64]struct{}{}
+	seenPOShip := map[uint64]struct{}{}
 	type poRef struct {
-		id       uint64
-		status   string
+		id        uint64
+		status    string
 		payStatus string
 	}
 	poCache := map[string]poRef{}
@@ -2614,8 +2615,13 @@ func (s *OrderService) flushDeferredDropshipSideEffects(ctx context.Context, ten
 				if ref.id == 0 || ref.status == "cancelled" {
 					continue
 				}
-				if err := s.supply.SyncShipmentsFromOrders(ctx, bearerToken, ref.id, o.ID); err != nil {
-					log.Printf("[ordercore] auto sync logistics PO=%s order=%s: %v", poNo, o.OrderNo, err)
+				// 整单回写：按代发单明细上的全部销售单拉物流，避免合单只同步到当前这一张 SO
+				if _, ok := seenPOShip[ref.id]; ok {
+					continue
+				}
+				seenPOShip[ref.id] = struct{}{}
+				if err := s.supply.SyncShipmentsFromOrders(ctx, bearerToken, ref.id, 0); err != nil {
+					log.Printf("[ordercore] auto sync logistics PO=%s (full): %v", poNo, err)
 					continue
 				}
 				shipOK++
@@ -7051,12 +7057,13 @@ func (s *OrderService) syncDropshipLogisticsForOrder(ctx context.Context, o *mod
 		if poID == 0 {
 			continue
 		}
-		if err := s.supply.SyncShipmentsFromOrders(ctx, bearerToken, poID, o.ID); err != nil {
+		// refSoID=0：按代发单全部销售单明细拉物流（合单发货不会漏其它 SO）
+		if err := s.supply.SyncShipmentsFromOrders(ctx, bearerToken, poID, 0); err != nil {
 			log.Printf("[ordercore] auto sync logistics PO=%s order=%s: %v", poNo, o.OrderNo, err)
 			continue
 		}
 		synced++
-		log.Printf("[ordercore] auto synced logistics PO=%s order=%s", poNo, o.OrderNo)
+		log.Printf("[ordercore] auto synced logistics PO=%s (full, trigger=%s)", poNo, o.OrderNo)
 	}
 	return synced
 }
