@@ -125,11 +125,19 @@ const selectedItemCount = computed(() => {
   return n
 })
 const canBatchAllocate = computed(() =>
-  selected.value.some((o) => o.status === 'pending_alloc' || o.status === 'pending_ship'),
+  selected.value.some((o) => listAllocatableRootItems(o.items).length > 0),
 )
 const canBatchRevoke = computed(() =>
-  selected.value.some((o) => o.status === 'allocated' || o.status === 'purchasing'),
+  selected.value.some((o) => o.status === 'allocated' || o.status === 'purchasing' || o.status === 'partial_ship'),
 )
+
+/** 未分配根行可勾选（头表即使已是部分发货/已分配，剩余商品仍可继续分配） */
+function canSelectItem(order: Order, it: { id?: number; allocType?: string }) {
+  if (!it.id || itemRefundBadge(it as any)) return false
+  if ((it.allocType || '').trim()) return false
+  if (order.status === 'closed' || order.status === 'completed') return false
+  return true
+}
 
 async function load() {
   loading.value = true
@@ -540,7 +548,7 @@ onMounted(load)
               class="goods-row"
             >
               <el-checkbox
-                v-if="(row.status === 'pending_alloc' || row.status === 'pending_ship') && it.id && !itemRefundBadge(it)"
+                v-if="canSelectItem(row, it)"
                 class="goods-check"
                 :model-value="isItemSelected(row.id, it.id)"
                 @click.stop
@@ -560,17 +568,17 @@ onMounted(load)
                 <span v-if="itemRefundBadge(it)" class="goods-refund-badge">{{ itemRefundBadge(it) }}</span>
               </div>
               <div class="goods-info">
-                <div class="goods-title">{{
-                  row.status === 'pending_alloc' || row.status === 'pending_ship'
-                    ? allocItemLabel(it)
-                    : listItemTitle(it)
-                }}</div>
+                <div class="goods-title">
+                  {{ canSelectItem(row, it) || !it.allocType ? allocItemLabel(it) : listItemTitle(it) }}
+                  <el-tag v-if="it.allocType" size="small" type="success" class="item-alloc-tag">{{ labelAlloc(it.allocType) }}</el-tag>
+                  <el-tag v-else-if="!itemRefundBadge(it)" size="small" type="info" class="item-alloc-tag">未分配</el-tag>
+                </div>
                 <template v-for="meta in [listItemMeta(it)]" :key="`${it.id || idx}-meta`">
                   <div
-                    v-if="(meta.spec && !(row.status === 'pending_alloc' || row.status === 'pending_ship')) || meta.sku"
+                    v-if="(meta.spec && !canSelectItem(row, it) && !!it.allocType) || meta.sku"
                     class="goods-meta"
                   >
-                    <span v-if="meta.spec && !(row.status === 'pending_alloc' || row.status === 'pending_ship')">{{ meta.spec }}</span>
+                    <span v-if="meta.spec && !canSelectItem(row, it) && !!it.allocType">{{ meta.spec }}</span>
                     <span v-if="meta.sku">SKU {{ meta.sku }}</span>
                   </div>
                 </template>
@@ -777,6 +785,7 @@ onMounted(load)
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
+.item-alloc-tag { margin-left: 6px; vertical-align: middle; }
 .goods-meta { font-size: 12px; color: #909399; }
 .goods-meta span + span::before { content: ' · '; }
 .addr-cell { line-height: 1.4; }

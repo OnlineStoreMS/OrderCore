@@ -87,8 +87,8 @@ func TestRollupOrderFulfillmentFieldsMixed(t *testing.T) {
 	if fields["alloc_type"] != model.AllocMixed {
 		t.Fatalf("alloc_type=%v", fields["alloc_type"])
 	}
-	if fields["status"] != model.StatusAllocated {
-		t.Fatalf("status=%v", fields["status"])
+	if fields["status"] != model.StatusPendingAlloc {
+		t.Fatalf("status=%v want pending_alloc (still has unallocated root)", fields["status"])
 	}
 }
 

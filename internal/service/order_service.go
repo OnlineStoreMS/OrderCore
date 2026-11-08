@@ -2782,32 +2782,47 @@ func (s *OrderService) bindDropshipPOToOrder(tenantID uint64, o *model.Order, po
 		return err
 	}
 	o.PurchaseOrderID = poNo
+	// 商品级隔离：只给「已代发分配」的行绑 PO。
+	// 禁止把头表代发态摊到未勾选/未分配行（否则一键代发一商品，另一商品也会变成已分配）。
+	// 兼容旧数据：整单头表代发且尚无任何行级 alloc 时，才回填全部根行。
+	legacyWholeOrder := o.AllocType == model.AllocDropship && !orderHasItemLevelAlloc(o)
 	for i := range o.Items {
 		it := &o.Items[i]
 		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
 			continue
 		}
 		at := strings.TrimSpace(it.AllocType)
-		if at != "" && at != model.AllocDropship {
+		if at == model.AllocDropship {
+			if strings.TrimSpace(it.PurchaseOrderID) != "" {
+				continue
+			}
+			if err := s.repos.UpdateOrderItemFields(tenantID, it.ID, map[string]any{
+				"purchase_order_id": poNo,
+				"updated_at":        now,
+			}); err != nil {
+				return err
+			}
+			it.PurchaseOrderID = poNo
 			continue
 		}
-		if strings.TrimSpace(it.PurchaseOrderID) != "" {
+		if at != "" || !legacyWholeOrder {
 			continue
 		}
-		fields := map[string]any{
+		if err := s.repos.UpdateOrderItemFields(tenantID, it.ID, map[string]any{
 			"purchase_order_id": poNo,
+			"alloc_type":        model.AllocDropship,
+			"dropship_mode":     o.DropshipMode,
+			"supplier_id":       o.SupplierID,
+			"supplier_name":     o.SupplierName,
 			"updated_at":        now,
-		}
-		if at == "" && o.AllocType == model.AllocDropship {
-			fields["alloc_type"] = model.AllocDropship
-			fields["dropship_mode"] = o.DropshipMode
-			fields["supplier_id"] = o.SupplierID
-			fields["supplier_name"] = o.SupplierName
-		}
-		if err := s.repos.UpdateOrderItemFields(tenantID, it.ID, fields); err != nil {
+		}); err != nil {
 			return err
 		}
 		it.PurchaseOrderID = poNo
+		it.AllocType = model.AllocDropship
+		it.DropshipMode = o.DropshipMode
+		it.SupplierID = o.SupplierID
+		it.SupplierName = o.SupplierName
 	}
 	return nil
 }

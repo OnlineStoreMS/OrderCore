@@ -168,20 +168,24 @@ func rollupOrderFulfillmentFields(o *model.Order) map[string]any {
 		shipStatus = model.ShipPartialShipped
 	}
 
-	status := model.StatusAllocated
-	if allocType == model.AllocPurchaseThenShip && len(allocTypes) == 1 {
-		status = model.StatusPurchasing
+	// 未全部行分配完：头表仍「待分配」，便于分配页继续勾选剩余商品（真·商品级隔离）
+	status := model.StatusPendingAlloc
+	if allAlloc {
+		status = model.StatusAllocated
+		if allocType == model.AllocPurchaseThenShip && len(allocTypes) == 1 {
+			status = model.StatusPurchasing
+		}
 	}
 	// 发货进度回写履约态，便于列表/工作台按履约状态筛选（与 ship_status 对齐）
 	switch shipStatus {
 	case model.ShipShipped:
-		if status == model.StatusAllocated || status == model.StatusPurchasing {
+		if allAlloc {
 			status = model.StatusShipped
-		}
-	case model.ShipPartialShipped:
-		if status == model.StatusAllocated || status == model.StatusPurchasing {
+		} else {
 			status = model.StatusPartialShip
 		}
+	case model.ShipPartialShipped:
+		status = model.StatusPartialShip
 	}
 
 	poNo := ""
