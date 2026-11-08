@@ -69,7 +69,21 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 		tx = tx.Where("source_channel = ?", q.SourceChannel)
 	}
 	statuses := normalizeStatusFilters(q.Statuses, q.Status)
-	if len(statuses) == 1 {
+	if len(statuses) == 1 && statuses[0] == model.StatusPendingAlloc {
+		// 待分配队列：头表待分配，或仍有未分配根行（部分商品已代发/已发时头表可能短暂不是 pending_alloc）
+		tx = tx.Where(`(
+			status = ? OR (
+				status NOT IN ? AND EXISTS (
+					SELECT 1 FROM order_items i
+					WHERE i.order_id = orders.id AND i.tenant_id = orders.tenant_id
+					  AND COALESCE(i.parent_order_item_id, 0) = 0
+					  AND COALESCE(i.split_kind, '') = ''
+					  AND COALESCE(i.alloc_type, '') = ''
+					  AND COALESCE(i.quantity, 0) > 0
+				)
+			)
+		)`, model.StatusPendingAlloc, []string{model.StatusClosed, model.StatusCompleted})
+	} else if len(statuses) == 1 {
 		tx = tx.Where("status = ?", statuses[0])
 	} else if len(statuses) > 1 {
 		tx = tx.Where("status IN ?", statuses)

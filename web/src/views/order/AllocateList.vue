@@ -362,7 +362,7 @@ async function runBatch(
 }
 
 async function batchSelfShip() {
-  const rows = selected.value.filter((o) => o.status === 'pending_alloc' || o.status === 'pending_ship')
+  const rows = selected.value.filter((o) => listAllocatableRootItems(o.items).length > 0)
   await runBatch(rows, '批量自营发货', async (o) => {
     await allocateOrder(o.id, {
       allocType: 'self_ship',
@@ -372,9 +372,9 @@ async function batchSelfShip() {
 }
 
 async function openBatchDropship() {
-  const rows = selected.value.filter((o) => o.status === 'pending_alloc' || o.status === 'pending_ship')
+  const rows = selected.value.filter((o) => listAllocatableRootItems(o.items).length > 0)
   if (!rows.length) {
-    ElMessage.warning('请勾选待分配订单')
+    ElMessage.warning('请勾选仍有未分配商品的订单')
     return
   }
   dropshipForm.supplierId = undefined
@@ -388,9 +388,9 @@ async function submitBatchDropship() {
     ElMessage.warning('请选择供应商')
     return
   }
-  const rows = selected.value.filter((o) => o.status === 'pending_alloc' || o.status === 'pending_ship')
+  const rows = selected.value.filter((o) => listAllocatableRootItems(o.items).length > 0)
   if (!rows.length) {
-    ElMessage.warning('请勾选待分配订单')
+    ElMessage.warning('请勾选仍有未分配商品的订单')
     return
   }
   try {

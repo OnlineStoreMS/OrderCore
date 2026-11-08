@@ -92,6 +92,22 @@ func TestRollupOrderFulfillmentFieldsMixed(t *testing.T) {
 	}
 }
 
+func TestRollupKeepsPendingAllocWhenPartialShippedButUnallocated(t *testing.T) {
+	o := &model.Order{
+		Items: []model.OrderItem{
+			{ID: 1, Quantity: 1, AllocType: model.AllocDropship, ShipStatus: model.ShipShipped, PurchaseOrderID: "PO1"},
+			{ID: 2, Quantity: 1}, // 未分配
+		},
+	}
+	fields := rollupOrderFulfillmentFields(o)
+	if fields["status"] != model.StatusPendingAlloc {
+		t.Fatalf("status=%v want pending_alloc", fields["status"])
+	}
+	if fields["ship_status"] != model.ShipPartialShipped {
+		t.Fatalf("ship_status=%v want partial_shipped", fields["ship_status"])
+	}
+}
+
 func TestRollupOrderFulfillmentFieldsMultiPO(t *testing.T) {
 	o := &model.Order{
 		Items: []model.OrderItem{

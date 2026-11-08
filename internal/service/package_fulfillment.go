@@ -223,14 +223,17 @@ func (s *OrderService) rollupPackageFulfillmentHeader(tenantID uint64, o *model.
 	if len(fields) == 0 {
 		return
 	}
-	// 已完成/关闭保留头表状态；已发货/有本地运单时不被行级 wait_ship rollup 打回
+	// 已完成/关闭保留头表状态；仅当 rollup 要把发货态打回 wait_ship 时，才保留已有发货进度
 	if o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
 		delete(fields, "status")
 	}
-	if o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
-		fields["ship_status"] = o.ShipStatus
-	} else if restored := restoreShipStatusFromLocalShipments(o); restored != "" {
-		fields["ship_status"] = restored
+	computedShip, _ := fields["ship_status"].(string)
+	if computedShip == model.ShipWaitShip || computedShip == "" {
+		if o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
+			fields["ship_status"] = o.ShipStatus
+		} else if restored := restoreShipStatusFromLocalShipments(o); restored != "" {
+			fields["ship_status"] = restored
+		}
 	}
 	if err := s.repos.UpdateOrderFields(tenantID, o.ID, fields); err != nil {
 		log.Printf("[ordercore] rollup package fulfill order=%s: %v", o.OrderNo, err)
