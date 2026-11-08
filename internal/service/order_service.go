@@ -1741,6 +1741,10 @@ func (s *OrderService) ensureDropshipPurchaseOrder(ctx context.Context, o *model
 			if it.Status == "cancelled" {
 				continue
 			}
+			// 同一销售单可有多供应商/多张代发单，只能复用同供应商的单
+			if supplierID > 0 && it.SupplierID > 0 && it.SupplierID != supplierID {
+				continue
+			}
 			if it.PayStatus == "paid" || it.PayStatus == "partial" {
 				return it.PoNo, it.ID, false, nil
 			}
@@ -1928,6 +1932,9 @@ func (s *OrderService) mapOrderToSelfLines(o *model.Order) []selfcore.SelfOrderI
 	if len(rootItems) == 0 {
 		return nil
 	}
+	if lineSum := sumItemAmounts(rootItems); lineSum > 0 && (pay <= 0 || lineSum+0.009 < pay) {
+		pay = lineSum
+	}
 	weights := make([]float64, len(rootItems))
 	var sumW float64
 	for i, it := range rootItems {
@@ -2008,6 +2015,13 @@ func (s *OrderService) mapOrderToPOLines(ctx context.Context, bearerToken string
 		if hasLineAlloc && strings.TrimSpace(it.AllocType) != model.AllocDropship {
 			continue
 		}
+		// 已发货/已绑 PO 的行不进新建代发单（避免部分商品再分配时把整单金额/其它行卷进来）
+		if it.ShipStatus == model.ShipShipped || it.ShipStatus == model.ShipPartialShipped {
+			continue
+		}
+		if strings.TrimSpace(it.PurchaseOrderID) != "" {
+			continue
+		}
 		items = append(items, it)
 	}
 	if len(items) == 0 {
@@ -2016,6 +2030,11 @@ func (s *OrderService) mapOrderToPOLines(ctx context.Context, bearerToken string
 	pay := o.PayAmount
 	if pay <= 0 {
 		pay = o.TotalAmount
+	}
+	lineSum := sumItemAmounts(items)
+	// 商品级部分建单：明细合计小于整单实付时，按明细金额，不用整单实付摊到单行
+	if lineSum > 0 && (pay <= 0 || lineSum+0.009 < pay) {
+		pay = lineSum
 	}
 	weights := make([]float64, len(items))
 	var sumW float64
@@ -2212,7 +2231,7 @@ func (s *OrderService) BatchAllocateDropship(ctx context.Context, tenantID, oper
 		if err != nil {
 			return nil, fmt.Errorf("订单 %d 不存在", id)
 		}
-		if o.Status != model.StatusPendingAlloc && o.Status != model.StatusPendingShip {
+		if o.Status == model.StatusClosed || o.Status == model.StatusCompleted {
 			return nil, fmt.Errorf("%s 当前状态不可代发分配", o.OrderNo)
 		}
 		if len(o.Items) == 0 || !orderHasFulfillableItems(o) {
@@ -2794,6 +2813,13 @@ func (s *OrderService) bindDropshipPOToOrder(tenantID uint64, o *model.Order, po
 		at := strings.TrimSpace(it.AllocType)
 		if at == model.AllocDropship {
 			if strings.TrimSpace(it.PurchaseOrderID) != "" {
+				continue
+			}
+			// 已发货行不绑新 PO；供应商不一致也不绑（多供应商分商品代发）
+			if it.ShipStatus == model.ShipShipped || it.ShipStatus == model.ShipPartialShipped {
+				continue
+			}
+			if o.SupplierID > 0 && it.SupplierID > 0 && it.SupplierID != o.SupplierID {
 				continue
 			}
 			if err := s.repos.UpdateOrderItemFields(tenantID, it.ID, map[string]any{

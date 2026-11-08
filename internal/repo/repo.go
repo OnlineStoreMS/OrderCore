@@ -69,7 +69,25 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 		tx = tx.Where("source_channel = ?", q.SourceChannel)
 	}
 	statuses := normalizeStatusFilters(q.Statuses, q.Status)
-	if len(statuses) == 1 && statuses[0] == model.StatusPendingAlloc {
+	// 已分配 + 待发货：头表匹配，或存在「已分配且待发货」的商品行（部分发货场景）
+	allocatedWaitShip := len(statuses) == 1 && statuses[0] == model.StatusAllocated &&
+		q.ShipStatus == model.ShipWaitShip
+	if allocatedWaitShip {
+		tx = tx.Where(`status NOT IN ? AND (
+			(status = ? AND ship_status = ?)
+			OR EXISTS (
+				SELECT 1 FROM order_items i
+				WHERE i.order_id = orders.id AND i.tenant_id = orders.tenant_id
+				  AND COALESCE(i.parent_order_item_id, 0) = 0
+				  AND COALESCE(i.split_kind, '') = ''
+				  AND COALESCE(i.alloc_type, '') <> ''
+				  AND COALESCE(NULLIF(i.ship_status, ''), ?) = ?
+			)
+		)`, []string{model.StatusClosed, model.StatusCompleted},
+			model.StatusAllocated, model.ShipWaitShip, model.ShipWaitShip, model.ShipWaitShip)
+		statuses = nil
+		q.ShipStatus = ""
+	} else if len(statuses) == 1 && statuses[0] == model.StatusPendingAlloc {
 		// 待分配队列：头表待分配，或仍有未分配根行（部分商品已代发/已发时头表可能短暂不是 pending_alloc）
 		tx = tx.Where(`(
 			status = ? OR (

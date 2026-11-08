@@ -288,10 +288,14 @@ function toggleItemSelect(order: Order, itemId: number | undefined, checked: boo
 }
 
 function itemIdsForOrder(o: Order): number[] | undefined {
-  const ids = selectedItemIds.value[o.id]
-  if (!ids?.length) return undefined
-  const all = listAllocatableRootItems(o.items).map((it) => it.id!).filter(Boolean)
-  if (ids.length >= all.length) return undefined
+  const allocatable = listAllocatableRootItems(o.items).map((it) => it.id!).filter(Boolean)
+  const picked = selectedItemIds.value[o.id]
+  const ids = picked?.length ? picked.filter((id) => allocatable.includes(id)) : allocatable
+  if (!ids.length) return undefined
+  // 已有部分商品分配过时，必须显式传未分配行 id，避免后端按「整单」撞上已分配行
+  const hasAllocatedSibling = listOrderRootItems(o.items).some((it) => !!(it.allocType || '').trim())
+  if (hasAllocatedSibling) return ids
+  if (ids.length >= allocatable.length) return undefined
   return ids
 }
 

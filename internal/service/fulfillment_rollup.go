@@ -8,7 +8,8 @@ import (
 	"ordercore/internal/model"
 )
 
-// selectAllocateItemIDs 解析勾选行：空=全部可履约根行；否则仅勾选根行。
+// selectAllocateItemIDs 解析勾选行：空=尚未分配的可履约根行；否则仅勾选根行。
+// 注意：空选不能再包含已分配行，否则「只分配剩余商品」会被当成整单再分配而报错。
 func selectAllocateItemIDs(o *model.Order, itemIDs []uint64) ([]uint64, error) {
 	roots := fulfillableRootItems(o)
 	if len(roots) == 0 {
@@ -18,6 +19,12 @@ func selectAllocateItemIDs(o *model.Order, itemIDs []uint64) ([]uint64, error) {
 	if len(want) == 0 {
 		out := make([]uint64, 0, len(roots))
 		for _, it := range roots {
+			if strings.TrimSpace(it.AllocType) != "" {
+				continue
+			}
+			if it.ShipStatus == model.ShipShipped || it.ShipStatus == model.ShipPartialShipped {
+				continue
+			}
 			out = append(out, it.ID)
 		}
 		return out, nil

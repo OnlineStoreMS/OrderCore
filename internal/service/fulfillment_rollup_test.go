@@ -25,6 +25,16 @@ func TestSelectAllocateItemIDs(t *testing.T) {
 	if _, err := selectAllocateItemIDs(o, []uint64{99}); err == nil {
 		t.Fatal("expected error for missing ids")
 	}
+	partial := &model.Order{
+		Items: []model.OrderItem{
+			{ID: 1, ProductName: "A", Quantity: 1, AllocType: model.AllocDropship, ShipStatus: model.ShipShipped},
+			{ID: 2, ProductName: "B", Quantity: 1},
+		},
+	}
+	rest, err := selectAllocateItemIDs(partial, nil)
+	if err != nil || len(rest) != 1 || rest[0] != 2 {
+		t.Fatalf("empty select should skip allocated, got %v err=%v", rest, err)
+	}
 }
 
 func TestResolveAllocateTargetNoSplit(t *testing.T) {
