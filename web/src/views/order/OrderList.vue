@@ -133,8 +133,8 @@ function applyFiltersFromRoute() {
   filters.page = 1
   filters.sourceChannel = typeof q.sourceChannel === 'string' ? q.sourceChannel : ''
   filters.status = parseStatusQuery(q.status)
-  // 仅左侧菜单进入时默认「待发货 + 最近7天」；其它跳转只吃 query，不擅自加默认
-  filters.shipStatus = menu ? (shipInit || 'wait_ship') : shipInit
+  // 发货状态只跟 query（工作台「待发货」卡等）；菜单进入不默认待发货
+  filters.shipStatus = shipInit
   filters.platform = typeof q.platform === 'string' ? q.platform : ''
   filters.salesChannel = typeof q.salesChannel === 'string' ? q.salesChannel : ''
   filters.validSales = q.validSales === '1' || q.validSales === 'true'

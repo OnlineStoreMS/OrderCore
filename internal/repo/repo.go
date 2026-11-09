@@ -758,6 +758,15 @@ func (r *Repos) FindPackageByMailNo(tenantID, orderID uint64, mailNo string) (*m
 	return &pkg, nil
 }
 
+func (r *Repos) UpdateOrderPackageFields(tenantID, packageID uint64, fields map[string]any) error {
+	if packageID == 0 || len(fields) == 0 {
+		return nil
+	}
+	return r.db.Model(&model.OrderPackage{}).
+		Where("tenant_id = ? AND id = ?", tenantID, packageID).
+		Updates(fields).Error
+}
+
 func (r *Repos) ListPackagesByOrderID(tenantID, orderID uint64) ([]model.OrderPackage, error) {
 	var list []model.OrderPackage
 	err := r.db.Where("tenant_id = ? AND order_id = ?", tenantID, orderID).

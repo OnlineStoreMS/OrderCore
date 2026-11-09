@@ -7381,44 +7381,64 @@ func ingestHasLogistics(req dto.IngestOrderRequest) bool {
 	return false
 }
 
-// repairShipmentItemLinks 补齐「有运单无商品明细」：按包裹运单号 / 已发货未挂单行反推关联。
+// repairShipmentItemLinks 补齐/纠偏发货明细：
+// - 无明细：按包裹运单号或唯一可履约已发货行反推
+// - 明细全是退款/取消行：拆掉后按同样规则重绑（多包裹共享 logistics 时常见错挂）
 func (s *OrderService) repairShipmentItemLinks(tenantID uint64, o *model.Order) *model.Order {
 	if o == nil || len(o.Shipments) == 0 {
 		return o
 	}
+	itemByID := map[uint64]model.OrderItem{}
+	for _, it := range o.Items {
+		itemByID[it.ID] = it
+	}
 	covered := map[uint64]struct{}{}
 	for _, sh := range o.Shipments {
-		for _, it := range sh.Items {
-			if it.OrderItemID > 0 {
-				covered[it.OrderItemID] = struct{}{}
+		for _, sit := range sh.Items {
+			if sit.OrderItemID == 0 {
+				continue
 			}
+			if it, ok := itemByID[sit.OrderItemID]; ok && orderItemExcludedFromFulfillment(it) {
+				continue
+			}
+			covered[sit.OrderItemID] = struct{}{}
 		}
 	}
 	changed := false
 	for i := range o.Shipments {
 		sh := &o.Shipments[i]
-		if len(sh.Items) > 0 || sh.ID == 0 {
+		if sh.ID == 0 {
 			continue
 		}
-		lines := make([]resolvedShipLine, 0)
-		if pkg, err := s.repos.FindPackageByMailNo(tenantID, o.ID, sh.ExpressNo); err == nil && pkg != nil {
-			for _, it := range o.Items {
-				if it.PackageID != pkg.ID || it.ParentOrderItemID > 0 || strings.TrimSpace(it.SplitKind) != "" {
-					continue
+		needRelink := len(sh.Items) == 0
+		if !needRelink {
+			allExcluded := true
+			for _, sit := range sh.Items {
+				it, ok := itemByID[sit.OrderItemID]
+				if !ok || !orderItemExcludedFromFulfillment(it) {
+					allExcluded = false
+					break
 				}
-				if _, ok := covered[it.ID]; ok {
-					continue
-				}
-				qty := it.Quantity
-				if qty <= 0 {
-					qty = 1
-				}
-				lines = append(lines, resolvedShipLine{
-					OrderItemID: it.ID, Qty: qty, SkuCode: it.SkuCode, ProductName: it.ProductName, SkuSpecs: it.SkuSpecs,
-				})
 			}
+			needRelink = allExcluded && len(sh.Items) > 0
 		}
-		// 无包裹运单号时不强行猜测（多商品分开发货易错绑）；留给有 mail_no / 本轮 ingest 商品匹配的路径
+		if !needRelink {
+			continue
+		}
+		if len(sh.Items) > 0 {
+			if err := s.repos.DeleteShipmentItemsByShipmentID(tenantID, sh.ID); err != nil {
+				log.Printf("[ordercore] repair clear bad shipment items order=%s sh=%s: %v", o.OrderNo, sh.ExpressNo, err)
+				continue
+			}
+			sh.Items = nil
+		}
+		lines := resolveShipmentLinesByExpress(o, sh.ExpressNo, covered, func(mailNo string) *model.OrderPackage {
+			pkg, err := s.repos.FindPackageByMailNo(tenantID, o.ID, mailNo)
+			if err != nil || pkg == nil {
+				return nil
+			}
+			return pkg
+		})
 		if len(lines) == 0 {
 			continue
 		}
@@ -7434,6 +7454,20 @@ func (s *OrderService) repairShipmentItemLinks(tenantID uint64, o *model.Order) 
 		if err := s.repos.CreateShipmentItems(items); err != nil {
 			log.Printf("[ordercore] repair shipment items order=%s sh=%s: %v", o.OrderNo, sh.ExpressNo, err)
 			continue
+		}
+		// 运单曾挂在退款包裹上时，把 mail_no 挪到实际发货商品所在包裹
+		if pkg, err := s.repos.FindPackageByMailNo(tenantID, o.ID, sh.ExpressNo); err == nil && pkg != nil {
+			targetPkgID := uint64(0)
+			for _, line := range lines {
+				if it, ok := itemByID[line.OrderItemID]; ok && it.PackageID > 0 {
+					targetPkgID = it.PackageID
+					break
+				}
+			}
+			if targetPkgID > 0 && targetPkgID != pkg.ID {
+				_ = s.repos.UpdateOrderPackageFields(tenantID, pkg.ID, map[string]any{"mail_no": "", "updated_at": time.Now()})
+				_ = s.repos.UpdateOrderPackageFields(tenantID, targetPkgID, map[string]any{"mail_no": sh.ExpressNo, "updated_at": time.Now()})
+			}
 		}
 		changed = true
 	}
@@ -7656,28 +7690,24 @@ func resolveIngestShipmentLines(tx *repo.Repos, tenantID uint64, order *model.Or
 		}
 		byID[it.ID] = it
 	}
-	ids := matchIngestItemsToOrder(order.Items, req.Items)
-	// 本轮无商品明细时：按包裹 sysTid / 运单号反查挂包商品
+	ids := filterFulfillableItemIDs(order, matchIngestItemsToOrder(order.Items, req.Items))
+	// 本轮无商品明细时：按包裹 sysTid / 运单号反查挂包商品（跳过退款/取消行）
 	if len(ids) == 0 {
 		sysTid := strings.TrimSpace(req.PlatformSysTid)
 		if sysTid != "" {
 			if pkg, err := tx.FindPackageBySysTid(tenantID, sysTid); err == nil && pkg != nil && pkg.OrderID == order.ID {
-				for _, it := range order.Items {
-					if it.PackageID == pkg.ID && it.ParentOrderItemID == 0 && strings.TrimSpace(it.SplitKind) == "" {
-						ids = append(ids, it.ID)
-					}
-				}
+				ids = filterFulfillableItemIDs(order, packageRootItemIDs(order, pkg.ID))
 			}
 		}
 	}
 	if len(ids) == 0 && strings.TrimSpace(expressNo) != "" {
 		if pkg, err := tx.FindPackageByMailNo(tenantID, order.ID, expressNo); err == nil && pkg != nil {
-			for _, it := range order.Items {
-				if it.PackageID == pkg.ID && it.ParentOrderItemID == 0 && strings.TrimSpace(it.SplitKind) == "" {
-					ids = append(ids, it.ID)
-				}
-			}
+			ids = filterFulfillableItemIDs(order, packageRootItemIDs(order, pkg.ID))
 		}
+	}
+	// 运单挂在退款包裹上、本轮商品又是取消行时：回落到唯一「可履约且已发货/已分配」未挂单行
+	if len(ids) == 0 && strings.TrimSpace(expressNo) != "" {
+		ids = soleUncoveredShippedItemIDs(order, nil)
 	}
 	out := make([]resolvedShipLine, 0, len(ids))
 	seen := map[uint64]struct{}{}
@@ -7687,7 +7717,7 @@ func resolveIngestShipmentLines(tx *repo.Repos, tenantID uint64, order *model.Or
 		}
 		seen[id] = struct{}{}
 		it, ok := byID[id]
-		if !ok {
+		if !ok || orderItemExcludedFromFulfillment(it) {
 			continue
 		}
 		qty := it.Quantity
@@ -7700,6 +7730,114 @@ func resolveIngestShipmentLines(tx *repo.Repos, tenantID uint64, order *model.Or
 			SkuCode:     it.SkuCode,
 			ProductName: it.ProductName,
 			SkuSpecs:    it.SkuSpecs,
+		})
+	}
+	return out
+}
+
+func packageRootItemIDs(order *model.Order, packageID uint64) []uint64 {
+	if order == nil || packageID == 0 {
+		return nil
+	}
+	out := make([]uint64, 0)
+	for _, it := range order.Items {
+		if it.PackageID != packageID || it.ParentOrderItemID > 0 || strings.TrimSpace(it.SplitKind) != "" {
+			continue
+		}
+		out = append(out, it.ID)
+	}
+	return out
+}
+
+func filterFulfillableItemIDs(order *model.Order, ids []uint64) []uint64 {
+	if order == nil || len(ids) == 0 {
+		return nil
+	}
+	byID := map[uint64]model.OrderItem{}
+	for _, it := range order.Items {
+		byID[it.ID] = it
+	}
+	out := make([]uint64, 0, len(ids))
+	for _, id := range ids {
+		it, ok := byID[id]
+		if !ok || orderItemExcludedFromFulfillment(it) {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+func soleUncoveredShippedItemIDs(order *model.Order, covered map[uint64]struct{}) []uint64 {
+	if order == nil {
+		return nil
+	}
+	shipped := make([]uint64, 0)
+	allocated := make([]uint64, 0)
+	for _, it := range order.Items {
+		if it.ParentOrderItemID > 0 || strings.TrimSpace(it.SplitKind) != "" {
+			continue
+		}
+		if orderItemExcludedFromFulfillment(it) {
+			continue
+		}
+		if _, ok := covered[it.ID]; ok {
+			continue
+		}
+		ss := strings.TrimSpace(it.ShipStatus)
+		alloc := strings.TrimSpace(it.AllocType)
+		if ss == model.ShipShipped || ss == model.ShipPartialShipped {
+			shipped = append(shipped, it.ID)
+			continue
+		}
+		if alloc != "" {
+			allocated = append(allocated, it.ID)
+		}
+	}
+	if len(shipped) == 1 {
+		return shipped
+	}
+	if len(shipped) == 0 && len(allocated) == 1 {
+		return allocated
+	}
+	return nil
+}
+
+func resolveShipmentLinesByExpress(order *model.Order, expressNo string, covered map[uint64]struct{}, findPkg func(string) *model.OrderPackage) []resolvedShipLine {
+	if order == nil {
+		return nil
+	}
+	expressNo = strings.TrimSpace(expressNo)
+	ids := []uint64{}
+	if expressNo != "" && findPkg != nil {
+		if pkg := findPkg(expressNo); pkg != nil {
+			ids = filterFulfillableItemIDs(order, packageRootItemIDs(order, pkg.ID))
+		}
+	}
+	if len(ids) == 0 {
+		ids = soleUncoveredShippedItemIDs(order, covered)
+	}
+	out := make([]resolvedShipLine, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := covered[id]; ok {
+			continue
+		}
+		var it *model.OrderItem
+		for i := range order.Items {
+			if order.Items[i].ID == id {
+				it = &order.Items[i]
+				break
+			}
+		}
+		if it == nil || orderItemExcludedFromFulfillment(*it) {
+			continue
+		}
+		qty := it.Quantity
+		if qty <= 0 {
+			qty = 1
+		}
+		out = append(out, resolvedShipLine{
+			OrderItemID: it.ID, Qty: qty, SkuCode: it.SkuCode, ProductName: it.ProductName, SkuSpecs: it.SkuSpecs,
 		})
 	}
 	return out
