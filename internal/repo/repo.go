@@ -12,6 +12,28 @@ import (
 	"gorm.io/gorm"
 )
 
+// sqlOrderItemExcludedFromFulfillment 与 service.orderItemExcludedFromFulfillment 对齐（用于列表 EXISTS）。
+const sqlOrderItemExcludedFromFulfillment = `
+	COALESCE(i.quantity, 0) <= 0
+	OR UPPER(COALESCE(i.after_sale_status, '')) IN (
+		'REFUND_SUCCESS','REFUNDED','SUCCESS_REFUND','REFUND_MONEY_FINISH','REFUND_MONEY_SUCCESS'
+	)
+	OR (
+		UPPER(COALESCE(i.after_sale_status, '')) LIKE '%REFUND%'
+		AND (
+			UPPER(COALESCE(i.after_sale_status, '')) LIKE '%SUCCESS%'
+			OR UPPER(COALESCE(i.after_sale_status, '')) LIKE '%FINISH%'
+			OR UPPER(COALESCE(i.after_sale_status, '')) LIKE '%DONE%'
+		)
+	)
+	OR UPPER(COALESCE(i.line_order_status, '')) IN (
+		'TRADE_CLOSED','ORDER_CANCEL','ORDER_CANCELLED','CANCEL','CANCELLED','CLOSED',
+		'TRADE_CLOSED_BY_TAOBAO','TRADE_CLOSED_BY_USER','REFUND_SUCCESS','REFUNDED'
+	)
+	OR UPPER(COALESCE(i.line_order_status, '')) LIKE '%CANCEL%'
+	OR UPPER(COALESCE(i.line_order_status, '')) LIKE '%\_CLOSED' ESCAPE '\'
+`
+
 type Repos struct {
 	db *gorm.DB
 }
@@ -116,7 +138,8 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 		tx = tx.Where(`status IN ?`, allocatedOpen)
 		statuses = nil
 	} else if len(statuses) == 1 && statuses[0] == model.StatusPendingAlloc {
-		// 待分配队列：头表待分配，或仍有未分配根行（部分商品已代发/已发时头表可能短暂不是 pending_alloc）
+		// 待分配队列：头表待分配，或仍有「可履约」未分配根行。
+		// 退款完成/取消行不算待分配，否则一退一发完的单会一直挂在待分配。
 		tx = tx.Where(`(
 			status = ? OR (
 				status NOT IN ? AND EXISTS (
@@ -126,9 +149,10 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 					  AND COALESCE(i.split_kind, '') = ''
 					  AND COALESCE(i.alloc_type, '') = ''
 					  AND COALESCE(i.quantity, 0) > 0
+					  AND NOT (`+sqlOrderItemExcludedFromFulfillment+`)
 				)
 			)
-		)`, model.StatusPendingAlloc, []string{model.StatusClosed, model.StatusCompleted})
+		)`, model.StatusPendingAlloc, []string{model.StatusClosed, model.StatusCompleted, model.StatusShipped})
 	} else if len(statuses) == 1 {
 		tx = tx.Where("status = ?", statuses[0])
 	} else if len(statuses) > 1 {
