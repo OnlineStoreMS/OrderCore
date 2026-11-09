@@ -87,4 +87,21 @@ func TestComputeShipStatus_MultiItemUnship(t *testing.T) {
 			t.Fatalf("got %s want %s", got, model.ShipWaitShip)
 		}
 	})
+
+	t.Run("one refunded one shipped -> shipped not partial", func(t *testing.T) {
+		o := &model.Order{
+			ShipStatus: model.ShipPartialShipped,
+			Items: []model.OrderItem{
+				{ID: 1, Quantity: 1, AfterSaleStatus: "REFUND_MONEY_FINISH", LineOrderStatus: "ORDER_CANCELLED"},
+				{ID: 2, Quantity: 1},
+			},
+			Shipments: []model.OrderShipment{
+				{ID: 10, Items: []model.OrderShipmentItem{{OrderItemID: 2, Qty: 1}}},
+			},
+		}
+		got := computeShipStatusAfter(o, nil)
+		if got != model.ShipShipped {
+			t.Fatalf("got %s want %s", got, model.ShipShipped)
+		}
+	})
 }

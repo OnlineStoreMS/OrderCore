@@ -4756,6 +4756,10 @@ func parentHasPartialSplitChildren(o *model.Order, parentID uint64) bool {
 
 // isShippableOrderItem 有拆分子行时原行不可发；整单拆分时仅子行可发。
 func isShippableOrderItem(o *model.Order, it model.OrderItem) bool {
+	// 退款完成/取消行不参与发货数量汇总：两件里退一件时，只看剩余件是否发完
+	if orderItemExcludedFromFulfillment(it) {
+		return false
+	}
 	if isSplitChildItem(it) {
 		return true
 	}
