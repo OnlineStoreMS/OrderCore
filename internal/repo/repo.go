@@ -69,13 +69,18 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 		tx = tx.Where("source_channel = ?", q.SourceChannel)
 	}
 	statuses := normalizeStatusFilters(q.Statuses, q.Status)
-	// 已分配 + 待发货：头表匹配，或存在「已分配且待发货」的商品行（部分发货场景）
-	allocatedWaitShip := len(statuses) == 1 && statuses[0] == model.StatusAllocated &&
-		q.ShipStatus == model.ShipWaitShip
-	if allocatedWaitShip {
-		tx = tx.Where(`status NOT IN ? AND (
-			(status = ? AND ship_status = ?)
-			OR EXISTS (
+	shipStatus := strings.TrimSpace(q.ShipStatus)
+	// 分配页「已分配」工作队列口径（与发货状态下拉对齐，保证 待发货 ⊆ 去除发货筛选）：
+	// - 已分配：头表 allocated / partial_ship（进行中，不含整单 shipped/closed/completed）
+	// - 已分配+待发货：头表 wait_ship，或存在已分配且仍待发的根行；不含头表已 shipped / 纯部分发货
+	// - 已分配+部分发货：头表或行级 partial_shipped
+	// - 已分配+已发货：头表 ship_status=shipped（含履约已走到 shipped 的单）
+	allocatedTab := len(statuses) == 1 && statuses[0] == model.StatusAllocated
+	allocatedOpen := []string{model.StatusAllocated, model.StatusPartialShip}
+	if allocatedTab && shipStatus == model.ShipWaitShip {
+		// 严格「待发货」：头表 wait_ship，或仍有待发根行；头表已 shipped 一律排除（避免脏行抬高统计）
+		tx = tx.Where(`status IN ? AND ship_status <> ? AND (
+			COALESCE(NULLIF(ship_status, ''), ?) = ? OR EXISTS (
 				SELECT 1 FROM order_items i
 				WHERE i.order_id = orders.id AND i.tenant_id = orders.tenant_id
 				  AND COALESCE(i.parent_order_item_id, 0) = 0
@@ -83,10 +88,33 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 				  AND COALESCE(i.alloc_type, '') <> ''
 				  AND COALESCE(NULLIF(i.ship_status, ''), ?) = ?
 			)
-		)`, []string{model.StatusClosed, model.StatusCompleted},
-			model.StatusAllocated, model.ShipWaitShip, model.ShipWaitShip, model.ShipWaitShip)
+		)`, allocatedOpen, model.ShipShipped,
+			model.ShipWaitShip, model.ShipWaitShip,
+			model.ShipWaitShip, model.ShipWaitShip)
 		statuses = nil
 		q.ShipStatus = ""
+	} else if allocatedTab && shipStatus == model.ShipPartialShipped {
+		tx = tx.Where(`status IN ? AND (
+			ship_status = ? OR EXISTS (
+				SELECT 1 FROM order_items i
+				WHERE i.order_id = orders.id AND i.tenant_id = orders.tenant_id
+				  AND COALESCE(i.parent_order_item_id, 0) = 0
+				  AND COALESCE(i.split_kind, '') = ''
+				  AND COALESCE(i.alloc_type, '') <> ''
+				  AND i.ship_status = ?
+			)
+		)`, allocatedOpen, model.ShipPartialShipped, model.ShipPartialShipped)
+		statuses = nil
+		q.ShipStatus = ""
+	} else if allocatedTab && shipStatus == model.ShipShipped {
+		tx = tx.Where(`status IN ? AND ship_status = ?`,
+			[]string{model.StatusAllocated, model.StatusPartialShip, model.StatusShipped},
+			model.ShipShipped)
+		statuses = nil
+		q.ShipStatus = ""
+	} else if allocatedTab && shipStatus == "" {
+		tx = tx.Where(`status IN ?`, allocatedOpen)
+		statuses = nil
 	} else if len(statuses) == 1 && statuses[0] == model.StatusPendingAlloc {
 		// 待分配队列：头表待分配，或仍有未分配根行（部分商品已代发/已发时头表可能短暂不是 pending_alloc）
 		tx = tx.Where(`(
@@ -710,6 +738,20 @@ func (r *Repos) FindPackageBySysTid(tenantID uint64, sysTid string) (*model.Orde
 	}
 	var pkg model.OrderPackage
 	err := r.db.Where("tenant_id = ? AND platform_sys_tid = ?", tenantID, sysTid).First(&pkg).Error
+	if err != nil {
+		return nil, err
+	}
+	return &pkg, nil
+}
+
+func (r *Repos) FindPackageByMailNo(tenantID, orderID uint64, mailNo string) (*model.OrderPackage, error) {
+	mailNo = strings.TrimSpace(mailNo)
+	if mailNo == "" || orderID == 0 {
+		return nil, gorm.ErrRecordNotFound
+	}
+	var pkg model.OrderPackage
+	err := r.db.Where("tenant_id = ? AND order_id = ? AND mail_no = ?", tenantID, orderID, mailNo).
+		First(&pkg).Error
 	if err != nil {
 		return nil, err
 	}

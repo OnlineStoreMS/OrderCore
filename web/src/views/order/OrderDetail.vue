@@ -9,6 +9,7 @@ import {
   decryptOrders,
   decryptRealPhone,
   formatAddress,
+  formatSuppliers,
   revokeAllocateOrder,
   formatDateTime,
   getOrder,
@@ -577,7 +578,7 @@ onMounted(load)
         </el-descriptions-item>
         <el-descriptions-item label="分配类型">{{ labelAlloc(order.allocType) }}</el-descriptions-item>
         <el-descriptions-item label="代发方式">{{ labelDropship(order.dropshipMode) }}</el-descriptions-item>
-        <el-descriptions-item label="供应商">{{ order.supplierName || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="供应商">{{ formatSuppliers(order) }}</el-descriptions-item>
         <el-descriptions-item label="厂家">{{ order.factoryName || order.factoryId || '-' }}</el-descriptions-item>
         <el-descriptions-item label="实付">{{ order.payAmount ?? '-' }}</el-descriptions-item>
         <el-descriptions-item label="邮费">{{ order.freightAmount ?? 0 }}</el-descriptions-item>

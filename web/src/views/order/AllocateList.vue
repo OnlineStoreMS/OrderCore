@@ -17,6 +17,7 @@ import {
   labelEcommerceStatus,
   labelKDZSStatus,
   formatPlatformShop,
+  formatSuppliers,
   labelShipStatus,
   labelStatus,
   listBindings,
@@ -459,10 +460,11 @@ onMounted(load)
           v-model="filters.shipStatus"
           clearable
           placeholder="发货状态"
-          style="width: 120px"
+          style="width: 130px"
           @change="onFilterChange"
         >
           <el-option label="待发货" value="wait_ship" />
+          <el-option label="部分发货" value="partial_shipped" />
           <el-option label="已发货" value="shipped" />
         </el-select>
         <el-select
@@ -529,8 +531,8 @@ onMounted(load)
       @selection-change="onSelectionChange"
     >
       <el-table-column type="selection" width="48" fixed="left" />
-      <el-table-column label="供应商" min-width="120" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.supplierName || '-' }}</template>
+      <el-table-column label="供应商" min-width="140" show-overflow-tooltip>
+        <template #default="{ row }">{{ formatSuppliers(row) }}</template>
       </el-table-column>
       <el-table-column label="平台" min-width="140" show-overflow-tooltip>
         <template #default="{ row }">{{ formatPlatformShop(row) }}</template>

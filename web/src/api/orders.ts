@@ -270,6 +270,23 @@ export function formatPlatformShop(row: Pick<Order, 'platform' | 'shopName'>) {
   if (shop) return shop
   return '-'
 }
+
+/** 供应商展示：多商品多供应商时「追风厂家、大石BigRock」 */
+export function formatSuppliers(row: Pick<Order, 'supplierName' | 'items'>) {
+  const names: string[] = []
+  const seen = new Set<string>()
+  const add = (raw?: string) => {
+    const s = (raw || '').trim()
+    if (!s || seen.has(s)) return
+    seen.add(s)
+    names.push(s)
+  }
+  for (const it of row.items || []) {
+    add(it.supplierName)
+  }
+  if (!names.length) add(row.supplierName)
+  return names.length ? names.join('、') : '-'
+}
 export function labelStatus(v?: string) {
   return (v && statusLabels[v]) || v || '-'
 }

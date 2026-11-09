@@ -238,6 +238,30 @@ func (s *OrderService) rollupPackageFulfillmentHeader(tenantID uint64, o *model.
 	if err := s.repos.UpdateOrderFields(tenantID, o.ID, fields); err != nil {
 		log.Printf("[ordercore] rollup package fulfill order=%s: %v", o.OrderNo, err)
 	}
+	// 头表已全部发货时，把仍标 wait_ship 的已分配行对齐为 shipped，避免「已分配待发货」统计掺进已发完单
+	finalShip, _ := fields["ship_status"].(string)
+	if finalShip == "" {
+		finalShip = o.ShipStatus
+	}
+	if finalShip == model.ShipShipped {
+		now := time.Now()
+		for _, it := range o.Items {
+			if it.ParentOrderItemID > 0 || strings.TrimSpace(it.SplitKind) != "" {
+				continue
+			}
+			if strings.TrimSpace(it.AllocType) == "" {
+				continue
+			}
+			ss := strings.TrimSpace(it.ShipStatus)
+			if ss == model.ShipShipped {
+				continue
+			}
+			_ = s.repos.UpdateOrderItemFields(tenantID, it.ID, map[string]any{
+				"ship_status": model.ShipShipped,
+				"updated_at":  now,
+			})
+		}
+	}
 }
 
 func itemCoveredByExpressShipment(o *model.Order, itemID uint64) bool {

@@ -1343,6 +1343,8 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		o = s.forceMergeKDZSSiblingsIntoKeeper(tenantID, o)
 		// 按本轮系统编号写行级履约（挂包 + alloc），再汇总头表
 		o = s.applyPackageItemFulfillmentFromIngest(tenantID, o, req, hint)
+		// 历史运单可能只有单号无商品行：按包裹补关联
+		o = s.repairShipmentItemLinks(tenantID, o)
 		// 行级履约写完后再建代发单（此前可能头表尚未带上 supplier_id）
 		if o != nil && o.Status != model.StatusClosed && o.Status != model.StatusCompleted {
 			if deferredDropshipFromCtx(ctx) == nil {
@@ -1486,6 +1488,7 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 	s.upsertOrderPackageFromIngest(tenantID, out, req, true)
 	out = s.forceMergeKDZSSiblingsIntoKeeper(tenantID, out)
 	out = s.applyPackageItemFulfillmentFromIngest(tenantID, out, req, hint)
+	out = s.repairShipmentItemLinks(tenantID, out)
 	if deferredDropshipFromCtx(ctx) == nil {
 		out = s.alignDropshipPORef(ctx, tenantID, out, bearerToken)
 	}
@@ -6175,6 +6178,17 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 			ShippedAt: firstNonEmpty(t.ShippedAt, lg.ShipTime),
 		})
 	}
+	expressNo := strings.TrimSpace(t.ExpressNo)
+	expressCompany := t.ExpressCompany
+	expressCode := t.ExpressCode
+	// 多运单时对齐 consignTime，避免把同主单其它包裹的旧单号当成「本包主单号」
+	if len(logistics) > 0 {
+		if primary := pickIngestPrimaryLogistics(logistics, t.ShippedAt); primary.ExpressNo != "" {
+			expressNo = primary.ExpressNo
+			expressCompany = firstNonEmpty(primary.ExpressCompany, expressCompany)
+			expressCode = firstNonEmpty(primary.ExpressCode, expressCode)
+		}
+	}
 	return dto.IngestOrderRequest{
 		SourceChannel:       model.SourceKDZS,
 		Platform:            t.Platform,
@@ -6206,9 +6220,9 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 		PrinterRemark:       t.PrinterMemo,
 		FactoryID:           t.FactoryID,
 		FactoryName:         t.FactoryName,
-		ExpressCompany:      t.ExpressCompany,
-		ExpressCode:         t.ExpressCode,
-		ExpressNo:           t.ExpressNo,
+		ExpressCompany:      expressCompany,
+		ExpressCode:         expressCode,
+		ExpressNo:           expressNo,
 		ShippedAt:           t.ShippedAt,
 		Logistics:           logistics,
 		RawPayload:          string(raw),
@@ -7367,6 +7381,72 @@ func ingestHasLogistics(req dto.IngestOrderRequest) bool {
 	return false
 }
 
+// repairShipmentItemLinks 补齐「有运单无商品明细」：按包裹运单号 / 已发货未挂单行反推关联。
+func (s *OrderService) repairShipmentItemLinks(tenantID uint64, o *model.Order) *model.Order {
+	if o == nil || len(o.Shipments) == 0 {
+		return o
+	}
+	covered := map[uint64]struct{}{}
+	for _, sh := range o.Shipments {
+		for _, it := range sh.Items {
+			if it.OrderItemID > 0 {
+				covered[it.OrderItemID] = struct{}{}
+			}
+		}
+	}
+	changed := false
+	for i := range o.Shipments {
+		sh := &o.Shipments[i]
+		if len(sh.Items) > 0 || sh.ID == 0 {
+			continue
+		}
+		lines := make([]resolvedShipLine, 0)
+		if pkg, err := s.repos.FindPackageByMailNo(tenantID, o.ID, sh.ExpressNo); err == nil && pkg != nil {
+			for _, it := range o.Items {
+				if it.PackageID != pkg.ID || it.ParentOrderItemID > 0 || strings.TrimSpace(it.SplitKind) != "" {
+					continue
+				}
+				if _, ok := covered[it.ID]; ok {
+					continue
+				}
+				qty := it.Quantity
+				if qty <= 0 {
+					qty = 1
+				}
+				lines = append(lines, resolvedShipLine{
+					OrderItemID: it.ID, Qty: qty, SkuCode: it.SkuCode, ProductName: it.ProductName, SkuSpecs: it.SkuSpecs,
+				})
+			}
+		}
+		// 无包裹运单号时不强行猜测（多商品分开发货易错绑）；留给有 mail_no / 本轮 ingest 商品匹配的路径
+		if len(lines) == 0 {
+			continue
+		}
+		items := make([]model.OrderShipmentItem, 0, len(lines))
+		for _, line := range lines {
+			items = append(items, model.OrderShipmentItem{
+				TenantID: tenantID, ShipmentID: sh.ID, OrderID: o.ID,
+				OrderItemID: line.OrderItemID, Qty: line.Qty,
+				SkuCode: line.SkuCode, ProductName: line.ProductName, SkuSpecs: line.SkuSpecs,
+			})
+			covered[line.OrderItemID] = struct{}{}
+		}
+		if err := s.repos.CreateShipmentItems(items); err != nil {
+			log.Printf("[ordercore] repair shipment items order=%s sh=%s: %v", o.OrderNo, sh.ExpressNo, err)
+			continue
+		}
+		changed = true
+	}
+	if !changed {
+		return o
+	}
+	fresh, err := s.repos.GetOrder(tenantID, o.ID)
+	if err != nil || fresh == nil {
+		return o
+	}
+	return fresh
+}
+
 func orderHasExpressShipments(o *model.Order) bool {
 	if o == nil {
 		return false
@@ -7410,21 +7490,71 @@ func restoreShipStatusFromLocalShipments(o *model.Order) string {
 	return got
 }
 
-// syncIngestLogistics 把快递助手物流写入 order_shipments（按单号幂等）。
-func syncIngestLogistics(tx *repo.Repos, tenantID, orderID uint64, req dto.IngestOrderRequest) error {
-	pkgs := req.Logistics
-	if len(pkgs) == 0 {
-		no := strings.TrimSpace(req.ExpressNo)
-		if no == "" {
-			return nil
+func pickIngestPrimaryLogistics(list []dto.LogisticsInput, shippedAt string) dto.LogisticsInput {
+	if len(list) == 0 {
+		return dto.LogisticsInput{}
+	}
+	shippedAt = strings.TrimSpace(shippedAt)
+	if shippedAt != "" {
+		for _, lg := range list {
+			st := strings.TrimSpace(lg.ShippedAt)
+			if st == "" {
+				continue
+			}
+			if st == shippedAt || strings.HasPrefix(shippedAt, st) || strings.HasPrefix(st, shippedAt) {
+				return lg
+			}
+			if len(st) >= 16 && len(shippedAt) >= 16 && st[:16] == shippedAt[:16] {
+				return lg
+			}
 		}
-		pkgs = []dto.LogisticsInput{{
-			ExpressCompany: req.ExpressCompany,
+	}
+	latest := list[0]
+	for i := 1; i < len(list); i++ {
+		if strings.TrimSpace(list[i].ShippedAt) > strings.TrimSpace(latest.ShippedAt) {
+			latest = list[i]
+		}
+	}
+	return latest
+}
+
+// logisticsForThisPackage 本轮包裹只落本包快递单号。
+// 快递助手同主单多包裹时，详情常带回整单 logisticsInfoList；若全部写入再绑商品，会把其它包裹运单错挂到本包商品。
+func logisticsForThisPackage(req dto.IngestOrderRequest) []dto.LogisticsInput {
+	primary := strings.TrimSpace(req.ExpressNo)
+	if primary != "" {
+		for _, p := range req.Logistics {
+			if strings.TrimSpace(p.ExpressNo) == primary {
+				out := p
+				if strings.TrimSpace(out.ShippedAt) == "" {
+					out.ShippedAt = req.ShippedAt
+				}
+				if strings.TrimSpace(out.ExpressCompany) == "" {
+					out.ExpressCompany = firstNonEmpty(req.ExpressCompany, req.ExpressCode)
+				}
+				return []dto.LogisticsInput{out}
+			}
+		}
+		return []dto.LogisticsInput{{
+			ExpressCompany: firstNonEmpty(req.ExpressCompany, req.ExpressCode),
 			ExpressCode:    req.ExpressCode,
-			ExpressNo:      no,
+			ExpressNo:      primary,
 			ShippedAt:      req.ShippedAt,
 		}}
 	}
+	if len(req.Logistics) == 1 {
+		return req.Logistics
+	}
+	return nil
+}
+
+// syncIngestLogistics 把快递助手物流写入 order_shipments（按单号幂等），并关联本轮包裹商品行。
+func syncIngestLogistics(tx *repo.Repos, tenantID, orderID uint64, req dto.IngestOrderRequest) error {
+	pkgs := logisticsForThisPackage(req)
+	if len(pkgs) == 0 {
+		return nil
+	}
+	order, _ := tx.GetOrder(tenantID, orderID)
 	for _, p := range pkgs {
 		no := strings.TrimSpace(p.ExpressNo)
 		if no == "" {
@@ -7454,6 +7584,11 @@ func syncIngestLogistics(tx *repo.Repos, tenantID, orderID uint64, req dto.Inges
 					return err
 				}
 			}
+			if len(existing.Items) == 0 {
+				if err := ensureShipmentItemsLinked(tx, tenantID, orderID, existing.ID, order, req, no); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		shipNo, err := tx.NextShipmentNo(tenantID)
@@ -7478,8 +7613,96 @@ func syncIngestLogistics(tx *repo.Repos, tenantID, orderID uint64, req dto.Inges
 		if err := tx.CreateShipment(sh); err != nil {
 			return err
 		}
+		if err := ensureShipmentItemsLinked(tx, tenantID, orderID, sh.ID, order, req, no); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// ensureShipmentItemsLinked 把运单关联到本轮包裹/匹配到的销售行（多商品分开发货必备）。
+func ensureShipmentItemsLinked(tx *repo.Repos, tenantID, orderID, shipmentID uint64, order *model.Order, req dto.IngestOrderRequest, expressNo string) error {
+	if shipmentID == 0 {
+		return nil
+	}
+	lines := resolveIngestShipmentLines(tx, tenantID, order, req, expressNo)
+	if len(lines) == 0 {
+		return nil
+	}
+	items := make([]model.OrderShipmentItem, 0, len(lines))
+	for _, line := range lines {
+		items = append(items, model.OrderShipmentItem{
+			TenantID:    tenantID,
+			ShipmentID:  shipmentID,
+			OrderID:     orderID,
+			OrderItemID: line.OrderItemID,
+			Qty:         line.Qty,
+			SkuCode:     line.SkuCode,
+			ProductName: line.ProductName,
+			SkuSpecs:    line.SkuSpecs,
+		})
+	}
+	return tx.CreateShipmentItems(items)
+}
+
+func resolveIngestShipmentLines(tx *repo.Repos, tenantID uint64, order *model.Order, req dto.IngestOrderRequest, expressNo string) []resolvedShipLine {
+	if order == nil {
+		return nil
+	}
+	byID := map[uint64]model.OrderItem{}
+	for _, it := range order.Items {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		byID[it.ID] = it
+	}
+	ids := matchIngestItemsToOrder(order.Items, req.Items)
+	// 本轮无商品明细时：按包裹 sysTid / 运单号反查挂包商品
+	if len(ids) == 0 {
+		sysTid := strings.TrimSpace(req.PlatformSysTid)
+		if sysTid != "" {
+			if pkg, err := tx.FindPackageBySysTid(tenantID, sysTid); err == nil && pkg != nil && pkg.OrderID == order.ID {
+				for _, it := range order.Items {
+					if it.PackageID == pkg.ID && it.ParentOrderItemID == 0 && strings.TrimSpace(it.SplitKind) == "" {
+						ids = append(ids, it.ID)
+					}
+				}
+			}
+		}
+	}
+	if len(ids) == 0 && strings.TrimSpace(expressNo) != "" {
+		if pkg, err := tx.FindPackageByMailNo(tenantID, order.ID, expressNo); err == nil && pkg != nil {
+			for _, it := range order.Items {
+				if it.PackageID == pkg.ID && it.ParentOrderItemID == 0 && strings.TrimSpace(it.SplitKind) == "" {
+					ids = append(ids, it.ID)
+				}
+			}
+		}
+	}
+	out := make([]resolvedShipLine, 0, len(ids))
+	seen := map[uint64]struct{}{}
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		it, ok := byID[id]
+		if !ok {
+			continue
+		}
+		qty := it.Quantity
+		if qty <= 0 {
+			qty = 1
+		}
+		out = append(out, resolvedShipLine{
+			OrderItemID: it.ID,
+			Qty:         qty,
+			SkuCode:     it.SkuCode,
+			ProductName: it.ProductName,
+			SkuSpecs:    it.SkuSpecs,
+		})
+	}
+	return out
 }
 
 func roundMoney(v float64) float64 {
