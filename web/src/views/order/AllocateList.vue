@@ -16,7 +16,7 @@ import {
   labelDropship,
   labelEcommerceStatus,
   labelKDZSStatus,
-  labelPlatform,
+  formatPlatformShop,
   labelShipStatus,
   labelStatus,
   listBindings,
@@ -532,8 +532,8 @@ onMounted(load)
       <el-table-column label="供应商" min-width="120" show-overflow-tooltip>
         <template #default="{ row }">{{ row.supplierName || '-' }}</template>
       </el-table-column>
-      <el-table-column label="平台" width="90">
-        <template #default="{ row }">{{ labelPlatform(row.platform) }}</template>
+      <el-table-column label="平台" min-width="140" show-overflow-tooltip>
+        <template #default="{ row }">{{ formatPlatformShop(row) }}</template>
       </el-table-column>
       <el-table-column prop="platformOrderId" label="平台单号" min-width="200" width="220">
         <template #default="{ row }">
