@@ -191,11 +191,23 @@ func TestOrderDropshipPONos(t *testing.T) {
 
 func TestFilterItemsForShippingDropsRefunded(t *testing.T) {
 	items := []model.OrderItem{
-		{ID: 1, ProductName: "飞轮", SkuSpecs: "R8101", Quantity: 1, AfterSaleStatus: "REFUND_MONEY_FINISH", LineOrderStatus: "ORDER_CANCELLED"},
-		{ID: 2, ProductName: "中套", SkuSpecs: "R8170", Quantity: 1, LineOrderStatus: "ORDER_PAID"},
+		{ID: 1, ProductName: "飞轮", SkuSpecs: "R8101", Quantity: 1, AllocType: model.AllocSelfShip, AfterSaleStatus: "REFUND_MONEY_FINISH", LineOrderStatus: "ORDER_CANCELLED"},
+		{ID: 2, ProductName: "中套", SkuSpecs: "R8170", Quantity: 1, AllocType: model.AllocSelfShip, LineOrderStatus: "ORDER_PAID"},
 	}
 	got := filterItemsForShipping(items)
 	if len(got) != 1 || got[0].ID != 2 {
 		t.Fatalf("got=%+v", got)
+	}
+}
+
+func TestFilterItemsForShippingKeepsOnlySelfShip(t *testing.T) {
+	items := []model.OrderItem{
+		{ID: 1, ProductName: "插销", SkuSpecs: "插销+卡簧*2副（金色）", Quantity: 2, LineOrderStatus: "ORDER_PAID"},
+		{ID: 2, ProductName: "碟片", SkuSpecs: "MT900-160mm 一张（配内锁盖）", Quantity: 1, AllocType: model.AllocSelfShip, LineOrderStatus: "ORDER_PAID"},
+		{ID: 3, ProductName: "代发件", SkuSpecs: "X", Quantity: 1, AllocType: model.AllocDropship, LineOrderStatus: "ORDER_PAID"},
+	}
+	got := filterItemsForShipping(items)
+	if len(got) != 1 || got[0].ID != 2 {
+		t.Fatalf("got=%+v want only MT900 self_ship", got)
 	}
 }

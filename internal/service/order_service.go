@@ -157,13 +157,13 @@ func (s *OrderService) List(tenantID uint64, q repo.OrderListQuery) ([]model.Ord
 	if err != nil {
 		return nil, 0, err
 	}
-	// 发货中心待发货队列：去掉退款完成行；整单无可履约商品则不返回（避免空单占待发货）
+	// 发货中心待发货队列：只保留已自营/采购发货分配且可履约的行；未分配/代发行不进打单清单
 	if q.ShipStatus == "need_ship" || q.ShipStatus == "unshipped" {
 		out := make([]model.Order, 0, len(list))
 		removed := 0
 		for i := range list {
 			list[i].Items = filterItemsForShipping(list[i].Items)
-			if !orderHasFulfillableItems(&list[i]) {
+			if len(list[i].Items) == 0 {
 				removed++
 				continue
 			}
@@ -177,33 +177,49 @@ func (s *OrderService) List(tenantID uint64, q repo.OrderListQuery) ([]model.Ord
 	return list, total, nil
 }
 
-// filterItemsForShipping 待发货只保留可履约根行及其拆分子行，去掉退款完成/关闭行。
+// filterItemsForShipping 发货中心待发货：只保留已分配自营/采购发货的可履约根行及其拆分子行。
+// 未分配行、代发行、退款完成行不进入打单商品清单（部分分配时只展示已自营那几件）。
 func filterItemsForShipping(items []model.OrderItem) []model.OrderItem {
 	if len(items) == 0 {
 		return items
 	}
-	excludedRoots := map[uint64]struct{}{}
+	readyRoots := map[uint64]struct{}{}
 	for _, it := range items {
 		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
 			continue
 		}
-		if orderItemExcludedFromFulfillment(it) {
-			excludedRoots[it.ID] = struct{}{}
+		if !itemReadyForShippingCenter(it) {
+			continue
 		}
+		readyRoots[it.ID] = struct{}{}
 	}
 	out := make([]model.OrderItem, 0, len(items))
 	for _, it := range items {
 		if it.ParentOrderItemID > 0 {
-			if _, ok := excludedRoots[it.ParentOrderItemID]; ok {
+			if _, ok := readyRoots[it.ParentOrderItemID]; !ok {
 				continue
 			}
+			out = append(out, it)
+			continue
 		}
-		if orderItemExcludedFromFulfillment(it) {
+		if _, ok := readyRoots[it.ID]; !ok {
 			continue
 		}
 		out = append(out, it)
 	}
 	return out
+}
+
+func itemReadyForShippingCenter(it model.OrderItem) bool {
+	if orderItemExcludedFromFulfillment(it) {
+		return false
+	}
+	switch strings.TrimSpace(it.AllocType) {
+	case model.AllocSelfShip, model.AllocPurchaseThenShip:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *OrderService) FenFaRemarks(tenantID uint64, orderNos []string) (map[string]string, error) {

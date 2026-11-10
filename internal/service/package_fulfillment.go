@@ -72,6 +72,13 @@ func (s *OrderService) applyPackageItemFulfillmentFromIngest(tenantID uint64, o 
 			fields["ship_status"] = model.ShipWaitShip
 			fields["allocated_at"] = nil
 		} else if hint.ApplySyncAlloc && strings.TrimSpace(hint.AllocType) != "" {
+			// 本单已有部分商品人工/规则分配时：未分配行不要被「助手待发货自营/渠道」同步强行带上
+			// （多包裹只推其中一件后，另一包偶发也变 wait_send，会把插销等未勾选商品带进自营）
+			if strings.TrimSpace(it.AllocType) == "" && orderHasItemLevelAlloc(cur) &&
+				(hint.AllocType == model.AllocSelfShip || hint.AllocType == model.AllocChannelShip) {
+				_ = s.repos.UpdateOrderItemFields(tenantID, id, fields)
+				continue
+			}
 			// 已自营/代发分配的行，同步到已发货时不要被渠道态冲掉
 			alloc := hint.AllocType
 			mode := hint.DropshipMode
