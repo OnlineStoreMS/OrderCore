@@ -907,14 +907,23 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 		}
 		// 仅「待推单/明确 ClearAlloc」才同步撤回代发/自营单。
 		// 电商取消/退款关单默认保留分配与采购单，避免误撤供应商履约。
-		needDetachPO := !terminalPre && hint.ClearAlloc &&
-			(existing.AllocType == model.AllocDropship || strings.TrimSpace(existing.PurchaseOrderID) != "")
+		// 多包裹同主单：另一包回待推单不得 detach 本单已挂的代发/自营（否则会出现 PO 明细被划线、再自动建新 PO 的循环）。
+		// 已发货/部分发货同样不得因同步 ClearAlloc 去撤代发单。
+		skipDetachForPackage := mergeSameParentPkg || orderHasItemLevelAlloc(existing) ||
+			existing.ShipStatus == model.ShipShipped || existing.ShipStatus == model.ShipPartialShipped ||
+			existing.Status == model.StatusShipped || existing.Status == model.StatusPartialShip ||
+			existing.Status == model.StatusCompleted
+		needDetachPO := !terminalPre && hint.ClearAlloc && !skipDetachForPackage &&
+			(existing.AllocType == model.AllocDropship || strings.TrimSpace(existing.PurchaseOrderID) != "" || orderHasDropshipPOItems(existing))
 		if needDetachPO && strings.TrimSpace(bearerToken) != "" {
 			if err := s.cancelLinkedDropshipPOs(ctx, tenantID, existing.ID, existing.PurchaseOrderID, bearerToken); err != nil {
 				return nil, false, fmt.Errorf("同步代发单撤回失败: %w", err)
 			}
+		} else if hint.ClearAlloc && skipDetachForPackage {
+			log.Printf("[ordercore] skip detach dropship on clear-alloc order=%s mergePkg=%v itemAlloc=%v ship=%s",
+				existing.OrderNo, mergeSameParentPkg, orderHasItemLevelAlloc(existing), existing.ShipStatus)
 		}
-		needCancelSelf := !terminalPre && hint.ClearAlloc &&
+		needCancelSelf := !terminalPre && hint.ClearAlloc && !skipDetachForPackage &&
 			(existing.AllocType == model.AllocSelfShip || strings.TrimSpace(existing.SelfOrderNo) != "")
 		if needCancelSelf && strings.TrimSpace(bearerToken) != "" {
 			if err := s.cancelLinkedSelfOrders(ctx, existing.ID, bearerToken); err != nil {
@@ -1095,10 +1104,20 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 						fields["dropship_mode"] = model.DropshipOSMSSupplier
 						fields["supplier_id"] = osmsRestoreSID
 						fields["supplier_name"] = osmsRestoreSName
-						fields["status"] = status
+						// 已发货/已完成不要被「助手 shipped→本地 allocated」口径冲回已分配，避免流水刷屏
+						keepStatus := status
+						if existing.Status == model.StatusCompleted || status == model.StatusCompleted {
+							keepStatus = model.StatusCompleted
+						} else if existing.Status == model.StatusShipped || existing.ShipStatus == model.ShipShipped ||
+							status == model.StatusShipped || hint.ShipStatus == model.ShipShipped {
+							keepStatus = model.StatusShipped
+						} else if existing.Status == model.StatusPartialShip || existing.ShipStatus == model.ShipPartialShipped {
+							keepStatus = model.StatusPartialShip
+						}
+						fields["status"] = keepStatus
 						fields["skip_auto_alloc"] = false
 						hint.LogRemark = fmt.Sprintf("同步保留OSMS代发→%s", osmsRestoreSName)
-						if status != fromStatus ||
+						if keepStatus != fromStatus ||
 							existing.AllocType != model.AllocDropship ||
 							existing.DropshipMode != model.DropshipOSMSSupplier ||
 							existing.SupplierID != osmsRestoreSID {
