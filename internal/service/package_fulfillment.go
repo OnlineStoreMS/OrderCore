@@ -55,6 +55,11 @@ func (s *OrderService) applyPackageItemFulfillmentFromIngest(tenantID uint64, o 
 			_ = s.repos.UpdateOrderItemFields(tenantID, id, fields)
 			continue
 		}
+		// 本地已人工/规则分配过的行：助手短暂仍报「待推单」不得清空（自营 self_print 后常见滞后）
+		if hint.ClearAlloc && strings.TrimSpace(it.AllocType) != "" {
+			_ = s.repos.UpdateOrderItemFields(tenantID, id, fields)
+			continue
+		}
 		if hint.ClearAlloc {
 			fields["alloc_type"] = ""
 			fields["dropship_mode"] = ""

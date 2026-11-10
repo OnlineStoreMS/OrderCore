@@ -1132,11 +1132,17 @@ func (s *OrderService) Ingest(ctx context.Context, tenantID, operatorID uint64, 
 					}
 				}
 			} else if !terminal && hint.ClearAlloc {
-				// 同主单另一包裹回待推单：不得清空已并入 OC 上其它包裹/行的履约
-				if mergeSameParentPkg || orderHasItemLevelAlloc(existing) {
+				// 同主单另一包裹回待推单：不得清空已并入 OC 上其它包裹/行的履约。
+				// 头表已是自营/代发分配时，助手滞后「待推单」也不得整单打回待分配（self_print 后常见）。
+				localAllocated := existing.AllocType == model.AllocSelfShip ||
+					existing.AllocType == model.AllocDropship ||
+					existing.AllocType == model.AllocPurchaseThenShip ||
+					orderHasItemLevelAlloc(existing)
+				if mergeSameParentPkg || localAllocated {
 					fields["factory_id"] = req.FactoryID
 					fields["factory_name"] = req.FactoryName
-					log.Printf("[ordercore] skip clear alloc on merge/item-level order=%s sysTid=%s", existing.OrderNo, req.PlatformSysTid)
+					log.Printf("[ordercore] skip clear alloc on merge/local-alloc order=%s sysTid=%s alloc=%s",
+						existing.OrderNo, req.PlatformSysTid, existing.AllocType)
 				} else {
 					// 快递助手回到待推单（撤单等）：清空订单中心分配，恢复待分配
 					fields["alloc_type"] = ""
