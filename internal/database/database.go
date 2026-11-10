@@ -99,7 +99,8 @@ func backfillFulfillmentShipStatus(db *gorm.DB) error {
 		`UPDATE orders SET ship_status = 'wait_ship'
 		 WHERE (ship_status IS NULL OR ship_status = '')
 		   AND status IN ('pending_alloc','allocated','purchasing','pending_payment')`,
-		// 取消/退款完成单不应落在待分配/已分配
+		// 整单取消/退款完成才关单。多包裹部分退时头表常残留 order_cancelled，
+		// 仍有可履约商品时不得关闭（否则待分配消失且自营推单找不到系统单）。
 		`UPDATE orders SET
 			status = 'closed',
 			alloc_type = '',
@@ -119,13 +120,29 @@ func backfillFulfillmentShipStatus(db *gorm.DB) error {
 			   'ORDER_CANCELLED','ORDER_CANCEL','TRADE_CLOSED','CANCEL','CANCELLED','CLOSED',
 			   'REFUND_SUCCESS','REFUNDED','SUCCESS_REFUND','REFUND_MONEY_FINISH','REFUND_MONEY_SUCCESS'
 			 )
-			 OR LOWER(COALESCE(platform_status,'')) IN ('order_cancelled','cancelled','trade_closed','closed','cancel')
 			 OR COALESCE(ecommerce_status_text,'') LIKE '%订单取消%'
 			 OR COALESCE(ecommerce_status_text,'') LIKE '%已取消%'
 			 OR COALESCE(ecommerce_status_text,'') LIKE '%交易关闭%'
 			 OR COALESCE(ecommerce_status_text,'') LIKE '%退款成功%'
 			 OR COALESCE(ecommerce_status_text,'') LIKE '%退款完成%'
 			 OR UPPER(COALESCE(ecommerce_status,'')) LIKE '%CANCEL%'
+		   )
+		   AND NOT EXISTS (
+			 SELECT 1 FROM order_items i
+			 WHERE i.order_id = orders.id AND i.tenant_id = orders.tenant_id
+			   AND COALESCE(i.parent_order_item_id, 0) = 0
+			   AND COALESCE(i.split_kind, '') = ''
+			   AND COALESCE(i.quantity, 0) > 0
+			   AND NOT (
+				 UPPER(COALESCE(i.after_sale_status, '')) IN (
+				   'REFUND_SUCCESS','REFUNDED','SUCCESS_REFUND','REFUND_MONEY_FINISH','REFUND_MONEY_SUCCESS'
+				 )
+				 OR UPPER(COALESCE(i.line_order_status, '')) IN (
+				   'TRADE_CLOSED','ORDER_CANCEL','ORDER_CANCELLED','CANCEL','CANCELLED','CLOSED',
+				   'TRADE_CLOSED_BY_TAOBAO','TRADE_CLOSED_BY_USER','REFUND_SUCCESS','REFUNDED'
+				 )
+				 OR UPPER(COALESCE(i.line_order_status, '')) LIKE '%CANCEL%'
+			   )
 		   )`,
 	}
 	for _, sql := range steps {

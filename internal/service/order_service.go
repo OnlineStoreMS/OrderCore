@@ -1633,7 +1633,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 		}
 		if needKDZS {
 			oids := platformOidsForItemIDs(o, selectedItemIDs)
-			if err := s.setKDZSAgentType(ctx, o, kdzsAction, factoryID, bearerToken, oids, partialItems); err != nil {
+			if err := s.setKDZSAgentType(ctx, o, kdzsAction, factoryID, bearerToken, oids, partialItems, selectedItemIDs); err != nil {
 				if createdPOID > 0 {
 					_ = s.rollbackDropshipPurchaseOrder(ctx, bearerToken, createdPOID)
 				}
@@ -1714,6 +1714,28 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 	out, err := s.repos.GetOrder(tenantID, orderID)
 	if err != nil {
 		return nil, err
+	}
+	// 部分退款多包裹：把头表失效 sysTid 拨到本次分配商品所在活包裹，避免后续再推错单
+	if syncKDZS {
+		if targets := s.resolveKDZSAgentTargets(out, selectedItemIDs, platformOidsForItemIDs(out, selectedItemIDs)); len(targets) > 0 {
+			t0 := targets[0]
+			st := strings.TrimSpace(t0.TradeStatus)
+			if st == "" || st == "order_cancelled" || st == "order_paid" {
+				st = model.KDZSWaitSend
+			}
+			fields := map[string]any{"platform_sys_tid": t0.SysTid, "updated_at": time.Now()}
+			if st == model.KDZSWaitAudit || st == model.KDZSWaitSend {
+				fields["platform_status"] = st
+				fields["platform_status_text"] = map[string]string{
+					model.KDZSWaitAudit: "待推单",
+					model.KDZSWaitSend:  "待发货",
+				}[st]
+			}
+			if strings.TrimSpace(out.PlatformSysTid) != t0.SysTid {
+				_ = s.repos.UpdateOrderFields(tenantID, orderID, fields)
+				out, _ = s.repos.GetOrder(tenantID, orderID)
+			}
+		}
 	}
 	if allocType == model.AllocDropship && supplierID > 0 && strings.TrimSpace(req.Remark) != autoAllocRemark {
 		items := out.Items
@@ -3735,56 +3757,170 @@ func (s *OrderService) cancelKDZSPush(ctx context.Context, o *model.Order, token
 	})
 }
 
-func (s *OrderService) setKDZSAgentType(ctx context.Context, o *model.Order, action, factoryID, token string, oidList []string, forceSplit bool) error {
+func (s *OrderService) setKDZSAgentType(ctx context.Context, o *model.Order, action, factoryID, token string, oidList []string, forceSplit bool, itemIDs []uint64) error {
 	if s.storeSync == nil {
 		return fmt.Errorf("StoreSyncAgent 未配置")
-	}
-	sysTid, tid := kdzsAgentSysTid(o)
-	if sysTid == "" {
-		return fmt.Errorf("缺少平台系统单号，无法同步快递助手")
-	}
-	tradeStatus := o.PlatformStatus
-	if tradeStatus == "" {
-		tradeStatus = model.KDZSWaitAudit
 	}
 	oids := oidList
 	if len(oids) == 0 {
 		oids = orderItemPlatformOids(o)
 	}
+	targets := s.resolveKDZSAgentTargets(o, itemIDs, oids)
+	if len(targets) == 0 {
+		sysTid, _ := kdzsAgentSysTid(o)
+		if sysTid == "" {
+			return fmt.Errorf("缺少平台系统单号，无法同步快递助手")
+		}
+		st := o.PlatformStatus
+		if st == "" {
+			st = model.KDZSWaitAudit
+		}
+		targets = []kdzsAgentTarget{{SysTid: sysTid, TradeStatus: st}}
+	}
+	_, tid := kdzsAgentSysTid(o)
 	split := forceSplit || o.SplitFromOrderID > 0 || strings.Contains(strings.TrimSpace(o.PlatformSysTid), "#split")
-	req := storesync.SetAgentTypeRequest{
-		Platform:    o.Platform,
-		TradeStatus: tradeStatus,
-		Action:      action,
-		FactoryID:   factoryID,
-		SysTids:     []string{sysTid},
-		OidList:     oids,
-		Split:       split && len(oids) > 0,
+	var lastErr error
+	pushed := 0
+	for _, t := range targets {
+		tradeStatus := strings.TrimSpace(t.TradeStatus)
+		if tradeStatus == "" || tradeStatus == "order_cancelled" || tradeStatus == "order_paid" {
+			// 包裹态若是电商码，自营推单按待推单试
+			tradeStatus = model.KDZSWaitAudit
+		}
+		req := storesync.SetAgentTypeRequest{
+			Platform:    o.Platform,
+			TradeStatus: tradeStatus,
+			Action:      action,
+			FactoryID:   factoryID,
+			SysTids:     []string{t.SysTid},
+			OidList:     oids,
+			Split:       split && len(oids) > 0,
+		}
+		if tid != "" && tid != t.SysTid {
+			req.Tids = []string{tid}
+		}
+		err := s.storeSync.SetOrderAgentType(ctx, token, req)
+		if err == nil {
+			pushed++
+			continue
+		}
+		msg := err.Error()
+		if strings.Contains(msg, "不存在") {
+			lastErr = err
+			continue
+		}
+		// 本地虚标「待推单」但助手侧已是「待发货」：按待发货再试；自营打单已推过则幂等成功
+		if strings.Contains(msg, "非待推单") {
+			if tradeStatus != model.KDZSWaitSend {
+				req2 := req
+				req2.TradeStatus = model.KDZSWaitSend
+				if err2 := s.storeSync.SetOrderAgentType(ctx, token, req2); err2 == nil {
+					pushed++
+					continue
+				}
+			}
+			if action == "self_print" {
+				pushed++
+				continue
+			}
+			return fmt.Errorf("%s（订单中心状态可能滞后，请先同步快递助手或撤回推单后再推厂家）", msg)
+		}
+		lastErr = err
 	}
-	if tid != "" && tid != sysTid {
-		req.Tids = []string{tid}
-	}
-	err := s.storeSync.SetOrderAgentType(ctx, token, req)
-	if err == nil {
+	if pushed > 0 {
 		return nil
 	}
-	msg := err.Error()
-	// 本地虚标「待推单」但助手侧已是「待发货」：按待发货再试；自营打单已推过则幂等成功
-	if !strings.Contains(msg, "非待推单") {
-		return err
+	if lastErr != nil {
+		return lastErr
 	}
-	if tradeStatus != model.KDZSWaitSend {
-		req2 := req
-		req2.TradeStatus = model.KDZSWaitSend
-		if err2 := s.storeSync.SetOrderAgentType(ctx, token, req2); err2 == nil {
-			return nil
+	return fmt.Errorf("同步快递助手失败：无可用系统单号")
+}
+
+type kdzsAgentTarget struct {
+	SysTid      string
+	TradeStatus string
+}
+
+// resolveKDZSAgentTargets 按待分配商品所在包裹取 sysTid（多包裹部分退时头表 sysTid 常已失效）。
+func (s *OrderService) resolveKDZSAgentTargets(o *model.Order, itemIDs []uint64, oidList []string) []kdzsAgentTarget {
+	if o == nil || s.repos == nil {
+		return nil
+	}
+	pkgIDs := collectKDZSAgentPackageIDs(o, itemIDs, oidList)
+	if len(pkgIDs) == 0 {
+		return nil
+	}
+	want := map[uint64]struct{}{}
+	for _, id := range pkgIDs {
+		want[id] = struct{}{}
+	}
+	pkgs, err := s.repos.ListPackagesByOrderID(o.TenantID, o.ID)
+	if err != nil || len(pkgs) == 0 {
+		return nil
+	}
+	out := make([]kdzsAgentTarget, 0, len(pkgIDs))
+	seen := map[string]struct{}{}
+	for _, p := range pkgs {
+		if _, ok := want[p.ID]; !ok {
+			continue
+		}
+		sys := strings.TrimSpace(p.PlatformSysTid)
+		if sys == "" {
+			continue
+		}
+		if _, ok := seen[sys]; ok {
+			continue
+		}
+		seen[sys] = struct{}{}
+		st := strings.TrimSpace(p.PlatformStatus)
+		out = append(out, kdzsAgentTarget{SysTid: sys, TradeStatus: st})
+	}
+	return out
+}
+
+func collectKDZSAgentPackageIDs(o *model.Order, itemIDs []uint64, oidList []string) []uint64 {
+	if o == nil {
+		return nil
+	}
+	wantItems := normalizeItemIDSet(itemIDs)
+	wantOids := map[string]struct{}{}
+	for _, oid := range oidList {
+		oid = strings.TrimSpace(oid)
+		if oid != "" {
+			wantOids[oid] = struct{}{}
 		}
 	}
-	if action == "self_print" {
-		// 已在待发货自营：无需再推
-		return nil
+	seen := map[uint64]struct{}{}
+	out := make([]uint64, 0)
+	for _, it := range o.Items {
+		if it.ParentOrderItemID > 0 || strings.TrimSpace(it.SplitKind) != "" {
+			continue
+		}
+		if orderItemExcludedFromFulfillment(it) {
+			continue
+		}
+		if len(wantItems) > 0 {
+			if _, ok := wantItems[it.ID]; !ok {
+				continue
+			}
+		} else if len(wantOids) > 0 {
+			if _, ok := wantOids[strings.TrimSpace(it.PlatformOid)]; !ok {
+				continue
+			}
+		} else if strings.TrimSpace(it.AllocType) != "" {
+			// 未指定行时：只推尚未分配的可履约行所在包裹
+			continue
+		}
+		if it.PackageID == 0 {
+			continue
+		}
+		if _, ok := seen[it.PackageID]; ok {
+			continue
+		}
+		seen[it.PackageID] = struct{}{}
+		out = append(out, it.PackageID)
 	}
-	return fmt.Errorf("%s（订单中心状态可能滞后，请先同步快递助手或撤回推单后再推厂家）", msg)
+	return out
 }
 
 func (s *OrderService) UpdateRemarks(ctx context.Context, tenantID, operatorID, orderID uint64, req dto.UpdateRemarksRequest, bearerToken string) (*model.Order, error) {
