@@ -93,15 +93,25 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 	statuses := normalizeStatusFilters(q.Statuses, q.Status)
 	shipStatus := strings.TrimSpace(q.ShipStatus)
 	// 分配页「已分配」工作队列口径（与发货状态下拉对齐，保证 待发货 ⊆ 去除发货筛选）：
-	// - 已分配：头表 allocated / partial_ship（进行中，不含整单 shipped/closed/completed）
-	// - 已分配+待发货：头表 wait_ship，或存在已分配且仍待发的根行；不含头表已 shipped / 纯部分发货
-	// - 已分配+部分发货：头表或行级 partial_shipped
-	// - 已分配+已发货：头表 ship_status=shipped（含履约已走到 shipped 的单）
+	// - 已分配：头表 allocated / partial_ship，或仍有已分配可履约根行（部分商品未分配时头表常为 pending_alloc）
+	// - 已分配+待发货：上述且仍有待发（头表 wait，或已分配行 wait）；不含头表已 shipped
+	// - 已分配+部分发货 / 已发货：见下
 	allocatedTab := len(statuses) == 1 && statuses[0] == model.StatusAllocated
 	allocatedOpen := []string{model.StatusAllocated, model.StatusPartialShip}
+	// 部分分配：头表 pending_alloc 但仍有已分配行，必须进「已分配」才能看见已自营/代发商品
+	sqlHasAllocatedFulfillableRoot := `EXISTS (
+		SELECT 1 FROM order_items i
+		WHERE i.order_id = orders.id AND i.tenant_id = orders.tenant_id
+		  AND COALESCE(i.parent_order_item_id, 0) = 0
+		  AND COALESCE(i.split_kind, '') = ''
+		  AND COALESCE(i.alloc_type, '') <> ''
+		  AND COALESCE(i.quantity, 0) > 0
+		  AND NOT (` + sqlOrderItemExcludedFromFulfillment + `)
+	)`
 	if allocatedTab && shipStatus == model.ShipWaitShip {
-		// 严格「待发货」：头表 wait_ship，或仍有待发根行；头表已 shipped 一律排除（避免脏行抬高统计）
-		tx = tx.Where(`status IN ? AND ship_status <> ? AND (
+		tx = tx.Where(`status NOT IN ? AND ship_status <> ? AND (
+			status IN ? OR `+sqlHasAllocatedFulfillableRoot+`
+		) AND (
 			COALESCE(NULLIF(ship_status, ''), ?) = ? OR EXISTS (
 				SELECT 1 FROM order_items i
 				WHERE i.order_id = orders.id AND i.tenant_id = orders.tenant_id
@@ -109,14 +119,17 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 				  AND COALESCE(i.split_kind, '') = ''
 				  AND COALESCE(i.alloc_type, '') <> ''
 				  AND COALESCE(NULLIF(i.ship_status, ''), ?) = ?
+				  AND NOT (`+sqlOrderItemExcludedFromFulfillment+`)
 			)
-		)`, allocatedOpen, model.ShipShipped,
+		)`, []string{model.StatusClosed, model.StatusCompleted},
+			model.ShipShipped,
+			allocatedOpen,
 			model.ShipWaitShip, model.ShipWaitShip,
 			model.ShipWaitShip, model.ShipWaitShip)
 		statuses = nil
 		q.ShipStatus = ""
 	} else if allocatedTab && shipStatus == model.ShipPartialShipped {
-		tx = tx.Where(`status IN ? AND (
+		tx = tx.Where(`(status IN ? OR `+sqlHasAllocatedFulfillableRoot+`) AND (
 			ship_status = ? OR EXISTS (
 				SELECT 1 FROM order_items i
 				WHERE i.order_id = orders.id AND i.tenant_id = orders.tenant_id
@@ -135,7 +148,9 @@ func (r *Repos) ListOrders(tenantID uint64, q OrderListQuery) ([]model.Order, in
 		statuses = nil
 		q.ShipStatus = ""
 	} else if allocatedTab && shipStatus == "" {
-		tx = tx.Where(`status IN ?`, allocatedOpen)
+		tx = tx.Where(`status IN ? OR (
+			status NOT IN ? AND `+sqlHasAllocatedFulfillableRoot+`
+		)`, allocatedOpen, []string{model.StatusClosed, model.StatusCompleted, model.StatusShipped})
 		statuses = nil
 	} else if len(statuses) == 1 && statuses[0] == model.StatusPendingAlloc {
 		// 待分配队列：头表待分配，或仍有「可履约」未分配根行。
