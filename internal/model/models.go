@@ -159,6 +159,9 @@ type Order struct {
 	Shipments  []OrderShipment  `gorm:"foreignKey:OrderID" json:"shipments,omitempty"`
 	Packages   []OrderPackage   `gorm:"foreignKey:OrderID" json:"packages,omitempty"`
 	StatusLogs []OrderStatusLog `gorm:"foreignKey:OrderID" json:"statusLogs,omitempty"`
+
+	// ListRowKey 列表展开行唯一键（同 OC 按分配组拆多行时使用；非持久化）
+	ListRowKey string `gorm:"-" json:"listRowKey,omitempty"`
 }
 
 func (Order) TableName() string { return "orders" }

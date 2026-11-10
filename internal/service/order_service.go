@@ -174,6 +174,25 @@ func (s *OrderService) List(tenantID uint64, q repo.OrderListQuery) ([]model.Ord
 		}
 		list = out
 	}
+	// 分配页：按商品分配组拆行，待分配/已分配各自只展示对应商品
+	allocTab := ""
+	if len(q.Statuses) == 1 {
+		allocTab = strings.TrimSpace(q.Statuses[0])
+	} else if strings.TrimSpace(q.Status) != "" {
+		allocTab = strings.TrimSpace(q.Status)
+	}
+	if allocTab == model.StatusPendingAlloc || allocTab == model.StatusAllocated {
+		before := len(list)
+		list = ExpandOrdersByAllocGroups(list)
+		list = FilterAllocGroupRowsForTab(list, allocTab)
+		if int64(before) == total {
+			total = int64(len(list))
+		} else if len(list) > before {
+			total += int64(len(list) - before)
+		} else if before > len(list) && total >= int64(before-len(list)) {
+			total -= int64(before - len(list))
+		}
+	}
 	return list, total, nil
 }
 
@@ -3414,7 +3433,8 @@ func (s *OrderService) cancelOneDropshipPO(ctx context.Context, bearerToken stri
 }
 
 // RevokeAllocate 撤回分配：快递助手侧先撤单/退审到待推单，再清空 OMS 履约分配。
-func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID, orderID uint64, bearerToken string) (*model.Order, error) {
+// itemIDs 空=撤回全部已分配根行；非空=仅撤回指定已分配根行（部分分配场景）。
+func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID, orderID uint64, bearerToken string, itemIDs []uint64) (*model.Order, error) {
 	o, err := s.repos.GetOrder(tenantID, orderID)
 	if err != nil {
 		return nil, err
@@ -3422,34 +3442,120 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 	if o.Status == model.StatusCompleted || o.Status == model.StatusClosed {
 		return nil, fmt.Errorf("当前状态不可撤回分配")
 	}
-	if o.ShipStatus == model.ShipShipped || o.ShipStatus == model.ShipPartialShipped {
+	if o.ShipStatus == model.ShipShipped {
 		return nil, fmt.Errorf("订单已发货，不可撤回分配")
 	}
-	if o.AllocType == "" && o.Status == model.StatusPendingAlloc && !orderHasItemLevelAlloc(o) {
-		return nil, fmt.Errorf("订单尚未分配")
+	partial := len(itemIDs) > 0
+	targetIDs := resolveRevokeTargetItemIDs(o, itemIDs)
+	legacyWholeClear := false
+	if len(targetIDs) == 0 {
+		if o.AllocType == "" && o.Status == model.StatusPendingAlloc && !orderHasItemLevelAlloc(o) {
+			return nil, fmt.Errorf("订单尚未分配")
+		}
+		// 历史整单分配：行上无 alloc_type，仅头表有
+		if !partial && strings.TrimSpace(o.AllocType) != "" && o.ShipStatus != model.ShipShipped && o.ShipStatus != model.ShipPartialShipped {
+			legacyWholeClear = true
+		} else {
+			return nil, fmt.Errorf("没有可撤回的已分配商品")
+		}
+	}
+	targetSet := map[uint64]struct{}{}
+	for _, id := range targetIDs {
+		targetSet[id] = struct{}{}
 	}
 
-	// 先处理关联代发采购单（已付款则禁止撤回）
-	if o.AllocType == model.AllocDropship || strings.TrimSpace(o.PurchaseOrderID) != "" || orderHasDropshipPOItems(o) {
+	revokingDropship, revokingSelf, revokingKDZSPush := false, false, false
+	poNos := map[string]struct{}{}
+	for _, it := range o.Items {
+		if _, ok := targetSet[it.ID]; !ok {
+			continue
+		}
+		at := strings.TrimSpace(it.AllocType)
+		if at == model.AllocDropship {
+			revokingDropship = true
+			if po := strings.TrimSpace(it.PurchaseOrderID); po != "" {
+				poNos[po] = struct{}{}
+			}
+		}
+		if at == model.AllocSelfShip || strings.TrimSpace(it.SelfOrderNo) != "" {
+			revokingSelf = true
+		}
+		if at == model.AllocSelfShip ||
+			it.DropshipMode == model.DropshipKDZSFactory ||
+			it.DropshipMode == model.DropshipOSMSSupplier {
+			revokingKDZSPush = true
+		}
+	}
+	if !partial {
+		if o.AllocType == model.AllocDropship || strings.TrimSpace(o.PurchaseOrderID) != "" || orderHasDropshipPOItems(o) {
+			revokingDropship = true
+		}
+		if o.AllocType == model.AllocSelfShip || strings.TrimSpace(o.SelfOrderNo) != "" {
+			revokingSelf = true
+		}
+		if o.PlatformStatus == model.KDZSWaitSend ||
+			o.AllocType == model.AllocSelfShip ||
+			o.DropshipMode == model.DropshipKDZSFactory ||
+			o.DropshipMode == model.DropshipOSMSSupplier ||
+			o.AgentType == model.AgentTypeFactory {
+			revokingKDZSPush = true
+		}
+	}
+	if po := strings.TrimSpace(o.PurchaseOrderID); po != "" && revokingDropship {
+		poNos[po] = struct{}{}
+	}
+
+	for po := range poNos {
+		if err := s.cancelLinkedDropshipPOs(ctx, tenantID, o.ID, po, bearerToken); err != nil {
+			return nil, err
+		}
+	}
+	if revokingDropship && len(poNos) == 0 {
 		if err := s.cancelLinkedDropshipPOs(ctx, tenantID, o.ID, o.PurchaseOrderID, bearerToken); err != nil {
 			return nil, err
 		}
 	}
-	// 自营分配：同步取消 SelfCore 本地自营单
-	if o.AllocType == model.AllocSelfShip || strings.TrimSpace(o.SelfOrderNo) != "" {
+
+	// 自营：仅当撤回后不再剩自营行时取消 SelfCore 单
+	remainSelf := false
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		if _, ok := targetSet[it.ID]; ok {
+			continue
+		}
+		if strings.TrimSpace(it.AllocType) == model.AllocSelfShip || strings.TrimSpace(it.SelfOrderNo) != "" {
+			remainSelf = true
+			break
+		}
+	}
+	if revokingSelf && !remainSelf {
 		if err := s.cancelLinkedSelfOrders(ctx, o.ID, bearerToken); err != nil {
 			return nil, err
 		}
 	}
 
+	remainKDZSPush := false
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		if _, ok := targetSet[it.ID]; ok {
+			continue
+		}
+		at := strings.TrimSpace(it.AllocType)
+		if at == model.AllocSelfShip ||
+			it.DropshipMode == model.DropshipKDZSFactory ||
+			it.DropshipMode == model.DropshipOSMSSupplier {
+			remainKDZSPush = true
+			break
+		}
+	}
+
 	kdzsRemark := ""
-	if shouldSyncKDZSAgent(o) {
-		// 待发货（自营/厂家）需先调快递助手撤单；已在待推单则跳过
-		needCancel := o.PlatformStatus == model.KDZSWaitSend ||
-			o.AllocType == model.AllocSelfShip ||
-			o.DropshipMode == model.DropshipKDZSFactory ||
-			o.DropshipMode == model.DropshipOSMSSupplier ||
-			o.AgentType == model.AgentTypeFactory
+	if shouldSyncKDZSAgent(o) && revokingKDZSPush && !remainKDZSPush {
+		needCancel := o.PlatformStatus == model.KDZSWaitSend || revokingKDZSPush
 		if needCancel && o.PlatformStatus != model.KDZSWaitAudit {
 			if err := s.cancelKDZSPush(ctx, o, bearerToken); err != nil {
 				return nil, fmt.Errorf("同步快递助手撤单失败: %w", err)
@@ -3466,8 +3572,14 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 		locked = true
 		lockReason = "快递助手待推单，请先分配；仅自营待发货可填单号"
 	}
+	var clearIDs []uint64
+	if legacyWholeClear {
+		clearIDs = nil // 历史整单：清空全部行履约字段
+	} else {
+		clearIDs = targetIDs
+	}
 	err = s.repos.Transaction(func(tx *repo.Repos) error {
-		if err := tx.ClearOrderItemsFulfillment(tenantID, orderID, nil); err != nil {
+		if err := tx.ClearOrderItemsFulfillment(tenantID, orderID, clearIDs); err != nil {
 			return err
 		}
 		cur, gerr := tx.GetOrder(tenantID, orderID)
@@ -3491,21 +3603,30 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 				"agent_type":        model.AgentTypeSelf,
 			}
 		}
-		fields["alloc_remark"] = ""
+		if !partial || !orderHasItemLevelAlloc(cur) {
+			fields["alloc_remark"] = ""
+		}
 		fields["ship_entry_locked"] = locked
 		fields["ship_lock_reason"] = lockReason
 		fields["skip_auto_alloc"] = true
-		if shouldSyncKDZSAgent(o) {
+		if shouldSyncKDZSAgent(o) && !remainKDZSPush {
 			fields["platform_status"] = model.KDZSWaitAudit
 			fields["platform_status_text"] = "待推单"
 		}
+		toStatus := model.StatusPendingAlloc
+		if v, ok := fields["status"].(string); ok && strings.TrimSpace(v) != "" {
+			toStatus = v
+		}
 		remark := "撤回分配"
+		if partial {
+			remark = fmt.Sprintf("撤回分配(商品%d件)", len(targetIDs))
+		}
 		if kdzsRemark != "" {
 			remark = remark + " " + kdzsRemark
 		}
 		return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
 			FromStatus: from,
-			ToStatus:   model.StatusPendingAlloc,
+			ToStatus:   toStatus,
 			Action:     "revoke_allocate",
 			Remark:     remark,
 			OperatorID: operatorID,
@@ -3521,6 +3642,43 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 		return merged, nil
 	}
 	return s.repos.GetOrder(tenantID, orderID)
+}
+
+// resolveRevokeTargetItemIDs 解析待撤回的已分配根行；itemIDs 空=全部已分配根行。
+func resolveRevokeTargetItemIDs(o *model.Order, itemIDs []uint64) []uint64 {
+	if o == nil {
+		return nil
+	}
+	want := map[uint64]struct{}{}
+	for _, id := range itemIDs {
+		if id > 0 {
+			want[id] = struct{}{}
+		}
+	}
+	partial := len(want) > 0
+	out := make([]uint64, 0, len(o.Items))
+	for _, it := range o.Items {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		if strings.TrimSpace(it.AllocType) == "" {
+			continue
+		}
+		if orderItemExcludedFromFulfillment(it) {
+			continue
+		}
+		ship := strings.TrimSpace(it.ShipStatus)
+		if ship == model.ShipShipped {
+			continue
+		}
+		if partial {
+			if _, ok := want[it.ID]; !ok {
+				continue
+			}
+		}
+		out = append(out, it.ID)
+	}
+	return out
 }
 
 // cancelLinkedSelfOrders 撤回分配时同步取消 SelfCore 自营单（按销售单 refSoId）。

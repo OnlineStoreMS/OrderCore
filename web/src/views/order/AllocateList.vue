@@ -38,6 +38,7 @@ import {
   listItemTitle,
   listOrderRootItems,
   listAllocatableRootItems,
+  listRevokableRootItems,
   itemRefundBadge,
 } from '../../utils/orderItemTree'
 
@@ -48,8 +49,13 @@ const batching = ref(false)
 const list = ref<Order[]>([])
 const total = ref(0)
 const selected = ref<Order[]>([])
-/** 订单 → 勾选的商品行 id；勾选整单时填入全部可履约根行 */
-const selectedItemIds = ref<Record<number, number[]>>({})
+/** 列表行键 → 勾选的商品行 id（同 OC 拆多行时按 listRowKey 区分） */
+const selectedItemIds = ref<Record<string, number[]>>({})
+
+function orderRowKey(o: Order | undefined | null): string {
+  if (!o) return ''
+  return (o.listRowKey || String(o.id || '')).trim()
+}
 
 const pageRef = ref<HTMLElement | null>(null)
 const toolbarRef = ref<HTMLElement | null>(null)
@@ -120,8 +126,9 @@ const dropshipForm = reactive({
 const selectedOrderCount = computed(() => new Set(selected.value.map((o) => o.id).filter(Boolean)).size)
 const selectedItemCount = computed(() => {
   let n = 0
-  for (const id of new Set(selected.value.map((o) => o.id).filter(Boolean))) {
-    n += selectedItemIds.value[id]?.length || 0
+  for (const o of selected.value) {
+    const k = orderRowKey(o)
+    n += selectedItemIds.value[k]?.length || 0
   }
   return n
 })
@@ -129,15 +136,18 @@ const canBatchAllocate = computed(() =>
   selected.value.some((o) => listAllocatableRootItems(o.items).length > 0),
 )
 const canBatchRevoke = computed(() =>
-  selected.value.some((o) => o.status === 'allocated' || o.status === 'purchasing' || o.status === 'partial_ship'),
+  selected.value.some((o) => listRevokableRootItems(o.items).length > 0),
 )
 
-/** 未分配根行可勾选（头表即使已是部分发货/已分配，剩余商品仍可继续分配） */
-function canSelectItem(order: Order, it: { id?: number; allocType?: string }) {
+/** 待分配 Tab：未分配根行；已分配 Tab：已分配未发货根行 */
+function canSelectItem(order: Order, it: { id?: number; allocType?: string; shipStatus?: string }) {
   if (!it.id || itemRefundBadge(it as any)) return false
-  if ((it.allocType || '').trim()) return false
   if (order.status === 'closed' || order.status === 'completed') return false
-  return true
+  const allocated = !!(it.allocType || '').trim()
+  if (filters.status === 'allocated') {
+    return allocated && (it.shipStatus || '') !== 'shipped'
+  }
+  return !allocated
 }
 
 async function load() {
@@ -235,68 +245,81 @@ watch(
 )
 
 function onSelectionChange(rows: Order[]) {
-  // el-table 偶发带重复行；按 id 去重
+  // el-table 偶发带重复行；按 listRowKey/id 去重
   const uniq: Order[] = []
-  const seen = new Set<number>()
+  const seen = new Set<string>()
   for (const o of rows) {
-    if (!o?.id || seen.has(o.id)) continue
-    seen.add(o.id)
+    const k = orderRowKey(o)
+    if (!k || seen.has(k)) continue
+    seen.add(k)
     uniq.push(o)
   }
   selected.value = uniq
-  const next: Record<number, number[]> = {}
+  const next: Record<string, number[]> = {}
   for (const o of uniq) {
-    const prev = selectedItemIds.value[o.id]
+    const k = orderRowKey(o)
+    const prev = selectedItemIds.value[k]
     if (prev?.length) {
-      next[o.id] = prev
+      next[k] = prev
+      continue
+    }
+    if (filters.status === 'allocated') {
+      next[k] = listRevokableRootItems(o.items).map((it) => it.id!).filter(Boolean)
     } else {
-      next[o.id] = listAllocatableRootItems(o.items).map((it) => it.id!).filter(Boolean)
+      next[k] = listAllocatableRootItems(o.items).map((it) => it.id!).filter(Boolean)
     }
   }
   selectedItemIds.value = next
 }
 
-function isItemSelected(orderId: number, itemId?: number) {
+function isItemSelected(order: Order, itemId?: number) {
   if (!itemId) return false
-  return (selectedItemIds.value[orderId] || []).includes(itemId)
+  return (selectedItemIds.value[orderRowKey(order)] || []).includes(itemId)
 }
 
 function toggleItemSelect(order: Order, itemId: number | undefined, checked: boolean) {
   if (!itemId) return
-  let cur = [...(selectedItemIds.value[order.id] || [])]
+  const k = orderRowKey(order)
+  let cur = [...(selectedItemIds.value[k] || [])]
   if (checked) {
     if (!cur.includes(itemId)) cur.push(itemId)
   } else {
     cur = cur.filter((id) => id !== itemId)
   }
-  selectedItemIds.value = { ...selectedItemIds.value, [order.id]: cur }
+  selectedItemIds.value = { ...selectedItemIds.value, [k]: cur }
   const table = tableRef.value as any
   if (!table?.toggleRowSelection) {
-    // 无表格选择 API 时直接维护 selected，并去重
     if (cur.length === 0) {
-      selected.value = selected.value.filter((o) => o.id !== order.id)
-    } else if (!selected.value.some((o) => o.id === order.id)) {
+      selected.value = selected.value.filter((o) => orderRowKey(o) !== k)
+    } else if (!selected.value.some((o) => orderRowKey(o) === k)) {
       selected.value = [...selected.value, order]
     }
     return
   }
-  // 只调表格 API，由 @selection-change 统一写 selected，避免重复计入
   if (cur.length === 0) {
     table.toggleRowSelection(order, false)
-  } else if (!selected.value.some((o) => o.id === order.id)) {
+  } else if (!selected.value.some((o) => orderRowKey(o) === k)) {
     table.toggleRowSelection(order, true)
   }
 }
 
 function itemIdsForOrder(o: Order): number[] | undefined {
   const allocatable = listAllocatableRootItems(o.items).map((it) => it.id!).filter(Boolean)
-  const picked = selectedItemIds.value[o.id]
+  const picked = selectedItemIds.value[orderRowKey(o)]
   const ids = picked?.length ? picked.filter((id) => allocatable.includes(id)) : allocatable
   if (!ids.length) return undefined
   // 已有部分商品分配过时，必须显式传未分配行 id，避免后端按「整单」撞上已分配行
   const hasAllocatedSibling = listOrderRootItems(o.items).some((it) => !!(it.allocType || '').trim())
   if (hasAllocatedSibling) return ids
   if (ids.length >= allocatable.length) return undefined
+  return ids
+}
+
+function itemIdsForRevoke(o: Order): number[] | undefined {
+  const revokable = listRevokableRootItems(o.items).map((it) => it.id!).filter(Boolean)
+  const picked = selectedItemIds.value[orderRowKey(o)]
+  const ids = picked?.length ? picked.filter((id) => revokable.includes(id)) : revokable
+  if (!ids.length) return undefined
   return ids
 }
 
@@ -437,9 +460,10 @@ async function submitBatchDropship() {
 }
 
 async function batchRevoke() {
-  const rows = selected.value.filter((o) => o.status === 'allocated' || o.status === 'purchasing')
+  const rows = selected.value.filter((o) => listRevokableRootItems(o.items).length > 0)
   await runBatch(rows, '批量撤回分配', async (o) => {
-    await revokeAllocateOrder(o.id)
+    const ids = itemIdsForRevoke(o)
+    await revokeAllocateOrder(o.id, ids?.length ? { orderItemIds: ids } : undefined)
   })
 }
 
@@ -527,7 +551,7 @@ onMounted(load)
       :data="list"
       :height="tableHeight"
       stripe
-      row-key="id"
+      :row-key="orderRowKey"
       @selection-change="onSelectionChange"
     >
       <el-table-column type="selection" width="48" fixed="left" />
@@ -556,7 +580,7 @@ onMounted(load)
               <el-checkbox
                 v-if="canSelectItem(row, it)"
                 class="goods-check"
-                :model-value="isItemSelected(row.id, it.id)"
+                :model-value="isItemSelected(row, it.id)"
                 @click.stop
                 @change="(v: boolean | string | number) => toggleItemSelect(row, it.id, !!v)"
               />

@@ -141,6 +141,11 @@ type AllocateRequest struct {
 	OrderItemIDs []uint64 `json:"orderItemIds,omitempty"`
 }
 
+// RevokeAllocateRequest 撤回分配；orderItemIds 空=撤回全部已分配根行。
+type RevokeAllocateRequest struct {
+	OrderItemIDs []uint64 `json:"orderItemIds,omitempty"`
+}
+
 type BatchDropshipRequest struct {
 	OrderIDs     []uint64 `json:"orderIds" binding:"required,min=1"`
 	SupplierID   uint64   `json:"supplierId" binding:"required"`

@@ -50,3 +50,36 @@ func TestExpandOrdersByPackagesSingle(t *testing.T) {
 		t.Fatalf("len=%d", len(out))
 	}
 }
+
+func TestExpandOrdersByAllocGroupsPartial(t *testing.T) {
+	list := []model.Order{{
+		ID:      100,
+		OrderNo: "OC202611100038",
+		Status:  model.StatusPendingAlloc,
+		Items: []model.OrderItem{
+			{ID: 1, ProductName: "插销+卡簧", Quantity: 2},
+			{ID: 2, ProductName: "MT900", Quantity: 1, AllocType: model.AllocSelfShip, SelfOrderNo: "SO1"},
+		},
+	}}
+	out := ExpandOrdersByAllocGroups(list)
+	if len(out) != 2 {
+		t.Fatalf("len=%d want 2", len(out))
+	}
+	if out[0].ListRowKey == out[1].ListRowKey {
+		t.Fatalf("row keys should differ: %q", out[0].ListRowKey)
+	}
+	pending := FilterAllocGroupRowsForTab(out, model.StatusPendingAlloc)
+	allocated := FilterAllocGroupRowsForTab(out, model.StatusAllocated)
+	if len(pending) != 1 || len(pending[0].Items) != 1 || pending[0].Items[0].ID != 1 {
+		t.Fatalf("pending=%+v", pending)
+	}
+	if len(allocated) != 1 || len(allocated[0].Items) != 1 || allocated[0].Items[0].ID != 2 {
+		t.Fatalf("allocated=%+v", allocated)
+	}
+	if allocated[0].Status != model.StatusAllocated || allocated[0].AllocType != model.AllocSelfShip {
+		t.Fatalf("allocated header status/alloc=%q/%q", allocated[0].Status, allocated[0].AllocType)
+	}
+	if pending[0].AllocType != "" {
+		t.Fatalf("pending row should clear header alloc, got %q", pending[0].AllocType)
+	}
+}

@@ -83,6 +83,8 @@ export interface Order {
   platformOrderId?: string
   platformSysTid?: string
   splitFromOrderId?: number
+  /** 列表按分配组拆行时的唯一键 */
+  listRowKey?: string
   shopId?: string
   shopName?: string
   manualSourceId?: number
@@ -504,8 +506,8 @@ export async function batchDropshipOrders(body: {
   }>(await client.post('/orders/batch-dropship', body))
 }
 
-export async function revokeAllocateOrder(id: number) {
-  return unwrap<Order>(await client.post(`/orders/${id}/revoke-allocate`))
+export async function revokeAllocateOrder(id: number, body?: { orderItemIds?: number[] }) {
+  return unwrap<Order>(await client.post(`/orders/${id}/revoke-allocate`, body || {}))
 }
 
 export async function deleteManualOrder(id: number) {

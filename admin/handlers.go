@@ -479,7 +479,9 @@ func (h *Handlers) RevokeAllocate(c *gin.Context) {
 		response.Fail(c, http.StatusBadRequest, "无效 ID")
 		return
 	}
-	o, err := h.orders.RevokeAllocate(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), id, authcontext.BearerToken(c))
+	var in dto.RevokeAllocateRequest
+	_ = c.ShouldBindJSON(&in) // body 可选：空=整单撤回
+	o, err := h.orders.RevokeAllocate(c.Request.Context(), authcontext.TenantID(c), authcontext.UserID(c), id, authcontext.BearerToken(c), in.OrderItemIDs)
 	if err != nil {
 		response.Fail(c, http.StatusBadRequest, err.Error())
 		return

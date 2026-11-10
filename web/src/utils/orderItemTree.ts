@@ -24,6 +24,17 @@ export function listAllocatableRootItems(items: OrderItem[] | undefined): OrderI
   )
 }
 
+/** 已分配且未发货的根行，用于商品级撤回勾选 */
+export function listRevokableRootItems(items: OrderItem[] | undefined): OrderItem[] {
+  return listOrderRootItems(items).filter(
+    (it) =>
+      !itemRefundBadge(it) &&
+      (it.quantity || 0) > 0 &&
+      !!(it.allocType || '').trim() &&
+      (it.shipStatus || '') !== 'shipped',
+  )
+}
+
 /** 详情用：根行 + └ 拆分子行（整单拆分单独分组） */
 export function buildItemTreeRows(items: OrderItem[] | undefined): ItemTreeRow[] {
   if (!items?.length) return []
