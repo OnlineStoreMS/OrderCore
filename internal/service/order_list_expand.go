@@ -25,6 +25,7 @@ func ExpandOrdersByPackages(list []model.Order) []model.Order {
 				if sys != "" {
 					row.PlatformSysTid = sys
 				}
+				applyPackageRemarks(&row, pkgs[0])
 				applyPackageRowHeader(&row, pkgs[0], row.Items)
 			} else if row.ListRowKey == "" {
 				row.ListRowKey = fmt.Sprintf("%d", o.ID)
@@ -59,12 +60,7 @@ func ExpandOrdersByPackages(list []model.Order) []model.Order {
 			sys := strings.TrimSpace(p.PlatformSysTid)
 			row.PlatformSysTid = sys
 			row.ListRowKey = fmt.Sprintf("%d:pkg:%s", o.ID, sys)
-			if fen := strings.TrimSpace(p.FenFaRemark); fen != "" {
-				row.FenFaRemark = fen
-			}
-			if printer := strings.TrimSpace(p.PrinterRemark); printer != "" {
-				row.PrinterRemark = printer
-			}
+			applyPackageRemarks(&row, p)
 			row.Packages = []model.OrderPackage{p}
 			row.Items = pr.items
 			applyPackageRowHeader(&row, p, row.Items)
@@ -95,6 +91,15 @@ func filterItemsForPackage(all []model.OrderItem, p model.OrderPackage) []model.
 		}
 	}
 	return out
+}
+
+// applyPackageRemarks 按包裹覆盖分发/打单备注；空字符串表示本包无备注，不得继承头表。
+func applyPackageRemarks(row *model.Order, p model.OrderPackage) {
+	if row == nil {
+		return
+	}
+	row.FenFaRemark = strings.TrimSpace(p.FenFaRemark)
+	row.PrinterRemark = strings.TrimSpace(p.PrinterRemark)
 }
 
 func applyPackageRowHeader(row *model.Order, p model.OrderPackage, items []model.OrderItem) {
@@ -180,9 +185,7 @@ func ExpandOrdersByAllocGroups(list []model.Order) []model.Order {
 						row.Packages = []model.OrderPackage{p}
 						row.PlatformSysTid = p.PlatformSysTid
 						row.ListRowKey = fmt.Sprintf("%d:pkg:%s", o.ID, strings.TrimSpace(p.PlatformSysTid))
-						if fen := strings.TrimSpace(p.FenFaRemark); fen != "" {
-							row.FenFaRemark = fen
-						}
+						applyPackageRemarks(&row, p)
 						break
 					}
 				}
@@ -380,12 +383,8 @@ func ScopeOrderBySysTid(o *model.Order, sysTid string) *model.Order {
 	scoped.PlatformSysTid = pkg.PlatformSysTid
 	scoped.Packages = []model.OrderPackage{*pkg}
 	scoped.SiblingPackages = siblings
-	if fen := strings.TrimSpace(pkg.FenFaRemark); fen != "" {
-		scoped.FenFaRemark = fen
-	}
-	if pr := strings.TrimSpace(pkg.PrinterRemark); pr != "" {
-		scoped.PrinterRemark = pr
-	}
+	// 必须用本包备注覆盖头表（空也要清空），否则渠道包会误显示厂家包的 151
+	applyPackageRemarks(&scoped, *pkg)
 	scoped.Items = filterItemsForPackage(o.Items, *pkg)
 	rootIDs := map[uint64]struct{}{}
 	for _, it := range scoped.Items {

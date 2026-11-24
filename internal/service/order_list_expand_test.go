@@ -148,6 +148,38 @@ func TestExpandOrdersByPackagesSingle(t *testing.T) {
 	}
 }
 
+func TestExpandOrdersByPackagesFenFaPerPackage(t *testing.T) {
+	list := []model.Order{{
+		ID: 4756, OrderNo: "OC202609260019", FenFaRemark: "151", // 头表常带主包备注
+		Packages: []model.OrderPackage{
+			{ID: 72, PlatformSysTid: "17024577723475545656", FenFaRemark: "151", IsPrimary: true},
+			{ID: 73, PlatformSysTid: "16258975922727533408", FenFaRemark: "", IsPrimary: false},
+		},
+		Items: []model.OrderItem{
+			{ID: 1, PackageID: 72, ProductName: "碟片", AllocType: model.AllocDropship, DropshipMode: model.DropshipKDZSFactory, Quantity: 1},
+			{ID: 2, PackageID: 73, ProductName: "曲柄", AllocType: model.AllocChannelShip, Quantity: 1},
+		},
+	}}
+	out := ExpandOrdersByPackages(list)
+	if len(out) != 2 {
+		t.Fatalf("len=%d", len(out))
+	}
+	bySys := map[string]model.Order{}
+	for _, row := range out {
+		bySys[row.PlatformSysTid] = row
+	}
+	if bySys["17024577723475545656"].FenFaRemark != "151" {
+		t.Fatalf("factory fenFa=%q", bySys["17024577723475545656"].FenFaRemark)
+	}
+	if bySys["16258975922727533408"].FenFaRemark != "" {
+		t.Fatalf("channel fenFa should be empty, got %q", bySys["16258975922727533408"].FenFaRemark)
+	}
+	scoped := ScopeOrderBySysTid(&list[0], "16258975922727533408")
+	if scoped.FenFaRemark != "" {
+		t.Fatalf("scoped channel fenFa=%q", scoped.FenFaRemark)
+	}
+}
+
 func TestExpandOrdersByPackagesSkipsEmptyPkg(t *testing.T) {
 	list := []model.Order{{
 		ID: 7021, OrderNo: "OC202611110046",
