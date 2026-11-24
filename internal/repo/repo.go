@@ -750,16 +750,11 @@ func (r *Repos) UpsertOrderPackage(pkg *model.OrderPackage) error {
 		"updated_at":           time.Now(),
 	}
 	if pkg.MailNo != "" {
-		var n int64
+		// 同单其它包裹若错挂了本包运单号：清掉后归本包（剩下法纠偏）
 		_ = r.db.Model(&model.OrderPackage{}).
 			Where("tenant_id = ? AND order_id = ? AND id <> ? AND mail_no = ?", pkg.TenantID, targetOrderID, existing.ID, pkg.MailNo).
-			Count(&n).Error
-		if n == 0 {
-			fields["mail_no"] = pkg.MailNo
-		} else if strings.TrimSpace(existing.MailNo) == pkg.MailNo || strings.TrimSpace(existing.MailNo) == "" {
-			// 同单其它包裹已占该运单号：本包裹不共享（混单自营/代发串号）
-			fields["mail_no"] = ""
-		}
+			Updates(map[string]any{"mail_no": "", "updated_at": time.Now()}).Error
+		fields["mail_no"] = pkg.MailNo
 	}
 	if pkg.IsPrimary {
 		fields["is_primary"] = true
@@ -1168,6 +1163,24 @@ func (r *Repos) UpdateShipment(s *model.OrderShipment) error {
 func (r *Repos) DeleteShipmentItemsByShipmentID(tenantID, shipmentID uint64) error {
 	return r.db.Where("tenant_id = ? AND shipment_id = ?", tenantID, shipmentID).
 		Delete(&model.OrderShipmentItem{}).Error
+}
+
+// DeleteKDZSSyncedShipmentItemsForItemsExcept 拆掉商品在其它「助手同步」运单上的错挂（保留 keepExpressNo）。
+func (r *Repos) DeleteKDZSSyncedShipmentItemsForItemsExcept(tenantID, orderID uint64, itemIDs []uint64, keepExpressNo string) error {
+	if len(itemIDs) == 0 {
+		return nil
+	}
+	keepExpressNo = strings.TrimSpace(keepExpressNo)
+	q := r.db.Exec(`
+		DELETE FROM order_shipment_items si
+		USING order_shipments s
+		WHERE si.shipment_id = s.id
+		  AND si.tenant_id = ? AND si.order_id = ?
+		  AND si.order_item_id IN ?
+		  AND COALESCE(s.callback_message, '') = ?
+		  AND (? = '' OR s.express_no <> ?)`,
+		tenantID, orderID, itemIDs, "快递助手同步", keepExpressNo, keepExpressNo)
+	return q.Error
 }
 
 func (r *Repos) DeleteShipmentByID(tenantID, shipmentID uint64) error {

@@ -467,6 +467,15 @@ async function batchRevoke() {
   })
 }
 
+function goDetail(row: Order) {
+  const sysTid = (row.platformSysTid || '').trim()
+  if (sysTid) {
+    router.push({ path: `/orders/${row.id}`, query: { sysTid } })
+    return
+  }
+  router.push(`/orders/${row.id}`)
+}
+
 onMounted(load)
 </script>
 
@@ -707,7 +716,7 @@ onMounted(load)
       </el-table-column>
       <el-table-column label="操作" width="120" fixed="right">
         <template #default="{ row }">
-          <el-button type="primary" link @click="router.push(`/orders/${row.id}`)">去处理</el-button>
+          <el-button type="primary" link @click="goDetail(row)">去处理</el-button>
           <div v-if="row.shipEntryLocked" class="lock-tip">已锁发货</div>
         </template>
       </el-table-column>

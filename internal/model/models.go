@@ -160,8 +160,10 @@ type Order struct {
 	Packages   []OrderPackage   `gorm:"foreignKey:OrderID" json:"packages,omitempty"`
 	StatusLogs []OrderStatusLog `gorm:"foreignKey:OrderID" json:"statusLogs,omitempty"`
 
-	// ListRowKey 列表展开行唯一键（同 OC 按分配组拆多行时使用；非持久化）
+	// ListRowKey 列表展开行唯一键（同 OC 按分配组/包裹拆多行时使用；非持久化）
 	ListRowKey string `gorm:"-" json:"listRowKey,omitempty"`
+	// SiblingPackages 单包详情时其它包裹（供切换系统编号；非持久化）
+	SiblingPackages []OrderPackage `gorm:"-" json:"siblingPackages,omitempty"`
 }
 
 func (Order) TableName() string { return "orders" }

@@ -45,6 +45,13 @@ const order = ref<Order | null>(null)
 const decrypting = ref(false)
 const decryptingPhone = ref(false)
 
+const scopeSysTid = computed(() => {
+  const raw = route.query.sysTid
+  return typeof raw === 'string' ? raw.trim() : ''
+})
+
+const siblingPackages = computed(() => order.value?.siblingPackages || [])
+
 const canDecrypt = computed(() => {
   const o = order.value
   return !!o && o.sourceChannel === 'kdzs' && !!o.platformSysTid
@@ -66,8 +73,8 @@ async function onDecrypt() {
   if (!order.value || !canDecrypt.value) return
   decrypting.value = true
   try {
-    const data = await decryptOrders([order.value.id])
-    if (data.items?.[0]) order.value = data.items[0]
+    await decryptOrders([order.value.id])
+    await load()
     ElMessage.success('解密成功')
   } catch (e: any) {
     ElMessage.error(e.message || '解密失败')
@@ -80,8 +87,8 @@ async function onDecryptPhone() {
   if (!order.value || !canDecryptPhone.value) return
   decryptingPhone.value = true
   try {
-    const updated = await decryptRealPhone(order.value.id)
-    order.value = updated
+    await decryptRealPhone(order.value.id)
+    await load()
     ElMessage.success('真实手机号解密成功')
   } catch (e: any) {
     ElMessage.error(e.message || '解密真实手机号失败')
@@ -324,7 +331,15 @@ const bindingHint = computed(() => {
 async function load() {
   loading.value = true
   try {
-    order.value = await getOrder(id)
+    const opts = scopeSysTid.value ? { sysTid: scopeSysTid.value } : undefined
+    order.value = await getOrder(id, opts)
+    // 多包默认主包：若 URL 无 sysTid，用返回的本包 sysTid 写回地址栏，便于分享/刷新
+    if (!scopeSysTid.value && order.value?.platformSysTid && (order.value.siblingPackages?.length || 0) > 0) {
+      await router.replace({
+        path: route.path,
+        query: { ...route.query, sysTid: order.value.platformSysTid },
+      })
+    }
     syncRemarkForm(order.value)
   } catch (e: any) {
     ElMessage.error(e.message || '加载失败')
@@ -332,6 +347,18 @@ async function load() {
     loading.value = false
   }
 }
+
+function switchSysTid(sysTid: string) {
+  if (!sysTid || sysTid === scopeSysTid.value) return
+  void router.push({ path: route.path, query: { ...route.query, sysTid } })
+}
+
+watch(
+  () => [route.params.id, route.query.sysTid] as const,
+  () => {
+    void load()
+  },
+)
 
 function onSellerFlagChange(v: number | null) {
   remarkForm.sellerFlag = v ?? 0
@@ -551,15 +578,23 @@ onMounted(load)
         <el-descriptions-item label="系统编号" :span="2">
           <template v-if="order.packages?.length">
             <div v-for="p in order.packages" :key="p.id" class="sys-tid-row">
-              <el-tag v-if="p.isPrimary" size="small" type="success">主包</el-tag>
-              <el-tag v-else size="small" type="info">次包</el-tag>
               <code class="sys-tid">{{ p.platformSysTid }}</code>
               <span v-if="p.mailNo" class="muted"> · {{ p.mailNo }}</span>
               <span v-if="p.platformStatusText" class="muted"> · {{ p.platformStatusText }}</span>
-              <span v-if="p.fenFaRemark" class="muted"> · 分发 {{ p.fenFaRemark }}</span>
             </div>
           </template>
           <template v-else>{{ order.platformSysTid || '-' }}</template>
+          <div v-if="siblingPackages.length" class="sibling-pkgs">
+            <span class="muted">同平台单其它系统编号：</span>
+            <el-button
+              v-for="p in siblingPackages"
+              :key="p.id"
+              link
+              type="primary"
+              size="small"
+              @click="switchSysTid(p.platformSysTid)"
+            >{{ p.platformSysTid }}</el-button>
+          </div>
         </el-descriptions-item>
         <el-descriptions-item label="履约状态">{{ labelStatus(order.status) }}</el-descriptions-item>
         <el-descriptions-item label="发货状态">{{ labelShipStatus(order.shipStatus) }}</el-descriptions-item>
@@ -860,6 +895,7 @@ h3 { margin: 8px 0 0; font-size: 15px; color: #334155; }
 .hint { margin-left: 10px; color: #94a3b8; font-size: 12px; }
 .muted { color: #94a3b8; font-size: 12px; }
 .sys-tid-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 2px 0; }
+.sibling-pkgs { margin-top: 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .sys-tid { font-size: 12px; color: #334155; word-break: break-all; }
 .split-child { color: #475569; }
 .split-prefix { color: #8f959e; }

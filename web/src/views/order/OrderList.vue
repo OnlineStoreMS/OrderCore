@@ -197,6 +197,15 @@ async function load() {
   }
 }
 
+function goDetail(row: Order) {
+  const sysTid = (row.platformSysTid || '').trim()
+  if (sysTid) {
+    router.push({ path: `/orders/${row.id}`, query: { sysTid } })
+    return
+  }
+  router.push(`/orders/${row.id}`)
+}
+
 function onFilterChange() {
   filters.page = 1
   load()
@@ -507,7 +516,7 @@ async function copyOrderText(order: Order, ev?: Event) {
           <div
             v-if="listOrderRootItems(row.items).length"
             class="goods-list goods-link"
-            @click="router.push(`/orders/${row.id}`)"
+            @click="goDetail(row)"
           >
             <div
               v-for="(it, idx) in listOrderRootItems(row.items)"
@@ -543,7 +552,7 @@ async function copyOrderText(order: Order, ev?: Event) {
           <span
             v-else
             class="goods-link"
-            @click="router.push(`/orders/${row.id}`)"
+            @click="goDetail(row)"
           >-</span>
         </template>
       </el-table-column>

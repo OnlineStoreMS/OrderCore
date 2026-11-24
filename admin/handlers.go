@@ -182,16 +182,8 @@ func (h *Handlers) ListOrders(c *gin.Context) {
 			}
 		}
 	}
-	// 按单号精确检索：多系统编号拆成多行（与快递助手「一 tid 多包」列表一致）
-	if orderLookup && len(list) > 0 {
-		before := len(list)
-		list = service.ExpandOrdersByPackages(list)
-		if int64(before) == total {
-			total = int64(len(list))
-		} else if len(list) > before {
-			total += int64(len(list) - before)
-		}
-	}
+	// 列表拆行已在 OrderService.List（多包按 sysTid / 否则按分配组）完成
+	_ = orderLookup
 	response.OK(c, response.PageResult(list, total, page, pageSize))
 }
 
@@ -201,7 +193,14 @@ func (h *Handlers) GetOrder(c *gin.Context) {
 		response.Fail(c, http.StatusBadRequest, "无效 ID")
 		return
 	}
-	o, err := h.orders.Get(authcontext.TenantID(c), id)
+	sysTid := strings.TrimSpace(c.Query("sysTid"))
+	var packageID uint64
+	if raw := strings.TrimSpace(c.Query("packageId")); raw != "" {
+		if v, e := strconv.ParseUint(raw, 10, 64); e == nil {
+			packageID = v
+		}
+	}
+	o, err := h.orders.GetScoped(authcontext.TenantID(c), id, sysTid, packageID)
 	if err != nil {
 		response.Fail(c, http.StatusNotFound, "订单不存在")
 		return

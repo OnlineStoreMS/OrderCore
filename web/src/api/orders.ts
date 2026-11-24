@@ -83,8 +83,10 @@ export interface Order {
   platformOrderId?: string
   platformSysTid?: string
   splitFromOrderId?: number
-  /** 列表按分配组拆行时的唯一键 */
+  /** 列表按分配组/包裹拆行时的唯一键 */
   listRowKey?: string
+  /** 单包详情时其它包裹（切换系统编号） */
+  siblingPackages?: OrderPackage[]
   shopId?: string
   shopName?: string
   manualSourceId?: number
@@ -475,8 +477,11 @@ export async function listOrders(params: Record<string, unknown>) {
   return unwrap<PageData<Order>>(await client.get('/orders', { params }))
 }
 
-export async function getOrder(id: number) {
-  return unwrap<Order>(await client.get(`/orders/${id}`))
+export async function getOrder(id: number, opts?: { sysTid?: string; packageId?: number }) {
+  const params: Record<string, string | number> = {}
+  if (opts?.sysTid) params.sysTid = opts.sysTid
+  if (opts?.packageId) params.packageId = opts.packageId
+  return unwrap<Order>(await client.get(`/orders/${id}`, { params }))
 }
 
 export async function createManualOrder(body: Record<string, unknown>) {

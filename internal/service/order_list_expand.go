@@ -7,8 +7,8 @@ import (
 	"ordercore/internal/model"
 )
 
-// ExpandOrdersByPackages 按快递助手系统编号展开列表行：一 tid 多包时搜订单号命中多行（与助手列表一致）。
-// 同一 OC 仍共享 id，详情仍进同一张单。
+// ExpandOrdersByPackages 按快递助手系统编号展开列表行：一 tid 多包时拆成多行。
+// 同一 OC 仍共享 id；详情用 ?sysTid= 进入单包视图。
 func ExpandOrdersByPackages(list []model.Order) []model.Order {
 	if len(list) == 0 {
 		return list
@@ -18,38 +18,98 @@ func ExpandOrdersByPackages(list []model.Order) []model.Order {
 		o := list[i]
 		pkgs := o.Packages
 		if len(pkgs) <= 1 {
-			out = append(out, o)
+			row := o
+			if len(pkgs) == 1 {
+				sys := strings.TrimSpace(pkgs[0].PlatformSysTid)
+				row.ListRowKey = fmt.Sprintf("%d:pkg:%s", o.ID, sys)
+				if sys != "" {
+					row.PlatformSysTid = sys
+				}
+				applyPackageRowHeader(&row, pkgs[0], row.Items)
+			} else if row.ListRowKey == "" {
+				row.ListRowKey = fmt.Sprintf("%d", o.ID)
+			}
+			out = append(out, row)
 			continue
 		}
 		for _, p := range pkgs {
 			row := o
-			row.PlatformSysTid = p.PlatformSysTid
+			sys := strings.TrimSpace(p.PlatformSysTid)
+			row.PlatformSysTid = sys
+			row.ListRowKey = fmt.Sprintf("%d:pkg:%s", o.ID, sys)
 			if fen := strings.TrimSpace(p.FenFaRemark); fen != "" {
 				row.FenFaRemark = fen
 			}
-			row.Packages = []model.OrderPackage{p}
-			items := make([]model.OrderItem, 0, len(o.Items))
-			for _, it := range o.Items {
-				if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
-					continue
-				}
-				if it.PackageID == p.ID || (it.PackageID == 0 && p.IsPrimary) {
-					items = append(items, it)
-				}
+			if pr := strings.TrimSpace(p.PrinterRemark); pr != "" {
+				row.PrinterRemark = pr
 			}
+			row.Packages = []model.OrderPackage{p}
+			items := filterItemsForPackage(o.Items, p)
 			if len(items) > 0 {
 				row.Items = items
 			} else {
-				row.Items = o.Items
+				// 未绑包商品时仍展示空行商品，避免整单混入
+				row.Items = nil
 			}
-			// 行级角标：该包统一履约则盖到头表，便于列表一眼区分自营/代发
-			if at := uniformItemAlloc(items); at != "" {
-				row.AllocType = at
-			}
+			applyPackageRowHeader(&row, p, row.Items)
 			out = append(out, row)
 		}
 	}
 	return out
+}
+
+func filterItemsForPackage(all []model.OrderItem, p model.OrderPackage) []model.OrderItem {
+	rootIDs := map[uint64]struct{}{}
+	out := make([]model.OrderItem, 0, len(all))
+	for _, it := range all {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		if it.PackageID == p.ID || (it.PackageID == 0 && p.IsPrimary) {
+			out = append(out, it)
+			rootIDs[it.ID] = struct{}{}
+		}
+	}
+	for _, it := range all {
+		if it.ParentOrderItemID == 0 {
+			continue
+		}
+		if _, ok := rootIDs[it.ParentOrderItemID]; ok {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+func applyPackageRowHeader(row *model.Order, p model.OrderPackage, items []model.OrderItem) {
+	if row == nil {
+		return
+	}
+	roots := make([]model.OrderItem, 0, len(items))
+	for _, it := range items {
+		if strings.TrimSpace(it.SplitKind) != "" || it.ParentOrderItemID > 0 {
+			continue
+		}
+		roots = append(roots, it)
+	}
+	if len(roots) == 0 {
+		return
+	}
+	// 未分配 / 已分配混在同一包时按分配组头逻辑取统一值；否则用第一行
+	key := allocGroupKey(roots[0])
+	uniform := true
+	for _, it := range roots[1:] {
+		if allocGroupKey(it) != key {
+			uniform = false
+			break
+		}
+	}
+	if uniform {
+		applyAllocGroupHeader(row, key, roots)
+	} else if at := uniformItemAlloc(roots); at != "" {
+		row.AllocType = at
+	}
+	_ = p
 }
 
 // ExpandOrdersByAllocGroups 按商品分配组拆列表行：未分配 / 不同自营代发组合各占一行。
@@ -82,9 +142,11 @@ func ExpandOrdersByAllocGroups(list []model.Order) []model.Order {
 		if len(groups) <= 1 {
 			row := o
 			if len(groups) == 1 {
-				row.ListRowKey = fmt.Sprintf("%d:%s", o.ID, groups[0].key)
+				if row.ListRowKey == "" {
+					row.ListRowKey = fmt.Sprintf("%d:%s", o.ID, groups[0].key)
+				}
 				applyAllocGroupHeader(&row, groups[0].key, groups[0].roots)
-			} else {
+			} else if row.ListRowKey == "" {
 				row.ListRowKey = fmt.Sprintf("%d", o.ID)
 			}
 			out = append(out, row)
@@ -95,8 +157,55 @@ func ExpandOrdersByAllocGroups(list []model.Order) []model.Order {
 			row.ListRowKey = fmt.Sprintf("%d:%s", o.ID, g.key)
 			row.Items = filterItemsForAllocRoots(o.Items, g.roots)
 			applyAllocGroupHeader(&row, g.key, g.roots)
+			// 若组内商品同属一包，带上该包 sysTid 便于详情深链
+			if pkgID := uniformPackageID(g.roots); pkgID > 0 {
+				for _, p := range o.Packages {
+					if p.ID == pkgID {
+						row.Packages = []model.OrderPackage{p}
+						row.PlatformSysTid = p.PlatformSysTid
+						row.ListRowKey = fmt.Sprintf("%d:pkg:%s", o.ID, strings.TrimSpace(p.PlatformSysTid))
+						if fen := strings.TrimSpace(p.FenFaRemark); fen != "" {
+							row.FenFaRemark = fen
+						}
+						break
+					}
+				}
+			}
 			out = append(out, row)
 		}
+	}
+	return out
+}
+
+func uniformPackageID(roots []model.OrderItem) uint64 {
+	if len(roots) == 0 {
+		return 0
+	}
+	id := roots[0].PackageID
+	if id == 0 {
+		return 0
+	}
+	for _, it := range roots[1:] {
+		if it.PackageID != id {
+			return 0
+		}
+	}
+	return id
+}
+
+// ExpandOrdersForList 列表拆行：多包裹优先按系统编号；否则按分配组。
+func ExpandOrdersForList(list []model.Order) []model.Order {
+	if len(list) == 0 {
+		return list
+	}
+	out := make([]model.Order, 0, len(list)*2)
+	for i := range list {
+		o := list[i]
+		if len(o.Packages) > 1 {
+			out = append(out, ExpandOrdersByPackages([]model.Order{o})...)
+			continue
+		}
+		out = append(out, ExpandOrdersByAllocGroups([]model.Order{o})...)
 	}
 	return out
 }
@@ -222,4 +331,264 @@ func uniformItemAlloc(items []model.OrderItem) string {
 		}
 	}
 	return at
+}
+
+// ScopeOrderBySysTid 详情裁剪：只保留指定系统编号包裹及其商品/运单（不写库）。
+func ScopeOrderBySysTid(o *model.Order, sysTid string) *model.Order {
+	if o == nil {
+		return nil
+	}
+	sysTid = strings.TrimSpace(sysTid)
+	if sysTid == "" {
+		return o
+	}
+	var pkg *model.OrderPackage
+	for i := range o.Packages {
+		if strings.TrimSpace(o.Packages[i].PlatformSysTid) == sysTid {
+			p := o.Packages[i]
+			pkg = &p
+			break
+		}
+	}
+	if pkg == nil {
+		return o
+	}
+	siblings := make([]model.OrderPackage, 0, len(o.Packages))
+	for _, p := range o.Packages {
+		if strings.TrimSpace(p.PlatformSysTid) == sysTid {
+			continue
+		}
+		siblings = append(siblings, p)
+	}
+	scoped := *o
+	scoped.PlatformSysTid = pkg.PlatformSysTid
+	scoped.Packages = []model.OrderPackage{*pkg}
+	scoped.SiblingPackages = siblings
+	if fen := strings.TrimSpace(pkg.FenFaRemark); fen != "" {
+		scoped.FenFaRemark = fen
+	}
+	if pr := strings.TrimSpace(pkg.PrinterRemark); pr != "" {
+		scoped.PrinterRemark = pr
+	}
+	scoped.Items = filterItemsForPackage(o.Items, *pkg)
+	rootIDs := map[uint64]struct{}{}
+	for _, it := range scoped.Items {
+		if it.ParentOrderItemID == 0 && strings.TrimSpace(it.SplitKind) == "" {
+			rootIDs[it.ID] = struct{}{}
+		}
+	}
+	applyPackageRowHeader(&scoped, *pkg, scoped.Items)
+	// 本包商品金额（展示用）
+	var pay float64
+	for _, it := range scoped.Items {
+		if _, ok := rootIDs[it.ID]; !ok {
+			continue
+		}
+		if it.TotalAmount > 0 {
+			pay += it.TotalAmount
+		} else {
+			pay += it.Price * float64(maxInt(it.Quantity, 1))
+		}
+	}
+	if pay > 0 {
+		scoped.PayAmount = roundMoney(pay)
+		scoped.TotalAmount = scoped.PayAmount
+	}
+	mail := strings.TrimSpace(pkg.MailNo)
+	shipments := make([]model.OrderShipment, 0, len(o.Shipments))
+	for _, sh := range o.Shipments {
+		keep := false
+		if mail != "" && strings.TrimSpace(sh.ExpressNo) == mail {
+			keep = true
+		}
+		if !keep {
+			for _, sit := range sh.Items {
+				if _, ok := rootIDs[sit.OrderItemID]; ok {
+					keep = true
+					break
+				}
+			}
+		}
+		if keep {
+			shipments = append(shipments, sh)
+		}
+	}
+	scoped.Shipments = shipments
+	scoped.StatusLogs = filterStatusLogsForPackage(o, *pkg, scoped.Items)
+	scoped.ListRowKey = fmt.Sprintf("%d:pkg:%s", o.ID, sysTid)
+	return &scoped
+}
+
+// ScopeOrderByPackageID 按包裹 id 裁剪详情。
+func ScopeOrderByPackageID(o *model.Order, packageID uint64) *model.Order {
+	if o == nil || packageID == 0 {
+		return o
+	}
+	for _, p := range o.Packages {
+		if p.ID == packageID {
+			return ScopeOrderBySysTid(o, p.PlatformSysTid)
+		}
+	}
+	return o
+}
+
+// filterStatusLogsForPackage 按本包运单/采购单/商品线索裁剪状态流水。
+// 明确指向其他包裹的日志剔除；无包裹线索的整单生命周期日志两端都保留。
+func filterStatusLogsForPackage(o *model.Order, pkg model.OrderPackage, items []model.OrderItem) []model.OrderStatusLog {
+	if o == nil || len(o.StatusLogs) == 0 {
+		if o == nil {
+			return nil
+		}
+		return o.StatusLogs
+	}
+	own := collectPackageLogTokens(pkg, items)
+	other := map[string]struct{}{}
+	sys := strings.TrimSpace(pkg.PlatformSysTid)
+	for _, p := range o.Packages {
+		if strings.TrimSpace(p.PlatformSysTid) == sys {
+			continue
+		}
+		for t := range collectPackageLogTokens(p, filterItemsForPackage(o.Items, p)) {
+			if _, mine := own[t]; mine {
+				continue
+			}
+			other[t] = struct{}{}
+		}
+	}
+	if len(own) == 0 && len(other) == 0 {
+		return o.StatusLogs
+	}
+	out := make([]model.OrderStatusLog, 0, len(o.StatusLogs))
+	for _, lg := range o.StatusLogs {
+		text := strings.ToLower(strings.TrimSpace(lg.Remark + " " + lg.Action))
+		hitsOwn := tokenHits(text, own)
+		hitsOther := tokenHits(text, other)
+		if hitsOther && !hitsOwn {
+			continue
+		}
+		out = append(out, lg)
+	}
+	return out
+}
+
+func collectPackageLogTokens(pkg model.OrderPackage, items []model.OrderItem) map[string]struct{} {
+	out := map[string]struct{}{}
+	add := func(s string) {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" || len([]rune(s)) < 2 {
+			return
+		}
+		out[s] = struct{}{}
+	}
+	add(pkg.PlatformSysTid)
+	add(pkg.MailNo)
+	add("systid=" + strings.TrimSpace(pkg.PlatformSysTid))
+	for _, it := range items {
+		add(it.PurchaseOrderID)
+		add(it.SelfOrderNo)
+		add(it.SupplierName)
+		add(it.FactoryName)
+		add(it.FactoryID)
+		add(it.PlatformOid)
+		addSkuSpecTokens(add, it.SkuSpecs)
+		// 商品名过长时取 sku 规格已够；短名仍收录便于人工备注命中
+		name := strings.TrimSpace(it.ProductName)
+		if name != "" {
+			runes := []rune(name)
+			if len(runes) <= 24 {
+				add(name)
+			}
+		}
+	}
+	return out
+}
+
+// addSkuSpecTokens 收录完整规格及常见前缀（插销+卡簧*2副 → 插销+卡簧；MT900-160mm → MT900）。
+func addSkuSpecTokens(add func(string), sku string) {
+	sku = strings.TrimSpace(sku)
+	if sku == "" {
+		return
+	}
+	add(sku)
+	cut := len(sku)
+	for _, sep := range []string{"*", "（", "(", " "} {
+		if i := strings.Index(sku, sep); i > 0 && i < cut {
+			cut = i
+		}
+	}
+	head := strings.TrimSpace(sku[:cut])
+	if head != "" && head != sku {
+		add(head)
+	}
+	if i := strings.Index(head, "-"); i >= 2 {
+		add(strings.TrimSpace(head[:i]))
+	}
+}
+
+func tokenHits(text string, tokens map[string]struct{}) bool {
+	if text == "" || len(tokens) == 0 {
+		return false
+	}
+	for t := range tokens {
+		if strings.Contains(text, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// sysTidsForItemIDs 从内存包裹解析商品所属系统编号（写流水备注用）。
+func sysTidsForItemIDs(o *model.Order, itemIDs []uint64) []string {
+	if o == nil || len(itemIDs) == 0 || len(o.Packages) == 0 {
+		return nil
+	}
+	want := map[uint64]struct{}{}
+	for _, id := range itemIDs {
+		if id > 0 {
+			want[id] = struct{}{}
+		}
+	}
+	pkgWant := map[uint64]struct{}{}
+	for _, it := range o.Items {
+		if _, ok := want[it.ID]; !ok {
+			continue
+		}
+		if it.PackageID > 0 {
+			pkgWant[it.PackageID] = struct{}{}
+		}
+	}
+	if len(pkgWant) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(pkgWant))
+	for _, p := range o.Packages {
+		if _, ok := pkgWant[p.ID]; !ok {
+			continue
+		}
+		sys := strings.TrimSpace(p.PlatformSysTid)
+		if sys == "" {
+			continue
+		}
+		if _, ok := seen[sys]; ok {
+			continue
+		}
+		seen[sys] = struct{}{}
+		out = append(out, sys)
+	}
+	return out
+}
+
+func formatSysTidRemarkHint(sysTids []string) string {
+	if len(sysTids) == 0 {
+		return ""
+	}
+	return " sysTid=" + strings.Join(sysTids, ",")
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

@@ -174,24 +174,24 @@ func (s *OrderService) List(tenantID uint64, q repo.OrderListQuery) ([]model.Ord
 		}
 		list = out
 	}
-	// 分配页：按商品分配组拆行，待分配/已分配各自只展示对应商品
+	// 列表拆行：多包裹按系统编号；否则按分配组。分配 Tab 再按待分配/已分配过滤。
 	allocTab := ""
 	if len(q.Statuses) == 1 {
 		allocTab = strings.TrimSpace(q.Statuses[0])
 	} else if strings.TrimSpace(q.Status) != "" {
 		allocTab = strings.TrimSpace(q.Status)
 	}
+	before := len(list)
+	list = ExpandOrdersForList(list)
 	if allocTab == model.StatusPendingAlloc || allocTab == model.StatusAllocated {
-		before := len(list)
-		list = ExpandOrdersByAllocGroups(list)
 		list = FilterAllocGroupRowsForTab(list, allocTab)
-		if int64(before) == total {
-			total = int64(len(list))
-		} else if len(list) > before {
-			total += int64(len(list) - before)
-		} else if before > len(list) && total >= int64(before-len(list)) {
-			total -= int64(before - len(list))
-		}
+	}
+	if int64(before) == total {
+		total = int64(len(list))
+	} else if len(list) > before {
+		total += int64(len(list) - before)
+	} else if before > len(list) && total >= int64(before-len(list)) {
+		total -= int64(before - len(list))
 	}
 	return list, total, nil
 }
@@ -254,11 +254,33 @@ func (s *OrderService) LookupOrderSummaries(tenantID uint64, orderNos []string) 
 }
 
 func (s *OrderService) Get(tenantID, id uint64) (*model.Order, error) {
+	return s.GetScoped(tenantID, id, "", 0)
+}
+
+// GetScoped 订单详情；sysTid/packageID 非空时裁剪为单包视图（展示用，不写库）。
+func (s *OrderService) GetScoped(tenantID, id uint64, sysTid string, packageID uint64) (*model.Order, error) {
 	o, err := s.repos.GetOrder(tenantID, id)
 	if err != nil {
 		return nil, err
 	}
 	hydrateOrderPackageRemarks(o)
+	sysTid = strings.TrimSpace(sysTid)
+	if packageID > 0 {
+		o = ScopeOrderByPackageID(o, packageID)
+	} else if sysTid != "" {
+		o = ScopeOrderBySysTid(o, sysTid)
+	} else if len(o.Packages) > 1 {
+		// 多包未指定：默认主包，避免详情再次混成整单
+		for _, p := range o.Packages {
+			if p.IsPrimary {
+				o = ScopeOrderBySysTid(o, p.PlatformSysTid)
+				break
+			}
+		}
+		if len(o.Packages) > 1 {
+			o = ScopeOrderBySysTid(o, o.Packages[0].PlatformSysTid)
+		}
+	}
 	return o, nil
 }
 
@@ -1761,7 +1783,7 @@ func (s *OrderService) Allocate(ctx context.Context, tenantID, operatorID uint64
 			FromStatus: from,
 			ToStatus:   nextStatus,
 			Action:     "allocate",
-			Remark:     fmt.Sprintf("%s/%s kdzs=%s po=%s items=%d %s", allocType, dropshipMode, kdzsAction, purchaseOrderID, len(selectedItemIDs), req.Remark),
+			Remark:     fmt.Sprintf("%s/%s kdzs=%s po=%s items=%d %s%s", allocType, dropshipMode, kdzsAction, purchaseOrderID, len(selectedItemIDs), req.Remark, formatSysTidRemarkHint(sysTidsForItemIDs(o, selectedItemIDs))),
 			OperatorID: operatorID,
 		})
 	})
@@ -3615,6 +3637,7 @@ func (s *OrderService) RevokeAllocate(ctx context.Context, tenantID, operatorID,
 		if kdzsRemark != "" {
 			remark = remark + " " + kdzsRemark
 		}
+		remark = remark + formatSysTidRemarkHint(sysTidsForItemIDs(o, targetIDs))
 		return tx.TransitionOrder(tenantID, orderID, fields, &model.OrderStatusLog{
 			FromStatus: from,
 			ToStatus:   toStatus,
@@ -3857,9 +3880,10 @@ func (s *OrderService) upsertOrderPackageFromIngest(tenantID uint64, o *model.Or
 	if sysTid == "" {
 		return
 	}
-	mailNo := strings.TrimSpace(req.ExpressNo)
-	if mailNo == "" && len(req.Logistics) > 0 {
-		mailNo = strings.TrimSpace(req.Logistics[0].ExpressNo)
+	// 剩下法：与 syncIngestLogistics 同一套解析，避免头表 YT 冲掉手动回传
+	mailNo := ""
+	if resolved := resolvePackageLogistics(o, req); len(resolved) > 0 {
+		mailNo = strings.TrimSpace(resolved[0].ExpressNo)
 	}
 	isPrimary := asPrimary
 	if !isPrimary {
@@ -4442,14 +4466,14 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		return nil, fmt.Errorf("订单已关闭")
 	}
 	fullyShipped := o.ShipStatus == model.ShipShipped
+	selfShipOpen := o.AllocType == model.AllocSelfShip &&
+		(o.ShipStatus == model.ShipWaitShip || o.ShipStatus == model.ShipPartialShipped)
 	// 已全部发货仍允许追加运单（一分多包裹）；部分发货按剩余数量继续发
 	if fullyShipped {
 		if strings.TrimSpace(req.ExpressNo) == "" {
 			return nil, fmt.Errorf("物流单号不能为空")
 		}
 	} else {
-		selfShipOpen := o.AllocType == model.AllocSelfShip &&
-			(o.ShipStatus == model.ShipWaitShip || o.ShipStatus == model.ShipPartialShipped)
 		if o.ShipEntryLocked && !selfShipOpen {
 			reason := o.ShipLockReason
 			if reason == "" {
@@ -4460,7 +4484,18 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		if blocked, reason := ecommerceBlocksFulfillment(o.EcommerceStatus, o.EcommerceStatusText, o.AfterSaleStatus, o.AfterSaleStatusText); blocked {
 			return nil, fmt.Errorf("%s", reason)
 		}
-		if o.AllocType == model.AllocDropship && o.DropshipMode == model.DropshipKDZSFactory {
+		if strings.TrimSpace(req.ExpressNo) == "" {
+			return nil, fmt.Errorf("物流单号不能为空")
+		}
+	}
+
+	shipLines, err := s.resolveShipLines(o, req.Items)
+	if err != nil {
+		return nil, err
+	}
+	if !fullyShipped {
+		// 多模式混发：仅当本次发货行全是厂家代发才拦截；头表 mode 可能已滚到厂家
+		if shipLinesAllKDZSFactory(o, shipLines) {
 			return nil, fmt.Errorf("快递助手厂家代发由厂家发货，无需手工填单号")
 		}
 		// 自营已分配且待发货：允许发货中心确认发货（platform_status 可能仍是电商态污染值）
@@ -4470,14 +4505,6 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 		if o.AllocType == "" {
 			return nil, fmt.Errorf("请先完成分配再发货")
 		}
-		if strings.TrimSpace(req.ExpressNo) == "" {
-			return nil, fmt.Errorf("物流单号不能为空")
-		}
-	}
-
-	shipLines, err := s.resolveShipLines(o, req.Items)
-	if err != nil {
-		return nil, err
 	}
 
 	expressNo := strings.TrimSpace(req.ExpressNo)
@@ -4585,7 +4612,11 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 			if remark := strings.TrimSpace(req.Remark); remark != "" {
 				existingSh.Remark = remark
 			}
-			msg, cbErr := s.callbackSource(ctx, o, existingSh, bearerToken)
+			retryIDs := shipmentOrderItemIDs(existingSh)
+			if len(retryIDs) == 0 {
+				retryIDs = shipLineOrderItemIDs(shipLines)
+			}
+			msg, cbErr := s.callbackSource(ctx, o, existingSh, bearerToken, retryIDs)
 			if cbErr != nil {
 				existingSh.CallbackStatus = model.CallbackFailed
 				existingSh.CallbackMessage = truncate(cbErr.Error(), 500)
@@ -4620,7 +4651,7 @@ func (s *OrderService) Ship(ctx context.Context, tenantID, operatorID, orderID u
 	}
 
 	if doCallback {
-		msg, cbErr := s.callbackSource(ctx, o, sh, bearerToken)
+		msg, cbErr := s.callbackSource(ctx, o, sh, bearerToken, shipLineOrderItemIDs(shipLines))
 		if cbErr != nil {
 			sh.CallbackStatus = model.CallbackFailed
 			sh.CallbackMessage = truncate(cbErr.Error(), 500)
@@ -5362,10 +5393,10 @@ func computeShipStatusAfter(o *model.Order, lines []resolvedShipLine) string {
 	return model.ShipWaitShip
 }
 
-func (s *OrderService) callbackSource(ctx context.Context, o *model.Order, sh *model.OrderShipment, token string) (string, error) {
+func (s *OrderService) callbackSource(ctx context.Context, o *model.Order, sh *model.OrderShipment, token string, shipItemIDs []uint64) (string, error) {
 	switch o.SourceChannel {
 	case model.SourceKDZS:
-		return s.callbackKDZSShip(ctx, o, sh, token)
+		return s.callbackKDZSShip(ctx, o, sh, token, shipItemIDs)
 	case model.SourceWXMall:
 		// 预留：微信小程序商城后台接入后实现
 		return "", fmt.Errorf("微信小程序商城物流回传接口待开发")
@@ -5374,7 +5405,7 @@ func (s *OrderService) callbackSource(ctx context.Context, o *model.Order, sh *m
 		if !manualNeedsKDZSShipCallback(o) {
 			return "手工订单未绑定快递助手编号，跳过回传", nil
 		}
-		return s.callbackKDZSShip(ctx, o, sh, token)
+		return s.callbackKDZSShip(ctx, o, sh, token, shipItemIDs)
 	case model.SourceStore:
 		return "门店订单无需平台回传", nil
 	default:
@@ -5399,13 +5430,20 @@ func isNoopShipCallbackMsg(msg string) bool {
 		strings.Contains(msg, "跳过回传")
 }
 
-func (s *OrderService) callbackKDZSShip(ctx context.Context, o *model.Order, sh *model.OrderShipment, token string) (string, error) {
+func (s *OrderService) callbackKDZSShip(ctx context.Context, o *model.Order, sh *model.OrderShipment, token string, shipItemIDs []uint64) (string, error) {
 	if s.storeSync == nil {
 		return "", fmt.Errorf("StoreSyncAgent 未配置")
 	}
 	platform := strings.TrimSpace(o.Platform)
 	if o.SourceChannel == model.SourceManual || isDFHANDPlatform(platform) {
 		platform = "DFHAND"
+	}
+	sysTid, err := resolveShipCallbackSysTid(o, shipItemIDs)
+	if err != nil {
+		return "", err
+	}
+	if sysTid == "" {
+		sysTid = strings.TrimSpace(o.PlatformSysTid)
 	}
 	// 与请求上下文解耦：前端/网关超时取消时，仍尽量把快递助手发货跑完并落库
 	cbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 150*time.Second)
@@ -5414,7 +5452,7 @@ func (s *OrderService) callbackKDZSShip(ctx context.Context, o *model.Order, sh 
 		Platform:       platform,
 		ShopID:         o.ShopID,
 		PlatformTid:    o.PlatformOrderID,
-		PlatformSysTid: o.PlatformSysTid,
+		PlatformSysTid: sysTid,
 		ExpressCompany: sh.ExpressCompany,
 		ExpressNo:      sh.ExpressNo,
 		OrderNo:        o.OrderNo,
@@ -5427,6 +5465,110 @@ func (s *OrderService) callbackKDZSShip(ctx context.Context, o *model.Order, sh 
 		return res.Message, nil
 	}
 	return "已回传 StoreSyncAgent", nil
+}
+
+func shipLineOrderItemIDs(lines []resolvedShipLine) []uint64 {
+	out := make([]uint64, 0, len(lines))
+	for _, l := range lines {
+		if l.OrderItemID > 0 {
+			out = append(out, l.OrderItemID)
+		}
+	}
+	return out
+}
+
+func shipmentOrderItemIDs(sh *model.OrderShipment) []uint64 {
+	if sh == nil {
+		return nil
+	}
+	out := make([]uint64, 0, len(sh.Items))
+	for _, it := range sh.Items {
+		if it.OrderItemID > 0 {
+			out = append(out, it.OrderItemID)
+		}
+	}
+	return out
+}
+
+// resolveShipCallbackSysTid 按发货商品所在包裹取快递助手系统编号（多包混发不能打头表）。
+func resolveShipCallbackSysTid(o *model.Order, shipItemIDs []uint64) (string, error) {
+	if o == nil || len(shipItemIDs) == 0 {
+		return "", nil
+	}
+	want := map[uint64]struct{}{}
+	for _, id := range shipItemIDs {
+		if id > 0 {
+			want[id] = struct{}{}
+		}
+	}
+	if len(want) == 0 {
+		return "", nil
+	}
+	pkgIDs := map[uint64]struct{}{}
+	for _, it := range o.Items {
+		if _, ok := want[it.ID]; !ok {
+			continue
+		}
+		if it.PackageID > 0 {
+			pkgIDs[it.PackageID] = struct{}{}
+		}
+	}
+	if len(pkgIDs) == 0 {
+		return "", nil
+	}
+	seen := map[string]struct{}{}
+	sysTids := make([]string, 0, len(pkgIDs))
+	for _, p := range o.Packages {
+		if _, ok := pkgIDs[p.ID]; !ok {
+			continue
+		}
+		sys := basePlatformSysTid(p.PlatformSysTid)
+		if sys == "" {
+			continue
+		}
+		if _, ok := seen[sys]; ok {
+			continue
+		}
+		seen[sys] = struct{}{}
+		sysTids = append(sysTids, sys)
+	}
+	if len(sysTids) > 1 {
+		return "", fmt.Errorf("一次发货回传不能跨多个快递助手包裹，请按商品分包回传")
+	}
+	if len(sysTids) == 1 {
+		return sysTids[0], nil
+	}
+	return "", nil
+}
+
+func shipLinesAllKDZSFactory(o *model.Order, lines []resolvedShipLine) bool {
+	if o == nil || len(lines) == 0 {
+		return o != nil && o.AllocType == model.AllocDropship && o.DropshipMode == model.DropshipKDZSFactory
+	}
+	byID := map[uint64]model.OrderItem{}
+	for _, it := range o.Items {
+		byID[it.ID] = it
+	}
+	saw := false
+	for _, line := range lines {
+		it, ok := byID[line.OrderItemID]
+		if !ok {
+			continue
+		}
+		saw = true
+		mode := strings.TrimSpace(it.DropshipMode)
+		if mode == "" {
+			mode = strings.TrimSpace(o.DropshipMode)
+		}
+		alloc := strings.TrimSpace(it.AllocType)
+		if alloc == "" {
+			alloc = strings.TrimSpace(o.AllocType)
+		}
+		if !(alloc == model.AllocDropship && mode == model.DropshipKDZSFactory) {
+			return false
+		}
+	}
+	return saw
 }
 
 func expandKDZSTradeStatuses(statuses []string) []string {
@@ -6615,14 +6757,14 @@ func mapTradeToIngest(t storesync.TradeOrder) dto.IngestOrderRequest {
 			ExpressCompany: firstNonEmpty(lg.CompanyName, lg.Company),
 			ExpressCode:    lg.Company,
 			ExpressNo:      no,
-			// 与快递助手界面一致：优先订单级 consignTime/shippedAt；包裹 shipTime 偶发差 1 秒
-			ShippedAt: firstNonEmpty(t.ShippedAt, lg.ShipTime),
+			// 多包裹同主单：必须保留各运单自己的 shipTime，否则 consignTime 盖掉后无法按发货时间区分
+			ShippedAt: firstNonEmpty(lg.ShipTime, t.ShippedAt),
 		})
 	}
 	expressNo := strings.TrimSpace(t.ExpressNo)
 	expressCompany := t.ExpressCompany
 	expressCode := t.ExpressCode
-	// 多运单时对齐 consignTime，避免把同主单其它包裹的旧单号当成「本包主单号」
+	// 多运单时按本包 consignTime/shippedAt 对齐，选出本包主单号（剩下法还会再剔本地已占用）
 	if len(logistics) > 0 {
 		if primary := pickIngestPrimaryLogistics(logistics, t.ShippedAt); primary.ExpressNo != "" {
 			expressNo = primary.ExpressNo
@@ -7993,43 +8135,28 @@ func pickIngestPrimaryLogistics(list []dto.LogisticsInput, shippedAt string) dto
 	return latest
 }
 
-// logisticsForThisPackage 本轮包裹只落本包快递单号。
-// 快递助手同主单多包裹时，详情常带回整单 logisticsInfoList；若全部写入再绑商品，会把其它包裹运单错挂到本包商品。
-func logisticsForThisPackage(req dto.IngestOrderRequest) []dto.LogisticsInput {
-	primary := strings.TrimSpace(req.ExpressNo)
-	if primary != "" {
-		for _, p := range req.Logistics {
-			if strings.TrimSpace(p.ExpressNo) == primary {
-				out := p
-				if strings.TrimSpace(out.ShippedAt) == "" {
-					out.ShippedAt = req.ShippedAt
-				}
-				if strings.TrimSpace(out.ExpressCompany) == "" {
-					out.ExpressCompany = firstNonEmpty(req.ExpressCompany, req.ExpressCode)
-				}
-				return []dto.LogisticsInput{out}
-			}
-		}
-		return []dto.LogisticsInput{{
-			ExpressCompany: firstNonEmpty(req.ExpressCompany, req.ExpressCode),
-			ExpressCode:    req.ExpressCode,
-			ExpressNo:      primary,
-			ShippedAt:      req.ShippedAt,
-		}}
-	}
-	if len(req.Logistics) == 1 {
-		return req.Logistics
-	}
-	return nil
-}
-
 // syncIngestLogistics 把快递助手物流写入 order_shipments（按单号幂等），并关联本轮包裹商品行。
 func syncIngestLogistics(tx *repo.Repos, tenantID, orderID uint64, req dto.IngestOrderRequest) error {
-	pkgs := logisticsForThisPackage(req)
+	order, _ := tx.GetOrder(tenantID, orderID)
+	pkgs := resolvePackageLogistics(order, req)
 	if len(pkgs) == 0 {
 		return nil
 	}
-	order, _ := tx.GetOrder(tenantID, orderID)
+	pkgItemSet := ingestPackageItemIDs(order, req)
+	pkgItemIDs := make([]uint64, 0, len(pkgItemSet))
+	for id := range pkgItemSet {
+		pkgItemIDs = append(pkgItemIDs, id)
+	}
+	keepExpress := strings.TrimSpace(pkgs[0].ExpressNo)
+	if len(pkgItemIDs) > 0 {
+		if err := tx.DeleteKDZSSyncedShipmentItemsForItemsExcept(tenantID, orderID, pkgItemIDs, keepExpress); err != nil {
+			return err
+		}
+		// 刷新订单运单明细，避免后续链接基于脏数据
+		if refreshed, err := tx.GetOrder(tenantID, orderID); err == nil && refreshed != nil {
+			order = refreshed
+		}
+	}
 	for _, p := range pkgs {
 		no := strings.TrimSpace(p.ExpressNo)
 		if no == "" {
@@ -8059,10 +8186,13 @@ func syncIngestLogistics(tx *repo.Repos, tenantID, orderID uint64, req dto.Inges
 					return err
 				}
 			}
-			if len(existing.Items) == 0 {
-				if err := ensureShipmentItemsLinked(tx, tenantID, orderID, existing.ID, order, req, no); err != nil {
-					return err
-				}
+			// 权威占用给其它商品的运单：本包不再补链（避免 YT 再挂到 MT900）
+			pkgItems := ingestPackageItemIDs(order, req)
+			if expressOwnedByOtherAuthoritative(order, no, pkgItems) {
+				continue
+			}
+			if err := ensureShipmentItemsLinked(tx, tenantID, orderID, existing.ID, order, req, no); err != nil {
+				return err
 			}
 			continue
 		}
@@ -8131,6 +8261,10 @@ func resolveIngestShipmentLines(tx *repo.Repos, tenantID uint64, order *model.Or
 		}
 		byID[it.ID] = it
 	}
+	pkgItemSet := ingestPackageItemIDs(order, req)
+	if expressOwnedByOtherAuthoritative(order, expressNo, pkgItemSet) {
+		return nil
+	}
 	ids := filterFulfillableItemIDs(order, matchIngestItemsToOrder(order.Items, req.Items))
 	// 本轮无商品明细时：按包裹 sysTid / 运单号反查挂包商品（跳过退款/取消行）
 	if len(ids) == 0 {
@@ -8141,6 +8275,12 @@ func resolveIngestShipmentLines(tx *repo.Repos, tenantID uint64, order *model.Or
 			}
 		}
 	}
+	if len(ids) == 0 && len(pkgItemSet) > 0 {
+		for id := range pkgItemSet {
+			ids = append(ids, id)
+		}
+		ids = filterFulfillableItemIDs(order, ids)
+	}
 	if len(ids) == 0 && strings.TrimSpace(expressNo) != "" {
 		if pkg, err := tx.FindPackageByMailNo(tenantID, order.ID, expressNo); err == nil && pkg != nil {
 			ids = filterFulfillableItemIDs(order, packageRootItemIDs(order, pkg.ID))
@@ -8150,13 +8290,37 @@ func resolveIngestShipmentLines(tx *repo.Repos, tenantID uint64, order *model.Or
 	if len(ids) == 0 && strings.TrimSpace(expressNo) != "" {
 		ids = soleUncoveredShippedItemIDs(order, nil)
 	}
+	// 有明确本包商品时，禁止把运单挂到其它包裹商品（混发串号）
+	if len(pkgItemSet) > 0 && len(ids) > 0 {
+		filtered := make([]uint64, 0, len(ids))
+		for _, id := range ids {
+			if _, ok := pkgItemSet[id]; ok {
+				filtered = append(filtered, id)
+			}
+		}
+		if len(filtered) > 0 {
+			ids = filtered
+		}
+	}
+	ids = filterItemsCompatibleWithExpress(order, expressNo, ids)
+	// 已有其它权威运单的商品不再被助手运单重复挂上
+	ids = filterItemsWithoutOtherAuthoritativeExpress(order, expressNo, ids)
 	out := make([]resolvedShipLine, 0, len(ids))
 	seen := map[uint64]struct{}{}
+	already := map[uint64]struct{}{}
+	if sh, err := tx.FindShipmentByExpressNo(tenantID, order.ID, expressNo); err == nil && sh != nil {
+		for _, sit := range sh.Items {
+			already[sit.OrderItemID] = struct{}{}
+		}
+	}
 	for _, id := range ids {
 		if _, ok := seen[id]; ok {
 			continue
 		}
 		seen[id] = struct{}{}
+		if _, ok := already[id]; ok {
+			continue
+		}
 		it, ok := byID[id]
 		if !ok || orderItemExcludedFromFulfillment(it) {
 			continue
@@ -8172,6 +8336,38 @@ func resolveIngestShipmentLines(tx *repo.Repos, tenantID uint64, order *model.Or
 			ProductName: it.ProductName,
 			SkuSpecs:    it.SkuSpecs,
 		})
+	}
+	return out
+}
+
+// filterItemsWithoutOtherAuthoritativeExpress 商品已挂其它权威运单时，不再被本助手单号挂上。
+func filterItemsWithoutOtherAuthoritativeExpress(order *model.Order, expressNo string, ids []uint64) []uint64 {
+	expressNo = strings.TrimSpace(expressNo)
+	if order == nil || len(ids) == 0 {
+		return ids
+	}
+	blocked := map[uint64]struct{}{}
+	for _, sh := range order.Shipments {
+		no := strings.TrimSpace(sh.ExpressNo)
+		if no == "" || no == expressNo {
+			continue
+		}
+		if !isAuthoritativeLocalShipment(sh, order) {
+			continue
+		}
+		for _, sit := range sh.Items {
+			blocked[sit.OrderItemID] = struct{}{}
+		}
+	}
+	if len(blocked) == 0 {
+		return ids
+	}
+	out := make([]uint64, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := blocked[id]; ok {
+			continue
+		}
+		out = append(out, id)
 	}
 	return out
 }
@@ -8258,6 +8454,15 @@ func resolveShipmentLinesByExpress(order *model.Order, expressNo string, covered
 	if len(ids) == 0 {
 		ids = soleUncoveredShippedItemIDs(order, covered)
 	}
+	cand := map[uint64]struct{}{}
+	for _, id := range ids {
+		cand[id] = struct{}{}
+	}
+	if expressOwnedByOtherAuthoritative(order, expressNo, cand) {
+		return nil
+	}
+	ids = filterItemsCompatibleWithExpress(order, expressNo, ids)
+	ids = filterItemsWithoutOtherAuthoritativeExpress(order, expressNo, ids)
 	out := make([]resolvedShipLine, 0, len(ids))
 	for _, id := range ids {
 		if _, ok := covered[id]; ok {
