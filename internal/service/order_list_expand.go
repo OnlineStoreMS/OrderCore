@@ -32,7 +32,29 @@ func ExpandOrdersByPackages(list []model.Order) []model.Order {
 			out = append(out, row)
 			continue
 		}
+		// 先按包裹筛商品；有商品的包才拆行。全空时退回整单一行，避免「无效空包」占行。
+		type pkgRow struct {
+			pkg   model.OrderPackage
+			items []model.OrderItem
+		}
+		rows := make([]pkgRow, 0, len(pkgs))
 		for _, p := range pkgs {
+			items := filterItemsForPackage(o.Items, p)
+			if len(items) == 0 {
+				continue
+			}
+			rows = append(rows, pkgRow{pkg: p, items: items})
+		}
+		if len(rows) == 0 {
+			row := o
+			if row.ListRowKey == "" {
+				row.ListRowKey = fmt.Sprintf("%d", o.ID)
+			}
+			out = append(out, row)
+			continue
+		}
+		for _, pr := range rows {
+			p := pr.pkg
 			row := o
 			sys := strings.TrimSpace(p.PlatformSysTid)
 			row.PlatformSysTid = sys
@@ -40,17 +62,11 @@ func ExpandOrdersByPackages(list []model.Order) []model.Order {
 			if fen := strings.TrimSpace(p.FenFaRemark); fen != "" {
 				row.FenFaRemark = fen
 			}
-			if pr := strings.TrimSpace(p.PrinterRemark); pr != "" {
-				row.PrinterRemark = pr
+			if printer := strings.TrimSpace(p.PrinterRemark); printer != "" {
+				row.PrinterRemark = printer
 			}
 			row.Packages = []model.OrderPackage{p}
-			items := filterItemsForPackage(o.Items, p)
-			if len(items) > 0 {
-				row.Items = items
-			} else {
-				// 未绑包商品时仍展示空行商品，避免整单混入
-				row.Items = nil
-			}
+			row.Items = pr.items
 			applyPackageRowHeader(&row, p, row.Items)
 			out = append(out, row)
 		}

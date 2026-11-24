@@ -148,6 +148,27 @@ func TestExpandOrdersByPackagesSingle(t *testing.T) {
 	}
 }
 
+func TestExpandOrdersByPackagesSkipsEmptyPkg(t *testing.T) {
+	list := []model.Order{{
+		ID: 7021, OrderNo: "OC202611110046",
+		Packages: []model.OrderPackage{
+			{ID: 3130, PlatformSysTid: "empty-sys", IsPrimary: true},
+			{ID: 3131, PlatformSysTid: "goods-sys", IsPrimary: false},
+		},
+		Items: []model.OrderItem{
+			{ID: 1, PackageID: 3131, ProductName: "A", Quantity: 1},
+			{ID: 2, PackageID: 3131, ProductName: "B", Quantity: 1},
+		},
+	}}
+	out := ExpandOrdersByPackages(list)
+	if len(out) != 1 {
+		t.Fatalf("len=%d want 1 (skip empty pkg)", len(out))
+	}
+	if out[0].PlatformSysTid != "goods-sys" || len(out[0].Items) != 2 {
+		t.Fatalf("row sys=%s items=%d", out[0].PlatformSysTid, len(out[0].Items))
+	}
+}
+
 func TestExpandOrdersByAllocGroupsPartial(t *testing.T) {
 	list := []model.Order{{
 		ID:      100,
